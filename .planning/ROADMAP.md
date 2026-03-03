@@ -44,7 +44,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. Named anchor positions persist across restarts and are updated atomically with the event writes they track
   5. Historical backfill over a large range completes in chunked pages without loading all events into memory at once
 **Plans**: 2 plans
-  - [ ] 02-01-PLAN.md — Storage trait, types, SQLite schema, SqliteStorage and InMemoryStorage implementations
+  - [x] 02-01-PLAN.md — Storage trait, types, SQLite schema, SqliteStorage and InMemoryStorage implementations
   - [ ] 02-02-PLAN.md — Engine coordinator, batch event processing, snapshot triggering, recovery pipeline
 
 ### Phase 3: Live Subscriptions and Reorg Safety
@@ -78,6 +78,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
-| 2. Persistence and Recovery | 0/2 | Planned | - |
+| 2. Persistence and Recovery | 1/2 | In progress | - |
 | 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |

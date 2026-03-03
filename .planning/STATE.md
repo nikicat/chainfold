@@ -5,33 +5,34 @@
 See: .planning/PROJECT.md (updated 2026-03-02)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 1 — Foundations
+**Current focus:** Phase 2 — Persistence and Recovery
 
 ## Current Position
 
-Phase: 1 of 4 (Foundations)
-Plan: 2 of 2 in current phase
-Status: Phase complete — all plans finished
-Last activity: 2026-03-03 — Plan 02 complete
+Phase: 2 of 4 (Persistence and Recovery)
+Plan: 1 of 4 in current phase
+Status: In progress — Plan 01 complete
+Last activity: 2026-03-03 — Plan 02-01 complete (Storage trait + SQLite/InMemory implementations)
 
-Progress: [██░░░░░░░░] 20%
+Progress: [███░░░░░░░] 30%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 13min
-- Total execution time: 0.43 hours
+- Total plans completed: 3
+- Average duration: 11min
+- Total execution time: 0.54 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-foundations | 2 | 26min | 13min |
+| 02-persistence-and-recovery | 1 | 6min | 6min |
 
 **Recent Trend:**
-- Last 5 plans: 11min, 15min
-- Trend: slight increase
+- Last 5 plans: 11min, 15min, 6min
+- Trend: fast (SQLite plan was straightforward)
 
 *Updated after each plan completion*
 
@@ -52,6 +53,9 @@ Recent decisions affecting current work:
 - 01-02: apply() borrows event (streaming); apply_and_accumulate() owns event (history) — no Clone bound on E needed in either case
 - 01-02: watch::send() error on no-receivers is intentionally ignored — ReducerCore can outlive subscribers
 - 01-02: events_in_range() is O(n) linear scan in Phase 1; Phase 2 replaces with SQLite B-tree index
+- 02-01: rusqlite_migration upgraded from 1.3 to 2.0 — version conflict with rusqlite 0.34 (both link sqlite3); API identical
+- 02-01: Mutex<Connection> for SqliteStorage Sync — rusqlite Connection is not Sync; Mutex is standard pattern with no hot-path overhead
+- 02-01: Storage trait is fully sync; async callers bridge via tokio::task::spawn_blocking per locked decision
 
 ### Pending Todos
 
@@ -65,7 +69,7 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-03T02:20:00Z
-Stopped at: Completed 01-foundations/01-02-PLAN.md — StateMachine trait, ReducerCore, 35 tests all passing, all Phase 1 CORE criteria proven
-Resume file: .planning/phases/02-storage/02-01-PLAN.md (next phase)
+Last session: 2026-03-03T14:18:21Z
+Stopped at: Completed 02-persistence-and-recovery/02-01-PLAN.md — Storage trait, SqliteStorage (WAL+dedup+coverage merge), InMemoryStorage test double, 40 tests all passing
+Resume file: .planning/phases/02-persistence-and-recovery/02-02-PLAN.md (coordinator and recovery pipeline)
 Resume command: /gsd:execute-phase 2

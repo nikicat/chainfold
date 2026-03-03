@@ -20,16 +20,16 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **INGEST-01**: Library consumes live events from an EventSource subscription and applies them to state in real-time
 - [ ] **INGEST-02**: Library fetches historical events via EventSource in chunked range queries respecting RPC provider limits
 - [ ] **INGEST-03**: Library stitches the gap between historical backfill endpoint and live subscription start without missing or duplicating events
-- [ ] **INGEST-04**: Library deduplicates events by (source, cursor) so overlapping backfill and subscription windows don't corrupt state
+- [x] **INGEST-04**: Library deduplicates events by (source, cursor) so overlapping backfill and subscription windows don't corrupt state
 - [ ] **INGEST-05**: Hot path is in-process: events flow from source through Apply to callbacks without IPC or serialization on the critical path
 
 ### Persistence & Recovery
 
-- [ ] **PERSIST-01**: Library persists events, snapshots, anchors, and coverage ranges in SQLite with WAL mode
-- [ ] **PERSIST-02**: Library tracks which cursor ranges are fully cached per source (coverage table)
+- [x] **PERSIST-01**: Library persists events, snapshots, anchors, and coverage ranges in SQLite with WAL mode
+- [x] **PERSIST-02**: Library tracks which cursor ranges are fully cached per source (coverage table)
 - [ ] **PERSIST-03**: Library recovers from crash: load last snapshot, replay cached events, catch up via FetchEvents, switch to live
 - [ ] **PERSIST-04**: Library creates periodic state snapshots (client-owned serialization) to bound replay cost
-- [ ] **PERSIST-05**: Library maintains named anchor positions (persistent cursors) updated atomically with event processing
+- [x] **PERSIST-05**: Library maintains named anchor positions (persistent cursors) updated atomically with event processing
 - [ ] **PERSIST-06**: Library selects cheapest reconstruction path for historical queries: cached-only replay (0 RPC), partial gap fetch (1 RPC), or direct FetchState (1 RPC)
 
 ### Chain Safety
@@ -101,13 +101,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INGEST-01 | Phase 3 | Pending |
 | INGEST-02 | Phase 2 | Pending |
 | INGEST-03 | Phase 2 | Pending |
-| INGEST-04 | Phase 2 | Pending |
+| INGEST-04 | Phase 2 | Complete (02-01) |
 | INGEST-05 | Phase 3 | Pending |
-| PERSIST-01 | Phase 2 | Pending |
-| PERSIST-02 | Phase 2 | Pending |
+| PERSIST-01 | Phase 2 | Complete (02-01) |
+| PERSIST-02 | Phase 2 | Complete (02-01) |
 | PERSIST-03 | Phase 2 | Pending |
 | PERSIST-04 | Phase 2 | Pending |
-| PERSIST-05 | Phase 2 | Pending |
+| PERSIST-05 | Phase 2 | Complete (02-01) |
 | PERSIST-06 | Phase 4 | Pending |
 | SAFETY-01 | Phase 3 | Pending |
 | SAFETY-02 | Phase 3 | Pending |
