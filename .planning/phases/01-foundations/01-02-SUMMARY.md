@@ -131,6 +131,16 @@ None - no external service configuration required. The library is pure Rust with
 - ReducerCore.events Vec is the explicit Phase 2 replacement target — tagged in code comment
 - Reminder: Phase 2 snapshot serialization must use `postcard` (bincode tombstoned Dec 2025)
 
+## Self-Check: PASSED
+
+- `/home/nb/src/chainfold/src/machine.rs` — FOUND
+- `/home/nb/src/chainfold/tests/reducer_tests.rs` — FOUND
+- `/home/nb/src/chainfold/tests/integration_tests.rs` — FOUND
+- `/home/nb/src/chainfold/.planning/phases/01-foundations/01-02-SUMMARY.md` — FOUND
+- Commit `2c1bd0a` (TDD RED) — FOUND
+- Commit `847d776` (GREEN impl) — FOUND
+- Commit `007d409` (integration tests) — FOUND
+
 ---
 *Phase: 01-foundations*
 *Completed: 2026-03-03*
