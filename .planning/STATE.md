@@ -10,27 +10,27 @@ See: .planning/PROJECT.md (updated 2026-03-02)
 ## Current Position
 
 Phase: 1 of 4 (Foundations)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-03-03 — Roadmap created
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-03-03 — Plan 01 complete
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 10%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: —
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 11min
+- Total execution time: 0.18 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01-foundations | 1 | 11min | 11min |
 
 **Recent Trend:**
-- Last 5 plans: —
+- Last 5 plans: 11min
 - Trend: —
 
 *Updated after each plan completion*
@@ -45,20 +45,24 @@ Recent decisions affecting current work:
 - Pre-roadmap: Rust + alloy for EVM; rusqlite (WAL) for persistence; bincode v2 for snapshots; tokio for async
 - Pre-roadmap: Reorg detection notifies client only — no auto-rollback
 - Pre-roadmap: One SQLite file per app process; client owns chain connections via EventSource
+- 01-01: async-trait chosen over trait_variant for Phase 1 EventSource — simpler ergonomics; migration to trait_variant deferred to Phase 3 hot path optimization
+- 01-01: CexCursor Ord implemented manually (not derived) to make seq_id-only ordering invariant explicit and refactor-proof
+- 01-01: Event<C, E> with C first — more constrained type first matches alloy convention and improves inference
+- 01-01: bincode is DEAD (tombstone release Dec 2025); Phase 2 snapshots must use postcard instead
 
 ### Pending Todos
 
-None yet.
+None.
 
 ### Blockers/Concerns
 
-- Phase 2: Verify bincode v2 has left RC before finalizing snapshot serialization choice
-- Phase 2: Decide snapshot schema evolution strategy before finalizing SQLite schema (bincode for speed vs serde_json for forward compatibility)
+- Phase 2: bincode confirmed dead — use postcard for snapshot serialization (postcard 1.1.3, actively maintained, serde-compatible)
+- Phase 2: Decide snapshot schema evolution strategy before finalizing SQLite schema (postcard for speed vs serde_json for forward compatibility)
 - Phase 4: CEX adapter (Phase v2 scope) needs per-exchange API research before implementation; Phase 4 PoC is EVM only
 
 ## Session Continuity
 
-Last session: 2026-03-03
-Stopped at: Phase 1 context gathered, plan-phase initialized — ready to research + plan
-Resume file: .planning/phases/01-foundations/01-CONTEXT.md
-Resume command: /gsd:plan-phase 1
+Last session: 2026-03-03T02:02:26Z
+Stopped at: Completed 01-foundations/01-01-PLAN.md — cursor types, Event envelope, EventSource trait all implemented and tested
+Resume file: .planning/phases/01-foundations/01-02-PLAN.md
+Resume command: /gsd:execute-phase 1

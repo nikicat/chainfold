@@ -9,9 +9,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Core Abstraction
 
-- [ ] **CORE-01**: Library exposes a generic `EventSource` trait abstracting over EVM, Bitcoin, and CEX ordering schemes (blockNum+logIndex, blockHeight+txIndex, timestamp+seqId)
+- [x] **CORE-01**: Library exposes a generic `EventSource` trait abstracting over EVM, Bitcoin, and CEX ordering schemes (blockNum+logIndex, blockHeight+txIndex, timestamp+seqId)
 - [ ] **CORE-02**: Library exposes a `StateMachine` trait where client provides FetchState(at cursor), FetchEvents(from, to cursor), and Apply(state, event) as a pure reducer
-- [ ] **CORE-03**: Cursor types implement `Ord + Clone + Serialize + Deserialize` enabling generic ordering across all source types
+- [x] **CORE-03**: Cursor types implement `Ord + Clone + Serialize + Deserialize` enabling generic ordering across all source types
 - [ ] **CORE-04**: Library supports reduced state — events fold into a compact in-memory value (e.g., balance, pool reserves)
 - [ ] **CORE-05**: Library supports accumulated state — events stored on disk, accessed via cursors and anchors (e.g., transfer history)
 
@@ -93,9 +93,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CORE-01 | Phase 1 | Pending |
+| CORE-01 | Phase 1 | Complete (01-01) |
 | CORE-02 | Phase 1 | Pending |
-| CORE-03 | Phase 1 | Pending |
+| CORE-03 | Phase 1 | Complete (01-01) |
 | CORE-04 | Phase 1 | Pending |
 | CORE-05 | Phase 1 | Pending |
 | INGEST-01 | Phase 3 | Pending |
@@ -125,4 +125,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-03-03*
-*Last updated: 2026-03-03 after roadmap creation*
+*Last updated: 2026-03-03 after 01-01 execution (CORE-01, CORE-03 completed)*
