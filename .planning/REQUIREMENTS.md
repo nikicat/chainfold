@@ -42,7 +42,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **QUERY-01**: Library exposes `Current() → S` returning live-tracked state at chain tip
 - [ ] **QUERY-02**: Library exposes `At(cursor) → S` returning historical state via cheapest reconstruction path
-- [ ] **QUERY-03**: Library exposes `Range(from, to) → Iterator<S>` for materialized state across a range with lightweight cursor-based iteration
+- [ ] **QUERY-03**: Library exposes `Range(from, to) → Iterator<S>` for materialized state across a cursor range with lightweight cursor-based iteration
 - [ ] **QUERY-04**: Library exposes `OnChange(callback)` for live state change notifications
 
 ### Proof of Concept
@@ -93,36 +93,36 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CORE-01 | — | Pending |
-| CORE-02 | — | Pending |
-| CORE-03 | — | Pending |
-| CORE-04 | — | Pending |
-| CORE-05 | — | Pending |
-| INGEST-01 | — | Pending |
-| INGEST-02 | — | Pending |
-| INGEST-03 | — | Pending |
-| INGEST-04 | — | Pending |
-| INGEST-05 | — | Pending |
-| PERSIST-01 | — | Pending |
-| PERSIST-02 | — | Pending |
-| PERSIST-03 | — | Pending |
-| PERSIST-04 | — | Pending |
-| PERSIST-05 | — | Pending |
-| PERSIST-06 | — | Pending |
-| SAFETY-01 | — | Pending |
-| SAFETY-02 | — | Pending |
-| SAFETY-03 | — | Pending |
-| QUERY-01 | — | Pending |
-| QUERY-02 | — | Pending |
-| QUERY-03 | — | Pending |
-| QUERY-04 | — | Pending |
-| POC-01 | — | Pending |
+| CORE-01 | Phase 1 | Pending |
+| CORE-02 | Phase 1 | Pending |
+| CORE-03 | Phase 1 | Pending |
+| CORE-04 | Phase 1 | Pending |
+| CORE-05 | Phase 1 | Pending |
+| INGEST-01 | Phase 3 | Pending |
+| INGEST-02 | Phase 2 | Pending |
+| INGEST-03 | Phase 2 | Pending |
+| INGEST-04 | Phase 2 | Pending |
+| INGEST-05 | Phase 3 | Pending |
+| PERSIST-01 | Phase 2 | Pending |
+| PERSIST-02 | Phase 2 | Pending |
+| PERSIST-03 | Phase 2 | Pending |
+| PERSIST-04 | Phase 2 | Pending |
+| PERSIST-05 | Phase 2 | Pending |
+| PERSIST-06 | Phase 4 | Pending |
+| SAFETY-01 | Phase 3 | Pending |
+| SAFETY-02 | Phase 3 | Pending |
+| SAFETY-03 | Phase 3 | Pending |
+| QUERY-01 | Phase 4 | Pending |
+| QUERY-02 | Phase 4 | Pending |
+| QUERY-03 | Phase 4 | Pending |
+| QUERY-04 | Phase 4 | Pending |
+| POC-01 | Phase 4 | Pending |
 
 **Coverage:**
 - v1 requirements: 24 total
-- Mapped to phases: 0
-- Unmapped: 24 ⚠️
+- Mapped to phases: 24
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-03*
-*Last updated: 2026-03-03 after initial definition*
+*Last updated: 2026-03-03 after roadmap creation*
