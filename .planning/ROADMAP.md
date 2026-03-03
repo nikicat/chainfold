@@ -29,7 +29,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Cursors from two different positions can be compared with `Ord` and serialized round-trip without loss
   4. An in-memory reducer accumulates events correctly in the order they are applied, producing a deterministic final state verifiable by a unit test
   5. The library compiles with the generic type parameter `C: ChainCursor` propagated through the type system without requiring runtime dispatch
-**Plans**: TBD
+**Plans**: 2 plans
+  - [ ] 01-01-PLAN.md — Project scaffold, cursor types, Event envelope, EventSource trait
+  - [ ] 01-02-PLAN.md — StateMachine trait, ReducerCore, integration tests
 
 ### Phase 2: Persistence and Recovery
 **Goal**: The library survives process restarts — it persists events and snapshots to SQLite, tracks which cursor ranges are cached, and executes the full cold-start recovery pipeline without issuing redundant RPC calls
@@ -73,7 +75,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundations | 0/TBD | Not started | - |
+| 1. Foundations | 0/2 | Not started | - |
 | 2. Persistence and Recovery | 0/TBD | Not started | - |
 | 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |
