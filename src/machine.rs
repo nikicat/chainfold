@@ -65,6 +65,14 @@ impl<SM: StateMachine> ReducerCore<SM> {
         (core, receiver)
     }
 
+    /// Replace the current state with the given value, broadcasting to all watch receivers.
+    ///
+    /// Used by the recovery pipeline to restore state from a loaded snapshot.
+    /// All existing watch receivers will see the new state immediately.
+    pub fn reset_state(&mut self, state: SM::State) {
+        let _ = self.sender.send(state);
+    }
+
     /// Apply an event to advance state. Borrows the event — caller retains ownership.
     ///
     /// The new state is sent to all watch receivers immediately.

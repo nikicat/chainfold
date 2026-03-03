@@ -12,6 +12,7 @@ thiserror = "2"
 futures-core = "0.3"
 rusqlite = { version = "0.34", features = ["bundled"] }
 rusqlite_migration = "2"
+postcard = { version = "1", features = ["alloc"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
