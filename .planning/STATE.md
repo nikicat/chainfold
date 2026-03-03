@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-03-02)
 ## Current Position
 
 Phase: 1 of 4 (Foundations)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-03-03 — Plan 01 complete
+Plan: 2 of 2 in current phase
+Status: Phase complete — all plans finished
+Last activity: 2026-03-03 — Plan 02 complete
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 11min
-- Total execution time: 0.18 hours
+- Total plans completed: 2
+- Average duration: 13min
+- Total execution time: 0.43 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-foundations | 1 | 11min | 11min |
+| 01-foundations | 2 | 26min | 13min |
 
 **Recent Trend:**
-- Last 5 plans: 11min
-- Trend: —
+- Last 5 plans: 11min, 15min
+- Trend: slight increase
 
 *Updated after each plan completion*
 
@@ -49,6 +49,9 @@ Recent decisions affecting current work:
 - 01-01: CexCursor Ord implemented manually (not derived) to make seq_id-only ordering invariant explicit and refactor-proof
 - 01-01: Event<C, E> with C first — more constrained type first matches alloy convention and improves inference
 - 01-01: bincode is DEAD (tombstone release Dec 2025); Phase 2 snapshots must use postcard instead
+- 01-02: apply() borrows event (streaming); apply_and_accumulate() owns event (history) — no Clone bound on E needed in either case
+- 01-02: watch::send() error on no-receivers is intentionally ignored — ReducerCore can outlive subscribers
+- 01-02: events_in_range() is O(n) linear scan in Phase 1; Phase 2 replaces with SQLite B-tree index
 
 ### Pending Todos
 
@@ -62,7 +65,7 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-03T02:02:26Z
-Stopped at: Completed 01-foundations/01-01-PLAN.md — cursor types, Event envelope, EventSource trait all implemented and tested
-Resume file: .planning/phases/01-foundations/01-02-PLAN.md
-Resume command: /gsd:execute-phase 1
+Last session: 2026-03-03T02:20:00Z
+Stopped at: Completed 01-foundations/01-02-PLAN.md — StateMachine trait, ReducerCore, 35 tests all passing, all Phase 1 CORE criteria proven
+Resume file: .planning/phases/02-storage/02-01-PLAN.md (next phase)
+Resume command: /gsd:execute-phase 2

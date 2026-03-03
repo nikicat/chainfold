@@ -12,7 +12,7 @@ Chainfold is built in four phases that follow the hard dependency order dictated
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundations** - Cursor types, EventSource/StateMachine traits, in-memory reducer — the type system everything else builds on
+- [x] **Phase 1: Foundations** - Cursor types, EventSource/StateMachine traits, in-memory reducer — the type system everything else builds on
 - [ ] **Phase 2: Persistence and Recovery** - SQLite schema, coverage tracking, crash recovery pipeline, historical backfill, gap stitching
 - [ ] **Phase 3: Live Subscriptions and Reorg Safety** - Live event delivery hot path, WebSocket reconnection, reorg detection and notification
 - [ ] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo
@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. The library compiles with the generic type parameter `C: ChainCursor` propagated through the type system without requiring runtime dispatch
 **Plans**: 2 plans
   - [x] 01-01-PLAN.md — Project scaffold, cursor types, Event envelope, EventSource trait
-  - [ ] 01-02-PLAN.md — StateMachine trait, ReducerCore, integration tests
+  - [x] 01-02-PLAN.md — StateMachine trait, ReducerCore, integration tests
 
 ### Phase 2: Persistence and Recovery
 **Goal**: The library survives process restarts — it persists events and snapshots to SQLite, tracks which cursor ranges are cached, and executes the full cold-start recovery pipeline without issuing redundant RPC calls
@@ -75,7 +75,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundations | 1/2 | In progress | - |
+| 1. Foundations | 2/2 | Complete | 2026-03-03 |
 | 2. Persistence and Recovery | 0/TBD | Not started | - |
 | 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |
