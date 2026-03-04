@@ -254,14 +254,20 @@ where
     fn create_snapshot(
         &mut self,
         cursor_major: i64,
-        cursor_minor: i64,
+        _cursor_minor: i64,
     ) -> Result<(), S::Error> {
         let state = self.state();
         let payload = self.codec.encode_state(&state);
+        // Snapshot cursor = (last_applied_major + 1, 0).
+        //
+        // Semantics: the snapshot cursor is the NEXT event cursor to replay — i.e., recovery
+        // replays events from [snapshot_cursor, cached_tip) inclusive. By pointing past the
+        // last applied event, recovery will not re-apply the event already captured in the
+        // snapshot payload.
         let snapshot = Snapshot {
             source_id: self.config.source_id.clone(),
-            cursor_major,
-            cursor_minor,
+            cursor_major: cursor_major + 1,
+            cursor_minor: 0,
             payload,
             created_at: current_unix_epoch(),
         };

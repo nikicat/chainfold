@@ -69,19 +69,23 @@ impl<SM: StateMachine> ReducerCore<SM> {
     ///
     /// Used by the recovery pipeline to restore state from a loaded snapshot.
     /// All existing watch receivers will see the new state immediately.
+    /// Uses `send_replace` to ensure the stored value is always updated,
+    /// even when all receivers have been dropped.
     pub fn reset_state(&mut self, state: SM::State) {
-        let _ = self.sender.send(state);
+        self.sender.send_replace(state);
     }
 
     /// Apply an event to advance state. Borrows the event — caller retains ownership.
     ///
     /// The new state is sent to all watch receivers immediately.
+    /// Uses `send_modify` instead of `send` to ensure the stored value is always updated,
+    /// even when all receivers have been dropped. `send()` discards the value on no-receivers,
+    /// which would cause `state()` to return stale values.
     pub fn apply(&mut self, event: &Event<SM::Cursor, SM::Event>) {
-        let current = self.sender.borrow().clone();
-        let next = self.sm.apply(current, event);
-        // send() only fails if all receivers are dropped; we ignore that case
-        // since the core can outlive individual subscribers.
-        let _ = self.sender.send(next);
+        let sm = Arc::clone(&self.sm);
+        self.sender.send_modify(|state| {
+            *state = sm.apply(state.clone(), event);
+        });
     }
 
     /// Apply an event and store it in the accumulated event log.

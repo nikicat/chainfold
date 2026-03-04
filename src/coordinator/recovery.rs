@@ -161,7 +161,10 @@ where
         return Ok(None);
     }
 
-    // Fetch events in range [from_cursor, tip)
+    // Fetch events in range [from_cursor, tip).
+    // The snapshot cursor is the cursor of the NEXT event to replay (exclusive start).
+    // Engine-generated snapshots record cursor = (last_applied_major + 1, 0) so replay
+    // begins at the first un-applied event. Inclusive [from_cursor, tip) is correct.
     let stored_events = engine
         .storage()
         .events_in_range(&source_id, from_cursor, tip)
@@ -230,13 +233,27 @@ where
             .process_events(&chunk)
             .map_err(|e| RecoveryError::Storage(Box::new(e)))?;
 
-        // Next iteration starts just after the last fetched event
-        current_start = (last_tuple.0, last_tuple.1 + 1);
+        // Next iteration starts just after the last fetched event.
+        // Increment major by 1 (not minor) to ensure the new cursor is strictly greater
+        // than the last event's cursor regardless of minor's semantics in the codec.
+        current_start = (last_tuple.0 + 1, 0);
 
         if current_start >= live_tip_tuple {
             break; // caught up
         }
     }
+
+    // After completing the gap fetch, explicitly record coverage up to live_tip.
+    // This ensures the coverage table reflects that we have fetched up to the live
+    // tip even if the last chunk ended before live_tip (i.e., no events in that tail).
+    // Use (live_tip_major, live_tip_minor + 1) as the exclusive end — consistent with
+    // how process_events records coverage via (last_minor + 1).
+    let source_id = engine.source_id().to_string();
+    let live_tip_end = (live_tip_tuple.0, live_tip_tuple.1 + 1);
+    engine
+        .storage()
+        .add_coverage(&source_id, gap_start, live_tip_end)
+        .map_err(|e| RecoveryError::Storage(Box::new(e)))?;
 
     Ok(())
 }

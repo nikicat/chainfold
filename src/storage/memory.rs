@@ -42,14 +42,20 @@ struct Inner {
 // InMemoryStorage
 // ============================================================
 
+/// In-memory storage backed by an `Arc<Mutex<Inner>>`.
+///
+/// Cloning produces a new handle to the same underlying state — this is intentional
+/// and matches how the recovery pipeline tests need to share storage between an engine
+/// instance and the test harness for inspection.
+#[derive(Clone)]
 pub struct InMemoryStorage {
-    inner: Mutex<Inner>,
+    inner: std::sync::Arc<Mutex<Inner>>,
 }
 
 impl InMemoryStorage {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Inner::default()),
+            inner: std::sync::Arc::new(Mutex::new(Inner::default())),
         }
     }
 }
