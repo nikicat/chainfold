@@ -10,29 +10,29 @@ See: .planning/PROJECT.md (updated 2026-03-02)
 ## Current Position
 
 Phase: 2 of 4 (Persistence and Recovery)
-Plan: 1 of 4 in current phase
-Status: In progress — Plan 01 complete
-Last activity: 2026-03-03 — Plan 02-01 complete (Storage trait + SQLite/InMemory implementations)
+Plan: 2 of 4 in current phase
+Status: In progress — Plan 02 complete
+Last activity: 2026-03-04 — Plan 02-02 complete (Engine coordinator + recovery pipeline, 18 tests all passing)
 
-Progress: [███░░░░░░░] 30%
+Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 11min
-- Total execution time: 0.54 hours
+- Total plans completed: 4
+- Average duration: 16min
+- Total execution time: 1.1 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-foundations | 2 | 26min | 13min |
-| 02-persistence-and-recovery | 1 | 6min | 6min |
+| 02-persistence-and-recovery | 2 | 41min | 20min |
 
 **Recent Trend:**
-- Last 5 plans: 11min, 15min, 6min
-- Trend: fast (SQLite plan was straightforward)
+- Last 5 plans: 11min, 15min, 6min, 35min
+- Trend: recovery pipeline required debugging snapshot cursor semantics
 
 *Updated after each plan completion*
 
@@ -51,11 +51,14 @@ Recent decisions affecting current work:
 - 01-01: Event<C, E> with C first — more constrained type first matches alloy convention and improves inference
 - 01-01: bincode is DEAD (tombstone release Dec 2025); Phase 2 snapshots must use postcard instead
 - 01-02: apply() borrows event (streaming); apply_and_accumulate() owns event (history) — no Clone bound on E needed in either case
-- 01-02: watch::send() error on no-receivers is intentionally ignored — ReducerCore can outlive subscribers
+- 01-02: watch::send() error on no-receivers is intentionally ignored — ReducerCore can outlive subscribers [SUPERSEDED by 02-02 decision]
 - 01-02: events_in_range() is O(n) linear scan in Phase 1; Phase 2 replaces with SQLite B-tree index
 - 02-01: rusqlite_migration upgraded from 1.3 to 2.0 — version conflict with rusqlite 0.34 (both link sqlite3); API identical
 - 02-01: Mutex<Connection> for SqliteStorage Sync — rusqlite Connection is not Sync; Mutex is standard pattern with no hot-path overhead
 - 02-01: Storage trait is fully sync; async callers bridge via tokio::task::spawn_blocking per locked decision
+- [Phase 02-02]: Snapshot cursor = (last_applied_major + 1, 0): replay is inclusive from snapshot cursor, so cursor must point PAST the last captured event to avoid double-application
+- [Phase 02-02]: send_modify and send_replace over watch::send(): send() silently discards value when no receivers; send_modify/send_replace always update internal state, required for engine.state() to work without subscriber
+- [Phase 02-02]: fetch_gap coverage: explicitly call add_coverage(gap_start, live_tip_end) after loop exits, to mark full range as fetched even when source has no events near live_tip
 
 ### Pending Todos
 
@@ -63,13 +66,13 @@ None.
 
 ### Blockers/Concerns
 
-- Phase 2: bincode confirmed dead — use postcard for snapshot serialization (postcard 1.1.3, actively maintained, serde-compatible)
-- Phase 2: Decide snapshot schema evolution strategy before finalizing SQLite schema (postcard for speed vs serde_json for forward compatibility)
+- Phase 2: postcard 1.1.3 added for snapshot serialization (bincode dead; resolved in 02-01)
+- Phase 2: Snapshot schema evolution strategy deferred — using raw bytes (postcard) with no versioning header for Phase 2; Phase 3 may add a version byte prefix if needed
 - Phase 4: CEX adapter (Phase v2 scope) needs per-exchange API research before implementation; Phase 4 PoC is EVM only
 
 ## Session Continuity
 
-Last session: 2026-03-03T14:18:21Z
-Stopped at: Completed 02-persistence-and-recovery/02-01-PLAN.md — Storage trait, SqliteStorage (WAL+dedup+coverage merge), InMemoryStorage test double, 40 tests all passing
-Resume file: .planning/phases/02-persistence-and-recovery/02-02-PLAN.md (coordinator and recovery pipeline)
+Last session: 2026-03-04T08:40:47Z
+Stopped at: Completed 02-persistence-and-recovery/02-02-PLAN.md — Engine coordinator, recovery pipeline (snapshot fallback + gap fetch), 18 tests all passing
+Resume file: .planning/phases/02-persistence-and-recovery/02-03-PLAN.md (next plan)
 Resume command: /gsd:execute-phase 2
