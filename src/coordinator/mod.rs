@@ -4,8 +4,11 @@ use crate::block::Block;
 use crate::cursor::ChainCursor;
 use crate::event::Event;
 use crate::machine::{ReducerCore, StateMachine};
+use crate::source::EventSource;
 use crate::storage::Storage;
+use futures_util::StreamExt;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 /// Bridges typed events/state to opaque byte representation for storage.
 ///
@@ -490,4 +493,172 @@ where
         self.replay_events(&events);
         Ok(())
     }
+
+    // ================================================================
+    // Live event loop
+    // ================================================================
+
+    /// Run the live event loop.
+    ///
+    /// Subscribes to the EventSource, processes blocks in micro-batches,
+    /// handles disconnection with exponential backoff, and fills gaps after
+    /// reconnection. Reorgs are detected and handled transparently via
+    /// process_or_reorg.
+    ///
+    /// Returns Ok(()) on graceful cancellation (CancellationToken triggered).
+    /// Returns Err on unrecoverable errors (storage failure, max retries exhausted).
+    ///
+    /// `source` is borrowed (not moved) so that reconnections can call `subscribe()`
+    /// again and gap fills can call `fetch_blocks` on the same source.
+    ///
+    /// Caller owns task lifecycle:
+    /// ```ignore
+    /// let token = CancellationToken::new();
+    /// let result = engine.run(&source, token.clone(), on_reorg, on_status).await;
+    /// ```
+    pub async fn run<ES>(
+        &mut self,
+        source: &ES,
+        cancel: CancellationToken,
+        mut on_reorg: impl FnMut(ReorgEvent),
+        mut on_status: impl FnMut(EngineStatus),
+    ) -> Result<(), EngineError>
+    where
+        ES: EventSource<Cursor = SM::Cursor, Event = SM::Event>,
+    {
+        let mut attempt: u32 = 0;
+
+        loop {
+            // Attempt to subscribe.
+            let stream = match source.subscribe(self.subscribe_from_height()?).await {
+                Ok(s) => {
+                    if attempt > 0 {
+                        on_status(EngineStatus::Reconnected);
+                    }
+                    attempt = 0;
+                    s
+                }
+                Err(e) => {
+                    if attempt >= self.config.max_retries {
+                        return Err(EngineError::ReconnectExhausted(
+                            attempt,
+                            Box::new(e),
+                        ));
+                    }
+                    on_status(EngineStatus::Reconnecting(attempt + 1));
+                    let delay = backoff_delay(&self.config, attempt);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    attempt += 1;
+                    continue;
+                }
+            };
+
+            // Micro-batch the stream with ready_chunks.
+            let mut batched = stream.ready_chunks(self.config.batch_size);
+
+            // Inner loop: drain batches until stream ends or cancellation.
+            let stream_result: Result<bool, EngineError> = loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        break Ok(true); // true = cancelled
+                    }
+                    batch = batched.next() => {
+                        match batch {
+                            None => {
+                                // Stream ended cleanly.
+                                break Ok(false); // false = stream ended (not cancelled)
+                            }
+                            Some(results) => {
+                                for result in results {
+                                    let block = result
+                                        .map_err(|e| EngineError::Source(Box::new(e)))?;
+
+                                    // Gap fill: if block arrived at a height ahead of our
+                                    // stored tip, fetch the missing blocks from source first.
+                                    let tip_h = self.current_tip_height()?;
+                                    if block.height > tip_h + 1 {
+                                        on_status(EngineStatus::GapFilling);
+                                        crate::coordinator::recovery::fetch_gap_blocks(
+                                            self,
+                                            source,
+                                            tip_h + 1,
+                                            block.height - 1,
+                                        )
+                                        .await
+                                        .map_err(EngineError::from_recovery)?;
+                                    }
+
+                                    self.process_or_reorg(&block, &mut on_reorg)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            match stream_result {
+                Ok(true) => return Ok(()), // Graceful cancellation.
+                Ok(false) => {
+                    // Stream ended — reconnect. attempt is already 0 from the last
+                    // successful subscribe, so no reset needed.
+                    on_status(EngineStatus::Disconnected);
+                    // Continue the outer loop to re-subscribe.
+                }
+                Err(e) => return Err(e), // Unrecoverable error.
+            }
+        }
+    }
+
+    /// Get the height to subscribe from: stored canonical tip height + 1, or 0.
+    fn subscribe_from_height(&self) -> Result<u64, EngineError> {
+        Ok(self.current_tip_height()? + 1)
+    }
+
+    /// Get the current canonical tip height, or 0 if no tip exists.
+    fn current_tip_height(&self) -> Result<u64, EngineError> {
+        let tip_hash = self
+            .storage
+            .get_canonical_tip(&self.config.source_id)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?;
+        match tip_hash {
+            None => Ok(0),
+            Some(hash) => {
+                let height = self
+                    .storage
+                    .get_block_height(&hash)
+                    .map_err(|e| EngineError::Storage(Box::new(e)))?
+                    .unwrap_or(0);
+                Ok(height)
+            }
+        }
+    }
+}
+
+impl EngineError {
+    /// Convert a RecoveryError to an EngineError.
+    fn from_recovery(e: crate::coordinator::recovery::RecoveryError) -> Self {
+        match e {
+            crate::coordinator::recovery::RecoveryError::Storage(e) => EngineError::Storage(e),
+            crate::coordinator::recovery::RecoveryError::Source(e) => EngineError::Source(e),
+            crate::coordinator::recovery::RecoveryError::DecodeState => EngineError::DecodeState,
+        }
+    }
+}
+
+/// Compute exponential backoff delay for reconnection attempts.
+///
+/// Delay = base * 2^attempt, capped at max. Uses saturating arithmetic to
+/// avoid overflow on large attempt counts.
+fn backoff_delay(config: &EngineConfig, attempt: u32) -> std::time::Duration {
+    let base = config.initial_delay_ms;
+    let max = config.max_delay_ms;
+    // Saturating left-shift: cap shift at 31 to stay within u64 range.
+    let shift = attempt.min(31);
+    let ms = base.saturating_mul(1u64 << shift).min(max);
+    std::time::Duration::from_millis(ms)
 }
