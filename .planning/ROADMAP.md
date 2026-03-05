@@ -61,7 +61,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. After a WebSocket disconnection, the library reconnects with exponential backoff, fetches any blocks missed during the outage, and resumes delivering events without duplicates or gaps
   3. When a chain reorganization occurs (canonical tip changes to a different branch), the library detects it via block hash / parent hash comparison, identifies the fork point, and re-derives state from the fork point on the new canonical chain — all transparently
   4. A client watching Current() sees the state silently update to reflect the new canonical chain. If the client was watching closely, they see a state not derived from the previous one (reorg visible). If they were watching infrequently, the reorg is invisible.
-**Plans**: TBD
+**Plans**: 3 plans (03-01 through 03-03)
+  - [x] 03-01-PLAN.md — Storage contracts (get_parent_hash, set_canonical_tip), new engine types (EngineError, ReorgEvent, EngineStatus), updated EngineConfig
+  - [ ] 03-02-PLAN.md — Reorg detection and canonical tip switching
+  - [ ] 03-03-PLAN.md — Live event loop with reconnection and backoff
 
 ### Phase 4: Query API and ERC20 PoC
 **Goal**: The library exposes a complete, ergonomic public API and the ERC20 balance tracker demonstrates that the entire stack works correctly end-to-end under restarts and reorgs
@@ -84,5 +87,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
 | 2. Block DAG Storage and Recovery | 4/4 | Complete   | 2026-03-05 |
-| 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
+| 3. Live Subscriptions and Reorg Safety | 1/3 | In progress | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |

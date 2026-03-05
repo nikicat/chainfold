@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-03-05)
 
 ## Current Position
 
-Phase: 2 of 4 (Block DAG Storage and Recovery) — COMPLETE
-Plan: 4 of 4 (02-04 complete — Recovery pipeline done)
-Status: Phase 2 complete. Ready for Phase 3 planning.
-Last activity: 2026-03-05 — 02-04 executed: Recovery pipeline with 8 tests (73 total passing)
+Phase: 3 of 4 (Live Subscriptions and Reorg Safety) — IN PROGRESS
+Plan: 1 of 3 (03-01 complete — Storage contracts and type foundations)
+Status: Phase 3 in progress. Plan 03-01 complete.
+Last activity: 2026-03-05 — 03-01 executed: Storage trait extended, new engine types defined, 89 tests passing
 
-Progress: [███████░░░] 62% (Phase 1 complete, Phase 2 complete)
+Progress: [████████░░] 70% (Phase 1 complete, Phase 2 complete, Phase 3 started)
 
 ## Architecture Revision (2026-03-05)
 
@@ -81,6 +81,9 @@ Recent decisions affecting current work:
 - **02-04: No fetch_state in recovery** — Engine created with initial state by caller; recovery uses that as genesis state; avoids needing a genesis_cursor concept
 - **02-04: Genesis sentinel [0u8;32] for full-chain replay** — collect_canonical_chain([0;32], tip) walks backward from tip, stops when parent==sentinel, genesis block IS included
 - **02-04: Gap advance by last_height+1** — fetch_gap_blocks advances by actual last block height+1, not block count; handles non-contiguous blocks correctly
+- **03-01: canonical_tip FK removed in schema v3** — set_canonical_tip must work before any blocks exist (reorg rollback case); FK was over-constraining; semantic integrity enforced by engine
+- **03-01: tokio-util 0.7 has no "sync" feature** — CancellationToken included by default; plan's feature spec was wrong
+- **03-01: EngineConfig::new() + pub fields** — constructor for ergonomic defaults, pub fields for explicit control; both modes valid
 
 ### Pending Todos
 
@@ -94,6 +97,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Completed 02-04-PLAN.md (Recovery pipeline: 8 new tests, 73 total passing, Phase 2 complete)
-Resume file: .planning/phases/03-live-subscription/ (next phase)
-Resume command: /gsd:execute-phase 03-live-subscription
+Stopped at: Completed 03-01-PLAN.md (Storage contracts: get_parent_hash, set_canonical_tip, EngineError, ReorgEvent, EngineStatus, 89 tests passing)
+Resume file: .planning/phases/03-live-subscriptions-and-reorg-safety/03-02-PLAN.md
+Resume command: /gsd:execute-phase 03-live-subscriptions-and-reorg-safety

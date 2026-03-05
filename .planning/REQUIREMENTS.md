@@ -103,14 +103,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INGEST-02 | Phase 2 | Pending (redesign) |
 | INGEST-03 | Phase 2 | Pending (redesign) |
 | INGEST-04 | Phase 2 | Pending (redesign) |
-| INGEST-05 | Phase 3 | Pending |
+| INGEST-05 | Phase 3 | In progress (03-01 storage contracts laid, 03-02/03-03 pending) |
 | PERSIST-01 | Phase 2 | Pending (redesign) |
 | PERSIST-02 | Phase 2 | Pending (redesign) |
 | PERSIST-03 | Phase 2 | Pending (redesign) |
 | PERSIST-04 | Phase 2 | Pending (redesign) |
 | PERSIST-05 | Phase 2 | Pending (redesign) |
 | PERSIST-06 | Phase 4 | Pending |
-| SAFETY-01 | Phase 3 | Pending |
+| SAFETY-01 | Phase 3 | In progress (03-01 storage contracts laid, 03-02 reorg detection pending) |
 | SAFETY-02 | Phase 3 | Pending |
 | SAFETY-03 | Phase 3 | Pending |
 | QUERY-01 | Phase 4 | Pending |
@@ -126,4 +126,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-03-03*
-*Last updated: 2026-03-05 — DAG architecture revision: PERSIST/INGEST requirements reworded for block DAG model, SAFETY-01/02 rewritten for transparent reorg handling, Phase 2 PERSIST/INGEST marked as pending redesign*
+*Last updated: 2026-03-05 — 03-01 complete: SAFETY-01 and INGEST-05 marked in progress (contracts laid, implementation continues in 03-02/03-03)*
