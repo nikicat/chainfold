@@ -527,3 +527,158 @@ fn test_sqlite_get_block_height() {
     let none = storage.get_block_height(&unknown).unwrap();
     assert_eq!(none, None);
 }
+
+// ============================================================
+// get_parent_hash (InMemoryStorage)
+// ============================================================
+
+#[test]
+fn test_get_parent_hash_known_block() {
+    let storage = InMemoryStorage::new();
+    let hash_a = make_block_hash(1);
+    let hash_b = make_block_hash(2);
+
+    // Chain: genesis <- A <- B
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+    storage.write_block("src1", &hash_b, &hash_a, 1, &[]).unwrap();
+
+    let parent_of_b = storage.get_parent_hash(&hash_b).expect("get_parent_hash");
+    assert_eq!(parent_of_b, Some(hash_a), "parent of B should be A");
+
+    let parent_of_a = storage.get_parent_hash(&hash_a).expect("get_parent_hash");
+    assert_eq!(parent_of_a, Some(GENESIS), "parent of A should be genesis sentinel");
+}
+
+#[test]
+fn test_get_parent_hash_unknown_block() {
+    let storage = InMemoryStorage::new();
+    let unknown = make_block_hash(99);
+
+    let result = storage.get_parent_hash(&unknown).expect("get_parent_hash");
+    assert_eq!(result, None, "unknown block should return None");
+}
+
+#[test]
+fn test_get_parent_hash_genesis_block() {
+    let storage = InMemoryStorage::new();
+    let hash_a = make_block_hash(1);
+
+    // Write a genesis block: parent is the all-zeros sentinel
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+
+    let parent = storage.get_parent_hash(&hash_a).expect("get_parent_hash");
+    assert_eq!(parent, Some(GENESIS), "genesis block parent should be Some([0u8; 32])");
+}
+
+// ============================================================
+// set_canonical_tip (InMemoryStorage)
+// ============================================================
+
+#[test]
+fn test_set_canonical_tip() {
+    let storage = InMemoryStorage::new();
+    let hash_a = make_block_hash(1);
+    let hash_b = make_block_hash(2);
+
+    // Write two blocks — tip advances to B automatically
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+    storage.write_block("src1", &hash_b, &hash_a, 1, &[]).unwrap();
+
+    // Explicitly roll canonical tip back to A
+    storage
+        .set_canonical_tip("src1", &hash_a)
+        .expect("set_canonical_tip");
+
+    let tip = storage.get_canonical_tip("src1").expect("get_canonical_tip");
+    assert_eq!(tip, Some(hash_a), "canonical tip should be A after explicit set");
+}
+
+#[test]
+fn test_set_canonical_tip_creates_new() {
+    let storage = InMemoryStorage::new();
+    // No blocks written yet — just set a tip directly
+    let hash_a = make_block_hash(1);
+
+    storage
+        .set_canonical_tip("src1", &hash_a)
+        .expect("set_canonical_tip should succeed even with no blocks");
+
+    let tip = storage.get_canonical_tip("src1").expect("get_canonical_tip");
+    assert_eq!(tip, Some(hash_a), "canonical tip should be the set hash");
+}
+
+// ============================================================
+// get_parent_hash (SqliteStorage)
+// ============================================================
+
+#[test]
+fn test_sqlite_get_parent_hash_known_block() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+    let hash_b = make_block_hash(2);
+
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+    storage.write_block("src1", &hash_b, &hash_a, 1, &[]).unwrap();
+
+    let parent_of_b = storage.get_parent_hash(&hash_b).expect("get_parent_hash");
+    assert_eq!(parent_of_b, Some(hash_a), "parent of B should be A");
+
+    let parent_of_a = storage.get_parent_hash(&hash_a).expect("get_parent_hash");
+    assert_eq!(parent_of_a, Some(GENESIS), "parent of A should be genesis sentinel");
+}
+
+#[test]
+fn test_sqlite_get_parent_hash_unknown_block() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let unknown = make_block_hash(99);
+
+    let result = storage.get_parent_hash(&unknown).expect("get_parent_hash");
+    assert_eq!(result, None, "unknown block should return None");
+}
+
+#[test]
+fn test_sqlite_get_parent_hash_genesis_block() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+
+    let parent = storage.get_parent_hash(&hash_a).expect("get_parent_hash");
+    assert_eq!(parent, Some(GENESIS), "genesis block parent should be Some([0u8; 32])");
+}
+
+// ============================================================
+// set_canonical_tip (SqliteStorage)
+// ============================================================
+
+#[test]
+fn test_sqlite_set_canonical_tip() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+    let hash_b = make_block_hash(2);
+
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+    storage.write_block("src1", &hash_b, &hash_a, 1, &[]).unwrap();
+
+    // Explicitly roll canonical tip back to A
+    storage
+        .set_canonical_tip("src1", &hash_a)
+        .expect("set_canonical_tip");
+
+    let tip = storage.get_canonical_tip("src1").expect("get_canonical_tip");
+    assert_eq!(tip, Some(hash_a), "canonical tip should be A after explicit set");
+}
+
+#[test]
+fn test_sqlite_set_canonical_tip_creates_new() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+
+    // No blocks written yet — set tip directly (insert case)
+    storage
+        .set_canonical_tip("src1", &hash_a)
+        .expect("set_canonical_tip should succeed even with no prior tip");
+
+    let tip = storage.get_canonical_tip("src1").expect("get_canonical_tip");
+    assert_eq!(tip, Some(hash_a), "canonical tip should be the set hash");
+}

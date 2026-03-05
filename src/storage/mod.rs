@@ -69,4 +69,18 @@ pub trait Storage: Send + Sync + 'static {
         &self,
         block_hash: &[u8; 32],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error>;
+
+    /// Get the parent hash of a block.
+    ///
+    /// Returns `Some(parent_hash)` if the block exists. For genesis blocks, the
+    /// parent is the all-zeros sentinel `[0u8; 32]` — this is still returned as
+    /// `Some([0u8; 32])`. Returns `None` only if the block is not in storage.
+    fn get_parent_hash(&self, block_hash: &[u8; 32]) -> Result<Option<[u8; 32]>, Self::Error>;
+
+    /// Explicitly set the canonical tip for a source to the given block hash.
+    ///
+    /// This is an upsert: overwrites the existing tip if one exists, or creates
+    /// the entry if no tip has been set yet. Used during reorg handling to update
+    /// the canonical tip without writing a new block.
+    fn set_canonical_tip(&self, source_id: &str, block_hash: &[u8; 32]) -> Result<(), Self::Error>;
 }

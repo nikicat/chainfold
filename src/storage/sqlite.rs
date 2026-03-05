@@ -299,4 +299,30 @@ impl Storage for SqliteStorage {
         }
         Ok(result)
     }
+
+    fn get_parent_hash(&self, block_hash: &[u8; 32]) -> Result<Option<[u8; 32]>, Self::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare_cached("SELECT parent_hash FROM blocks WHERE hash = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![&block_hash[..]], |row| {
+            let bytes: Vec<u8> = row.get(0)?;
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(arr)
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    fn set_canonical_tip(&self, source_id: &str, block_hash: &[u8; 32]) -> Result<(), Self::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO canonical_tip (source_id, block_hash) VALUES (?1, ?2)
+             ON CONFLICT(source_id) DO UPDATE SET block_hash = excluded.block_hash",
+            rusqlite::params![source_id, &block_hash[..]],
+        )?;
+        Ok(())
+    }
 }

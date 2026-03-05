@@ -219,4 +219,15 @@ impl Storage for InMemoryStorage {
             None => Ok(vec![]),
         }
     }
+
+    fn get_parent_hash(&self, block_hash: &[u8; 32]) -> Result<Option<[u8; 32]>, Self::Error> {
+        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
+        Ok(inner.blocks.get(block_hash).map(|b| b.parent_hash))
+    }
+
+    fn set_canonical_tip(&self, source_id: &str, block_hash: &[u8; 32]) -> Result<(), Self::Error> {
+        let mut inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
+        inner.canonical_tips.insert(source_id.to_string(), *block_hash);
+        Ok(())
+    }
 }

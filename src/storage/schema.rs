@@ -99,5 +99,23 @@ pub fn migrations() -> Migrations<'static> {
         );
         ",
         ),
+        // v3 — drop FK on canonical_tip.block_hash
+        //
+        // During reorg handling, set_canonical_tip() must be able to set the canonical
+        // tip to any block hash (including one being restored before the full chain is
+        // written). The FK constraint prevents this. Since canonical_tip is an index
+        // structure — not a source of truth — referential integrity is enforced
+        // semantically by the engine, not by the DB.
+        M::up(
+            "
+        CREATE TABLE canonical_tip_new (
+            source_id   TEXT    NOT NULL PRIMARY KEY,
+            block_hash  BLOB    NOT NULL
+        );
+        INSERT INTO canonical_tip_new SELECT source_id, block_hash FROM canonical_tip;
+        DROP TABLE canonical_tip;
+        ALTER TABLE canonical_tip_new RENAME TO canonical_tip;
+        ",
+        ),
     ])
 }
