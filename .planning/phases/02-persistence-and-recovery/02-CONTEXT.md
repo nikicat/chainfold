@@ -1,59 +1,75 @@
-# Phase 2: Persistence and Recovery - Context
+# Phase 2: Block DAG Storage and Recovery - Context
 
-**Gathered:** 2026-03-03
+**Gathered:** 2026-03-05
 **Status:** Ready for planning
 
 <domain>
 ## Phase Boundary
 
-SQLite-backed persistence for events, snapshots, anchors, and coverage ranges. The library survives process restarts: it persists state to SQLite, tracks which cursor ranges are cached, and executes the full cold-start recovery pipeline (load snapshot → replay cached events → catch up via FetchEvents → ready for live). No live subscriptions, no reorg handling, no query API — those are Phase 3+.
+SQLite-backed block DAG persistence. Blocks with parent hashes form a DAG (like git). Events belong to blocks. State snapshots keyed by block hash. The library tracks which block is the canonical tip per source, recovers from crash by replaying the canonical chain from the nearest snapshot, and fetches gap blocks from the source. No live subscriptions, no reorg handling, no query API — those are Phase 3+.
+
+**Architecture change (2026-03-05):** This phase was redesigned from a flat linear event store to a block DAG model. Old Phase 2 code (Storage trait, SqliteStorage, Engine, recovery pipeline) is replaced.
 
 </domain>
 
 <decisions>
 ## Implementation Decisions
 
+### Block type design
+- New `Block<C, E>` wrapper type — first-class concept holding block_hash, parent_hash, height, and `Vec<Event<C, E>>`
+- `block_hash` removed from `Event<C, E>` — it lives exclusively on `Block`. Events always exist within a Block context.
+- `EventSource` gains `fetch_blocks(from, to) → Vec<Block>` replacing `fetch_events`. `subscribe()` returns `Stream<Block>`. Block-oriented API throughout.
+- `StateMachine::apply(state, event)` unchanged — coordinator iterates `block.events` and calls apply for each. Client doesn't need to know about blocks. Pure reducer stays simple.
+
 ### SQLite schema design
-- Cursors stored as canonical (major, minor) INTEGER pair columns — enables native SQLite range queries and B-tree indexing. Each cursor type maps to its natural pair (block_number+log_index, height+tx_index, timestamp+seq_id).
-- Single shared database per app process with source_id discriminator column on every table. Aligns with PROJECT.md "one SQLite file per app" constraint.
-- Event payloads stored as opaque BLOB — client provides encode/decode (to_bytes/from_bytes trait). Library never interprets event contents. Consistent with snapshot pattern.
-- Coverage tracked as per-source interval list: (source_id, range_start_major, range_start_minor, range_end_major, range_end_minor). Adjacent intervals merged on insert. Supports non-contiguous cached regions from backfill + live subscription.
-- Deduplication enforced by UNIQUE constraint on (source_id, cursor_major, cursor_minor). INSERT OR IGNORE — duplicate inserts silently dropped at the database boundary.
+- Normalized schema: `blocks(hash, parent_hash, height, source_id)` + `events(block_hash, cursor, payload)` with foreign key to blocks. Clean relational model.
+- Single shared database per app process with source_id discriminator. Aligns with PROJECT.md "one SQLite file per app" constraint.
+- Explicit `canonical_tip(source_id, block_hash)` table — updated when new blocks extend the chain or when reorg changes the tip. Simple to query.
+- Event payloads stored as opaque BLOB — client provides encode/decode. Library never interprets event contents.
+- No coverage table — block existence in the blocks table IS coverage. Gap detection = walk canonical chain and find missing blocks.
+- No anchors table — canonical_tip is the only bookmark needed. Application-level bookmarks are not library concerns.
+- Block-level deduplication — if block_hash already exists in blocks table, skip all its events. Blocks always arrive atomically with all their events.
 
 ### Snapshot lifecycle
-- Snapshots triggered every N events (configurable). Predictable worst-case replay cost: at most N events to replay on recovery.
-- Snapshot format is client-owned opaque bytes — library stores/loads Vec<u8>, client picks their own serialization format. Library is format-agnostic.
-- All snapshots retained — never deleted. Supports Phase 4 At(cursor) historical queries. Pruning can be added later.
-- Snapshot writes are synchronous — block event processing until write completes. Simple, guarantees durability. Hot-path optimization deferred to Phase 3.
+- Snapshots keyed by block_hash: `snapshots(source_id, block_hash, payload)`. State at a block is deterministic regardless of which branch it's on.
+- Snapshots triggered every N blocks (configurable). Predictable worst-case replay cost.
+- Snapshot format is client-owned opaque bytes — library stores/loads Vec<u8>, client picks serialization format.
+- All snapshots retained — never deleted. Supports Phase 4 At(cursor) historical queries.
+- Snapshot writes are synchronous — block processing until write completes. Simple, guarantees durability.
 
 ### Recovery pipeline
-- On corrupt/undeserializable snapshot: fall back to next-oldest snapshot. Keep trying until one deserializes. If none work, fail with error — client handles (clear DB, provide migration, etc).
-- Gap fetching (catch-up) uses client-controlled pagination — EventSource::fetch_events called in a loop with advancing cursors. Page size is implicit in the EventSource implementation, which knows its RPC provider limits.
-- Anchor updates in the same SQLite transaction as the event batch writes they track. Either both succeed or neither does. Guarantees consistency on crash.
+- On crash recovery: read canonical tip → walk parent pointers back until a block with a snapshot is found → load snapshot → replay canonical chain forward to tip → fetch any gap blocks from source. Simple, deterministic.
+- On corrupt/undeserializable snapshot: fall back to next-oldest snapshot along the canonical chain. If none work, fail with error.
+- Gap fetching uses `EventSource::fetch_blocks()` — block-oriented, not event-oriented.
+
+### Codec simplification
+- Library handles block metadata serialization (hash, parent_hash, height) with fixed schema — not client-controlled.
+- Client provides encode/decode only for event payloads and state snapshots. Codec becomes simpler.
+- Cursor serialization for storage uses postcard (library-internal). Event and snapshot serialization is client-owned.
 
 ### Storage API surface
-- Storage defined as a trait with SQLite implementation. Enables in-memory mocks for testing the recovery pipeline without filesystem I/O.
-- External coordinator pattern: a new Engine/Pipeline type owns both ReducerCore and Storage. Coordinates event flow: receive → store → apply. ReducerCore stays pure (no storage awareness), unchanged from Phase 1.
-- Event writes batched — accumulate events in memory, flush to SQLite in a single transaction. Anchor update happens at flush time. Higher throughput, clear consistency boundary.
-- Storage trait methods are sync (matching rusqlite's native API). Coordinator handles spawn_blocking when calling from async context.
+- Storage defined as a trait with SQLite implementation. Enables in-memory mocks for testing.
+- External coordinator pattern: Engine owns ReducerCore + Storage. Coordinates: receive block → store block+events → apply events to state. ReducerCore stays pure.
+- Block writes are transactional — block row + all event rows in a single SQLite transaction.
+- Storage trait methods are sync (matching rusqlite's native API). Coordinator handles spawn_blocking for async context.
 
 ### Claude's Discretion
-- Exact SQLite table definitions and index choices
-- Batch size defaults and configuration mechanism
+- Exact SQLite table DDL and index choices
+- Block<C, E> struct layout details
 - Internal coordinator architecture (channels, task structure)
-- Coverage interval merge algorithm
-- Snapshot table structure (cursor reference, timestamp, size)
+- Batch size defaults and configuration mechanism
 - Error types for storage operations
+- How fetch_blocks pagination works internally
 
 </decisions>
 
 <specifics>
 ## Specific Ideas
 
-- Phase 1 decision: `events_in_range()` is O(n) linear scan on in-memory Vec — Phase 2 replaces with SQLite B-tree index lookup
-- Phase 1 decision: `apply_and_accumulate()` owns events for the Vec — coordinator pattern means this method may change or the coordinator handles storage separately
-- STATE.md flags: bincode is dead, use postcard for any library-internal serialization (cursor serialization for BLOB columns if needed). But event and snapshot serialization is now client-owned, so this mainly affects internal library storage (coverage ranges, anchors).
-- Snapshot serialization is client-owned opaque bytes — same pattern as events. Library stores both as BLOB without interpreting contents.
+- Old Phase 2 code (src/storage/, src/coordinator/) must be removed/replaced — it's built on the flat linear model
+- Phase 1 ReducerCore stays unchanged — coordinator wraps it, doesn't replace it
+- postcard for library-internal serialization (cursors in storage columns). bincode is dead.
+- Block DAG degenerates to linear chain for non-block sources (CEX) — but that's Phase 3+ concern, not Phase 2
 
 </specifics>
 
@@ -61,24 +77,26 @@ SQLite-backed persistence for events, snapshots, anchors, and coverage ranges. T
 ## Existing Code Insights
 
 ### Reusable Assets
-- `ChainCursor` trait (cursor/mod.rs): already requires `Serialize + DeserializeOwned` — ready for persistence
-- `EvmCursor`, `BtcCursor`, `CexCursor`: concrete cursor types with natural (major, minor) pairs
-- `Event<C, E>` envelope (event.rs): cursor + data + block_hash — needs serialization trait on E for persistence
-- `ReducerCore` (machine.rs): current in-memory state management — coordinator wraps this, doesn't replace it
-- `EventSource` trait (source.rs): `fetch_events(from, to)` and `fetch_state(at)` — used directly in recovery pipeline
+- `ChainCursor` trait (cursor/mod.rs): `Ord + Clone + Serialize + DeserializeOwned` — ready for persistence
+- `EvmCursor`, `BtcCursor`, `CexCursor`: concrete cursor types
+- `Event<C, E>` envelope (event.rs): cursor + data — block_hash to be removed, moves to Block
+- `ReducerCore` (machine.rs): in-memory state management — coordinator wraps this
+- `EventSource` trait (source.rs): needs `fetch_blocks` added, `fetch_events` replaced or deprecated
+- `tokio::sync::watch` for state distribution — coordinator publishes through ReducerCore
 
 ### Established Patterns
 - Opaque bytes for client data: `fetch_state` returns `Vec<u8>`, library stores without interpreting
-- `tokio::sync::watch` for state distribution — coordinator publishes through ReducerCore
-- `async-trait` for EventSource — coordinator calls fetch_events in the recovery loop
-- Infallible `apply()` — coordinator doesn't need error handling on the state transition path
+- `async-trait` for EventSource — coordinator calls fetch_blocks in recovery loop
+- Infallible `apply()` — coordinator iterates block events, no error handling on state transitions
+- `Codec` trait pattern from old Phase 2 — concept preserved but simplified for DAG model
 
 ### Integration Points
-- `ReducerCore::new()` stays unchanged — coordinator creates it with initial state from snapshot
-- `ReducerCore::apply()` and `apply_and_accumulate()` called by coordinator after storing events
-- `EventSource::fetch_events()` called by coordinator during gap catch-up
+- `ReducerCore::new()` unchanged — coordinator creates it with initial state from snapshot
+- `ReducerCore::apply()` called by coordinator for each event in a block
+- `EventSource::fetch_blocks()` (new) called during gap catch-up
 - `EventSource::fetch_state()` called during initial cold start when no snapshot exists
-- New `Storage` trait introduced — SQLite impl is the production backend, in-memory impl for tests
+- New `Storage` trait replacing old one — block-aware API instead of flat event API
+- Old storage/coordinator modules to be deleted and rewritten
 
 </code_context>
 
@@ -92,4 +110,4 @@ None — discussion stayed within phase scope
 ---
 
 *Phase: 02-persistence-and-recovery*
-*Context gathered: 2026-03-03*
+*Context gathered: 2026-03-05*
