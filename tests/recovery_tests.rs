@@ -198,10 +198,7 @@ fn make_engine(
 ) -> Engine<SumMachine, InMemoryStorage, SumCodec> {
     let sm = Arc::new(SumMachine);
     let (core, _rx) = ReducerCore::new(sm, 0u64);
-    let config = EngineConfig {
-        source_id: "test-source".to_string(),
-        snapshot_every_n,
-    };
+    let config = EngineConfig::new("test-source", snapshot_every_n);
     Engine::new(core, storage, SumCodec, config)
 }
 

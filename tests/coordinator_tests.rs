@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use chainfold::storage::InMemoryStorage;
 use chainfold::storage::Storage;
-use chainfold::{Block, Codec, Engine, EngineConfig, Event, ReducerCore, StateMachine};
+use chainfold::{Block, Codec, Engine, EngineConfig, EngineError, EngineStatus, ReorgEvent, Event, ReducerCore, StateMachine};
 
 // ============================================================
 // Test helpers: CounterMachine + TestCodec
@@ -103,10 +103,7 @@ fn make_engine(snapshot_every_n: usize) -> Engine<CounterMachine, InMemoryStorag
     let sm = Arc::new(CounterMachine);
     let (core, _rx) = ReducerCore::new(sm, 0u64);
     let storage = InMemoryStorage::new();
-    let config = EngineConfig {
-        source_id: "test-source".to_string(),
-        snapshot_every_n,
-    };
+    let config = EngineConfig::new("test-source", snapshot_every_n);
     Engine::new(core, storage, TestCodec, config)
 }
 
@@ -254,10 +251,7 @@ fn test_engine_state_and_subscribe() {
     let sm = Arc::new(CounterMachine);
     let (core, _rx) = ReducerCore::new(sm, 0u64);
     let storage = InMemoryStorage::new();
-    let config = EngineConfig {
-        source_id: "test-source".to_string(),
-        snapshot_every_n: 100,
-    };
+    let config = EngineConfig::new("test-source", 100);
     let mut engine = Engine::new(core, storage, TestCodec, config);
 
     // Subscribe before processing blocks.
@@ -305,4 +299,111 @@ fn test_engine_with_in_memory_storage() {
         .get_canonical_tip("test-source")
         .expect("get_canonical_tip");
     assert_eq!(tip, Some(hashes[4]), "canonical tip should be the last block");
+}
+
+// ============================================================
+// Phase 3: New type tests — EngineConfig::new, ReorgEvent, EngineStatus, EngineError
+// ============================================================
+
+#[test]
+fn test_engine_config_new_constructor() {
+    let config = EngineConfig::new("my-source", 50);
+    assert_eq!(config.source_id, "my-source");
+    assert_eq!(config.snapshot_every_n, 50);
+    assert_eq!(config.max_retries, 5, "default max_retries should be 5");
+    assert_eq!(config.initial_delay_ms, 1000, "default initial_delay_ms should be 1000");
+    assert_eq!(config.max_delay_ms, 30_000, "default max_delay_ms should be 30000");
+    assert_eq!(config.batch_size, 64, "default batch_size should be 64");
+}
+
+#[test]
+fn test_reorg_event_fields() {
+    let ancestor = make_hash(10);
+    let old_tip = make_hash(11);
+    let new_tip = make_hash(20);
+
+    let event = ReorgEvent {
+        common_ancestor: ancestor,
+        old_tip,
+        new_tip,
+        depth: 3,
+    };
+
+    assert_eq!(event.common_ancestor, ancestor);
+    assert_eq!(event.old_tip, old_tip);
+    assert_eq!(event.new_tip, new_tip);
+    assert_eq!(event.depth, 3);
+}
+
+#[test]
+fn test_engine_status_variants() {
+    // Verify all variants can be constructed and compared via Debug (no PartialEq needed).
+    let disconnected = EngineStatus::Disconnected;
+    let reconnecting = EngineStatus::Reconnecting(2);
+    let reconnected = EngineStatus::Reconnected;
+    let gap_filling = EngineStatus::GapFilling;
+
+    // Just verify they're debuggable (compile-time check of variant existence).
+    let _ = format!("{:?}", disconnected);
+    let _ = format!("{:?}", reconnecting);
+    let _ = format!("{:?}", reconnected);
+    let _ = format!("{:?}", gap_filling);
+
+    // Verify Reconnecting carries the attempt count.
+    if let EngineStatus::Reconnecting(n) = reconnecting {
+        assert_eq!(n, 2, "attempt number should be 2");
+    } else {
+        panic!("expected Reconnecting variant");
+    }
+}
+
+#[test]
+fn test_engine_error_variants() {
+    use std::io;
+
+    // Storage variant
+    let storage_err: EngineError = EngineError::Storage(
+        Box::new(io::Error::new(io::ErrorKind::Other, "disk full"))
+    );
+    assert!(storage_err.to_string().contains("storage error"));
+
+    // Source variant
+    let source_err: EngineError = EngineError::Source(
+        Box::new(io::Error::new(io::ErrorKind::ConnectionReset, "disconnected"))
+    );
+    assert!(source_err.to_string().contains("source error"));
+
+    // DecodeState variant
+    let decode_err = EngineError::DecodeState;
+    assert!(decode_err.to_string().contains("decode"));
+
+    // ReconnectExhausted variant
+    let reconnect_err = EngineError::ReconnectExhausted(
+        5,
+        Box::new(io::Error::new(io::ErrorKind::TimedOut, "timeout"))
+    );
+    assert!(reconnect_err.to_string().contains("5"));
+
+    // ReorgWithoutAncestor variant
+    let reorg_err = EngineError::ReorgWithoutAncestor;
+    assert!(reorg_err.to_string().contains("ancestor"));
+}
+
+#[test]
+fn test_engine_error_is_send_sync() {
+    // Compile-time check: EngineError must be Send + Sync.
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<EngineError>();
+}
+
+#[test]
+fn test_engine_config_new_used_in_engine() {
+    // Verify EngineConfig::new() can be used to construct an Engine.
+    let sm = Arc::new(CounterMachine);
+    let (core, _rx) = ReducerCore::new(sm, 0u64);
+    let storage = InMemoryStorage::new();
+    let config = EngineConfig::new("test-source", 100);
+    let _engine: Engine<CounterMachine, InMemoryStorage, TestCodec> =
+        Engine::new(core, storage, TestCodec, config);
+    // If this compiles and runs, the constructor works.
 }

@@ -34,12 +34,79 @@ pub trait Codec: Send + Sync + 'static {
     fn decode_state(&self, bytes: &[u8]) -> Option<Self::State>;
 }
 
+/// Unified error type for Engine::run().
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error("storage error: {0}")]
+    Storage(Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("source error: {0}")]
+    Source(Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("codec error: failed to decode state")]
+    DecodeState,
+
+    #[error("reconnection exhausted after {0} attempts: {1}")]
+    ReconnectExhausted(u32, Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("reorg detected but common ancestor not found in storage")]
+    ReorgWithoutAncestor,
+}
+
+/// Notification of a chain reorganization.
+#[derive(Debug, Clone)]
+pub struct ReorgEvent {
+    /// Hash of the fork point block (last common block between old and new chains).
+    pub common_ancestor: [u8; 32],
+    /// Hash of the last block on the discarded branch.
+    pub old_tip: [u8; 32],
+    /// Hash of the first block on the new canonical branch.
+    pub new_tip: [u8; 32],
+    /// Number of blocks rolled back from old_tip to common_ancestor.
+    pub depth: u32,
+}
+
+/// Operational status signals for Engine::run().
+#[derive(Debug, Clone)]
+pub enum EngineStatus {
+    /// WebSocket/stream connection was lost.
+    Disconnected,
+    /// Reconnection attempt in progress (attempt number, 1-based).
+    Reconnecting(u32),
+    /// Successfully reconnected to the event source.
+    Reconnected,
+    /// Filling gap between stored tip and live stream start.
+    GapFilling,
+}
+
 /// Configuration for the Engine coordinator.
 pub struct EngineConfig {
     /// Logical source identifier — used as the key in storage (canonical_tip, snapshots).
     pub source_id: String,
     /// Trigger a snapshot after this many distinct (non-duplicate) new block inserts.
     pub snapshot_every_n: usize,
+    /// Maximum reconnection attempts before returning Err. 0 = no retries.
+    pub max_retries: u32,
+    /// Starting backoff delay in milliseconds.
+    pub initial_delay_ms: u64,
+    /// Maximum backoff delay in milliseconds (exponential backoff cap).
+    pub max_delay_ms: u64,
+    /// Micro-batch capacity for ready_chunks(). Default: 64.
+    pub batch_size: usize,
+}
+
+impl EngineConfig {
+    /// Create a config with sensible defaults for reconnection settings.
+    pub fn new(source_id: impl Into<String>, snapshot_every_n: usize) -> Self {
+        Self {
+            source_id: source_id.into(),
+            snapshot_every_n,
+            max_retries: 5,
+            initial_delay_ms: 1000,
+            max_delay_ms: 30_000,
+            batch_size: 64,
+        }
+    }
 }
 
 /// Block-oriented coordinator. Owns ReducerCore + Storage + Codec.

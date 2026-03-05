@@ -9,7 +9,7 @@ pub mod storage;
 
 // Re-export key public types at the crate root for ergonomic use.
 pub use block::Block;
-pub use coordinator::{Codec, Engine, EngineConfig};
+pub use coordinator::{Codec, Engine, EngineConfig, EngineError, ReorgEvent, EngineStatus};
 pub use cursor::ChainCursor;
 pub use error::SourceError;
 pub use event::Event;
