@@ -1,7 +1,7 @@
-# Phase 2: Persistence and Recovery - Research
+# Phase 2: Block DAG Storage and Recovery - Research
 
-**Researched:** 2026-03-03
-**Domain:** SQLite persistence, async Rust, event sourcing recovery pipeline
+**Researched:** 2026-03-05
+**Domain:** SQLite block DAG persistence, block-oriented event sourcing, canonical chain recovery
 **Confidence:** HIGH
 
 ---
@@ -11,39 +11,54 @@
 
 ### Locked Decisions
 
+#### Block type design
+- New `Block<C, E>` wrapper type — first-class concept holding block_hash, parent_hash, height, and `Vec<Event<C, E>>`
+- `block_hash` removed from `Event<C, E>` — it lives exclusively on `Block`. Events always exist within a Block context.
+- `EventSource` gains `fetch_blocks(from, to) → Vec<Block>` replacing `fetch_events`. `subscribe()` returns `Stream<Block>`. Block-oriented API throughout.
+- `StateMachine::apply(state, event)` unchanged — coordinator iterates `block.events` and calls apply for each. Client doesn't need to know about blocks. Pure reducer stays simple.
+
 #### SQLite schema design
-- Cursors stored as canonical (major, minor) INTEGER pair columns — enables native SQLite range queries and B-tree indexing. Each cursor type maps to its natural pair (block_number+log_index, height+tx_index, timestamp+seq_id).
-- Single shared database per app process with source_id discriminator column on every table. Aligns with PROJECT.md "one SQLite file per app" constraint.
-- Event payloads stored as opaque BLOB — client provides encode/decode (to_bytes/from_bytes trait). Library never interprets event contents. Consistent with snapshot pattern.
-- Coverage tracked as per-source interval list: (source_id, range_start_major, range_start_minor, range_end_major, range_end_minor). Adjacent intervals merged on insert. Supports non-contiguous cached regions from backfill + live subscription.
-- Deduplication enforced by UNIQUE constraint on (source_id, cursor_major, cursor_minor). INSERT OR IGNORE — duplicate inserts silently dropped at the database boundary.
+- Normalized schema: `blocks(hash, parent_hash, height, source_id)` + `events(block_hash, cursor, payload)` with foreign key to blocks. Clean relational model.
+- Single shared database per app process with source_id discriminator. Aligns with PROJECT.md "one SQLite file per app" constraint.
+- Explicit `canonical_tip(source_id, block_hash)` table — updated when new blocks extend the chain or when reorg changes the tip. Simple to query.
+- Event payloads stored as opaque BLOB — client provides encode/decode. Library never interprets event contents.
+- No coverage table — block existence in the blocks table IS coverage. Gap detection = walk canonical chain and find missing blocks.
+- No anchors table — canonical_tip is the only bookmark needed. Application-level bookmarks are not library concerns.
+- Block-level deduplication — if block_hash already exists in blocks table, skip all its events. Blocks always arrive atomically with all their events.
 
 #### Snapshot lifecycle
-- Snapshots triggered every N events (configurable). Predictable worst-case replay cost: at most N events to replay on recovery.
-- Snapshot format is client-owned opaque bytes — library stores/loads Vec<u8>, client picks their own serialization format. Library is format-agnostic.
-- All snapshots retained — never deleted. Supports Phase 4 At(cursor) historical queries. Pruning can be added later.
-- Snapshot writes are synchronous — block event processing until write completes. Simple, guarantees durability. Hot-path optimization deferred to Phase 3.
+- Snapshots keyed by block_hash: `snapshots(source_id, block_hash, payload)`. State at a block is deterministic regardless of which branch it's on.
+- Snapshots triggered every N blocks (configurable). Predictable worst-case replay cost.
+- Snapshot format is client-owned opaque bytes — library stores/loads Vec<u8>, client picks serialization format.
+- All snapshots retained — never deleted. Supports Phase 4 At(cursor) historical queries.
+- Snapshot writes are synchronous — block processing until write completes. Simple, guarantees durability.
 
 #### Recovery pipeline
-- On corrupt/undeserializable snapshot: fall back to next-oldest snapshot. Keep trying until one deserializes. If none work, fail with error — client handles (clear DB, provide migration, etc).
-- Gap fetching (catch-up) uses client-controlled pagination — EventSource::fetch_events called in a loop with advancing cursors. Page size is implicit in the EventSource implementation, which knows its RPC provider limits.
-- Anchor updates in the same SQLite transaction as the event batch writes they track. Either both succeed or neither does. Guarantees consistency on crash.
+- On crash recovery: read canonical tip → walk parent pointers back until a block with a snapshot is found → load snapshot → replay canonical chain forward to tip → fetch any gap blocks from source. Simple, deterministic.
+- On corrupt/undeserializable snapshot: fall back to next-oldest snapshot along the canonical chain. If none work, fail with error.
+- Gap fetching uses `EventSource::fetch_blocks()` — block-oriented, not event-oriented.
+
+#### Codec simplification
+- Library handles block metadata serialization (hash, parent_hash, height) with fixed schema — not client-controlled.
+- Client provides encode/decode only for event payloads and state snapshots. Codec becomes simpler.
+- Cursor serialization for storage uses postcard (library-internal). Event and snapshot serialization is client-owned.
 
 #### Storage API surface
-- Storage defined as a trait with SQLite implementation. Enables in-memory mocks for testing the recovery pipeline without filesystem I/O.
-- External coordinator pattern: a new Engine/Pipeline type owns both ReducerCore and Storage. Coordinates event flow: receive → store → apply. ReducerCore stays pure (no storage awareness), unchanged from Phase 1.
-- Event writes batched — accumulate events in memory, flush to SQLite in a single transaction. Anchor update happens at flush time. Higher throughput, clear consistency boundary.
-- Storage trait methods are sync (matching rusqlite's native API). Coordinator handles spawn_blocking when calling from async context.
+- Storage defined as a trait with SQLite implementation. Enables in-memory mocks for testing.
+- External coordinator pattern: Engine owns ReducerCore + Storage. Coordinates: receive block → store block+events → apply events to state. ReducerCore stays pure.
+- Block writes are transactional — block row + all event rows in a single SQLite transaction.
+- Storage trait methods are sync (matching rusqlite's native API). Coordinator handles spawn_blocking for async context.
 
 ### Claude's Discretion
-- Exact SQLite table definitions and index choices
-- Batch size defaults and configuration mechanism
+- Exact SQLite table DDL and index choices
+- Block<C, E> struct layout details
 - Internal coordinator architecture (channels, task structure)
-- Coverage interval merge algorithm
-- Snapshot table structure (cursor reference, timestamp, size)
+- Batch size defaults and configuration mechanism
 - Error types for storage operations
+- How fetch_blocks pagination works internally
 
 ### Deferred Ideas (OUT OF SCOPE)
+
 None — discussion stayed within phase scope
 </user_constraints>
 
@@ -54,27 +69,27 @@ None — discussion stayed within phase scope
 
 | ID | Description | Research Support |
 |----|-------------|-----------------|
-| INGEST-02 | Library fetches historical events via EventSource in chunked range queries respecting RPC provider limits | Recovery pipeline uses fetch_events() in a loop with page-advancing cursors; coordinator calls EventSource::fetch_events per chunk |
-| INGEST-03 | Library stitches the gap between historical backfill endpoint and live subscription start without missing or duplicating events | Coverage table tracks which ranges are cached; gap between cached tip and live tip is fetched before subscribing |
-| INGEST-04 | Library deduplicates events by (source, cursor) so overlapping backfill and subscription windows don't corrupt state | UNIQUE constraint on (source_id, cursor_major, cursor_minor) + INSERT OR IGNORE enforces this at the storage boundary |
-| PERSIST-01 | Library persists events, snapshots, anchors, and coverage ranges in SQLite with WAL mode | rusqlite 0.38.0 with WAL pragma; four-table schema; tokio-rusqlite 0.7.0 for async bridge |
-| PERSIST-02 | Library tracks which cursor ranges are fully cached per source (coverage table) | coverage table with (source_id, range_start_major, range_start_minor, range_end_major, range_end_minor); interval merge on insert |
-| PERSIST-03 | Library recovers from crash: load last snapshot, replay cached events, catch up via FetchEvents, switch to live | RecoveryPipeline: load snapshot → replay events from SQLite → call fetch_events for gap → hand off to coordinator |
-| PERSIST-04 | Library creates periodic state snapshots (client-owned serialization) to bound replay cost | Coordinator counts events since last snapshot; triggers snapshot write every N events; stores opaque Vec<u8> |
-| PERSIST-05 | Library maintains named anchor positions (persistent cursors) updated atomically with event processing | anchors table; anchor write in same transaction as event batch flush |
+| INGEST-02 | Library fetches historical blocks via EventSource in chunked range queries respecting RPC provider limits | `fetch_blocks(from, to)` called in a loop with advancing block height/hash cursor; chunk size implicit in EventSource impl |
+| INGEST-03 | Library stitches gap between cached blocks and live subscription start without missing or duplicating blocks | canonical_tip is the bookmark; gap = blocks between canonical_tip.height and live subscription start; fetch_blocks fills it atomically |
+| INGEST-04 | Library deduplicates by block_hash — overlapping backfill/subscription windows don't corrupt state | Block existence check before insert: if block_hash row exists, skip entire block + all its events. INSERT OR IGNORE on blocks table. |
+| PERSIST-01 | Library persists blocks (with parent hash), events (per block), and state snapshots (per block hash) in SQLite with WAL mode | Three-table schema: blocks + events + snapshots + canonical_tip. WAL mode via pragma. rusqlite bundled. |
+| PERSIST-02 | Library tracks block DAG — which blocks exist, their parent relationships, and which branch is canonical | blocks table has parent_hash column enabling parent pointer traversal. canonical_tip(source_id, block_hash) tracks the canonical branch head. |
+| PERSIST-03 | Library recovers from crash: find canonical tip, load nearest snapshot on canonical chain, replay forward, catch up via fetch_blocks | Recovery: read canonical_tip → walk parent pointers to find snapshot → load snapshot → replay forward along canonical chain → fetch_blocks for gap |
+| PERSIST-04 | Library creates periodic state snapshots (client-owned serialization) at block boundaries | Snapshot triggered every N blocks (counted on distinct block inserts). snapshots(source_id, block_hash, payload). |
+| PERSIST-05 | Library maintains named anchor positions (persistent cursors) updated atomically with block processing | canonical_tip table IS the anchor — updated in same transaction as block write. No separate anchors table needed. |
 </phase_requirements>
 
 ---
 
 ## Summary
 
-Phase 2 introduces SQLite-backed persistence via **rusqlite 0.38.0** with WAL mode. The standard approach in the Rust ecosystem for async use of rusqlite is **tokio-rusqlite 0.7.0**, which spawns a dedicated background thread per connection and exposes an async `call()` API that sends closures over a channel. This directly satisfies the locked decision that storage trait methods are sync (rusqlite's native API) while the coordinator calls them via `spawn_blocking`-equivalent.
+Phase 2 redesigns the persistence layer from a flat linear event store to a block DAG model. The fundamental shift is that **blocks are the unit of persistence**, not individual events. Each block has a `block_hash` (32-byte identifier), `parent_hash` (pointer to parent block, enabling graph traversal), `height`, and owns a list of events. The SQLite schema is normalized: a `blocks` table holds block metadata, an `events` table holds event payloads with a foreign key to `blocks`. This is structurally similar to how git stores commits and trees.
 
-The four-table SQLite schema (events, snapshots, anchors, coverage) is conventional for event-sourced systems. The critical subtleties are: (1) the coverage interval merge algorithm, which must handle adjacent and overlapping intervals atomically within a single transaction, and (2) the recovery pipeline sequencing, which must load the latest deserializable snapshot and replay only the events whose cursors are strictly after the snapshot's cursor and within cached coverage. Schema migrations are handled by **rusqlite_migration 2.4.0**, which uses SQLite's built-in `user_version` field rather than a separate migrations table.
+The canonical chain is tracked via a `canonical_tip(source_id, block_hash)` table — a single row per source pointing to the tip of the canonical branch. Recovery is deterministic: read the canonical tip, walk parent pointers backward until a snapshotted block is found, load that snapshot, then replay events from each block on the canonical chain forward to the tip, then fetch any gap blocks from the source. Block-level deduplication (if `block_hash` exists in the blocks table, skip the entire block) is far simpler than the old cursor-range coverage table approach.
 
-Since snapshot and event payload serialization is client-owned opaque bytes, the library has no serialization dependency for data content. For any internal library serialization (if needed for coverage ranges or other metadata stored as BLOB), **postcard 1.1.3** is the correct choice per the STATE.md tombstone decision (bincode is dead; postcard is the replacement). In practice, the schema as designed stores coverage ranges as INTEGER columns, so postcard is likely not needed for Phase 2 — this is called out explicitly below.
+The existing codebase (Phase 1) contributes: `ReducerCore` (unchanged), `StateMachine` trait (unchanged), `ChainCursor` trait (unchanged), cursor types (`EvmCursor`, `BtcCursor`, `CexCursor`, unchanged). The `EventSource` trait gains `fetch_blocks()` replacing `fetch_events()`. `Event<C,E>` loses its `block_hash` field (moves to `Block<C,E>`). The old Phase 2 code (`src/storage/`, `src/coordinator/`) is fully replaced.
 
-**Primary recommendation:** Use rusqlite 0.38.0 + tokio-rusqlite 0.7.0 + rusqlite_migration 2.4.0. Keep the Storage trait sync to match rusqlite's API; bridge to async in the coordinator via tokio-rusqlite's `call()`.
+**Primary recommendation:** Keep rusqlite + rusqlite_migration (already in Cargo.toml). Replace the flat schema with the normalized block DAG schema. The coordinator becomes block-oriented: receive `Block<C,E>` → write block+events in one transaction → iterate block.events calling ReducerCore::apply for each. Recovery walks the parent pointer chain.
 
 ---
 
@@ -84,377 +99,415 @@ Since snapshot and event payload serialization is client-owned opaque bytes, the
 
 | Library | Version | Purpose | Why Standard |
 |---------|---------|---------|--------------|
-| rusqlite | 0.38.0 | SQLite bindings | The standard Rust SQLite wrapper; ergonomic, well-maintained, native rusqlite API is sync which matches the locked decision |
-| tokio-rusqlite | 0.7.0 | Async bridge for rusqlite | Background thread per connection, `call()` method sends closures via mpsc; the accepted community pattern for using rusqlite from async Rust |
-| rusqlite_migration | 2.4.0 | Schema migrations | Uses `user_version` pragma (not a table); const-constructable `Migrations::from_slice`; actively maintained (2.4.0 released 2026-01-19) |
-| postcard | 1.1.3 | Internal serialization | Selected in STATE.md after bincode tombstone (Dec 2025); stable wire format since v1.0.0; needed only IF any internal library data is stored as BLOB |
+| rusqlite | 0.34 (bundled, already in Cargo.toml) | SQLite bindings | Already present; sync API matches Storage trait pattern; bundled feature eliminates system SQLite dep |
+| rusqlite_migration | 2 (already in Cargo.toml) | Schema migrations | Already present; user_version pragma; const migrations; will add new migration version for DAG schema |
+| postcard | 1 (already in Cargo.toml) | Cursor serialization (library-internal) | Already present; STATE.md decision: postcard replaces bincode. Used for serializing ChainCursor values to TEXT/BLOB in the blocks table |
+| thiserror | 2 (already in Cargo.toml) | Error types | Already present |
+
+### No New Dependencies Required
+
+The entire Phase 2 implementation uses only libraries already in `Cargo.toml`. No new crates needed.
+
+The old research mentioned `tokio-rusqlite` as the async bridge. The existing implementation uses `Mutex<Connection>` directly (Storage trait is sync, coordinator uses it synchronously). This pattern is already proven in the existing code and tests — continue with it. `tokio-rusqlite` is unnecessary complexity.
 
 ### Supporting
 
 | Library | Version | Purpose | When to Use |
 |---------|---------|---------|-------------|
-| thiserror | 2 (already in Cargo.toml) | Error types for StorageError | Already present; add StorageError variant via thiserror derive |
+| tempfile | 3 (already in dev-dependencies) | Temp DB files in tests | Already used in storage_tests.rs for SqliteStorage tests |
+| tokio | 1 (already in dev-dependencies) | Async test runtime | Already used in recovery_tests.rs |
 
 ### Alternatives Considered
 
 | Instead of | Could Use | Tradeoff |
 |------------|-----------|----------|
-| tokio-rusqlite | raw `tokio::task::spawn_blocking` | spawn_blocking works but loses the dedicated-thread model; tokio-rusqlite gives a stable `Connection: Clone + Send + Sync` handle that can be shared cheaply. Either works, but tokio-rusqlite is cleaner for the coordinator |
-| tokio-rusqlite | deadpool-sqlite or async-sqlite | Both exist (also async wrappers); tokio-rusqlite is the most widely used; at 0.7.0 it pins to rusqlite ^0.37.0 — check compatibility with 0.38.0 before adopting (see Open Questions) |
-| rusqlite_migration | manual user_version tracking | rusqlite_migration is 50 lines of user code saved; const migrations are zero-cost abstraction; use it |
-| postcard | serde_json for BLOBs | serde_json produces larger output and is slower; only advantage is human-readability; not relevant for library-internal BLOBs |
-
-**Installation:**
-```bash
-# Add to Cargo.toml [dependencies]:
-rusqlite = { version = "0.38", features = ["bundled"] }
-tokio-rusqlite = "0.7"
-rusqlite_migration = { version = "2.4", features = [] }
-postcard = { version = "1.1", features = ["alloc"] }
-```
-
-Note on `bundled` feature: the `bundled` feature compiles SQLite from source and statically links it, eliminating the system SQLite dependency. This is standard for library crates that want deterministic behavior and avoids version mismatches. The tradeoff is compile-time cost (~15 seconds). Appropriate here since chainfold targets operational services where build reproducibility matters.
+| Mutex<Connection> (current pattern) | tokio-rusqlite | tokio-rusqlite adds cleaner async ergonomics but the existing sync Storage trait + Mutex pattern works, is already tested, and avoids a new dependency |
+| block_hash as BLOB(32) | TEXT (hex) | BLOB is more compact and faster for equality checks; TEXT is human-readable in sqlite3 CLI. BLOB wins for a library cache. |
+| postcard for cursor serialization | serde_json | postcard is already present and chosen in STATE.md; JSON is larger and slower |
 
 ---
 
 ## Architecture Patterns
 
-### Recommended Project Structure
+### Recommended Module Structure
 
 ```
 src/
+├── block.rs              # NEW: Block<C, E> type definition
 ├── storage/
-│   ├── mod.rs          # Storage trait definition + re-exports
-│   ├── sqlite.rs       # SqliteStorage: rusqlite-backed implementation
-│   ├── memory.rs       # InMemoryStorage: test double (no filesystem)
-│   └── schema.rs       # SQL DDL, MIGRATIONS constant, table names
+│   ├── mod.rs            # REPLACE: Storage trait for DAG model (Block-aware API)
+│   ├── sqlite.rs         # REPLACE: SqliteStorage implementing DAG schema
+│   ├── memory.rs         # REPLACE: InMemoryStorage for testing (same DAG semantics)
+│   └── schema.rs         # REPLACE: New DDL migration (v2 schema: blocks, events, snapshots, canonical_tip)
 ├── coordinator/
-│   ├── mod.rs          # Engine struct: owns ReducerCore + Storage + tokio-rusqlite Connection
-│   └── recovery.rs     # Recovery pipeline: snapshot load → replay → gap fetch
-├── cursor/             # (Phase 1 — unchanged)
-├── machine.rs          # (Phase 1 — ReducerCore unchanged)
-├── source.rs           # (Phase 1 — EventSource unchanged)
-├── event.rs            # (Phase 1 — Event<C,E> — may add Serialize bound on E for storage)
-└── lib.rs
+│   ├── mod.rs            # REPLACE: Engine — block-oriented coordinator
+│   └── recovery.rs       # REPLACE: Block DAG recovery pipeline
+├── event.rs              # MODIFY: Remove block_hash field from Event<C,E>
+├── source.rs             # MODIFY: Add fetch_blocks(), change subscribe() return type to Stream<Block>
+├── cursor/               # UNCHANGED
+├── machine.rs            # UNCHANGED (ReducerCore stays pure)
+├── error.rs              # UNCHANGED
+└── lib.rs                # UPDATE: re-exports for new types
 ```
 
-### Pattern 1: Storage Trait (Sync API matching rusqlite)
+### Pattern 1: Block<C, E> Type
 
-**What:** The Storage trait methods are synchronous. The coordinator bridges to async via tokio-rusqlite's `call()`. This is the locked decision.
+**What:** First-class wrapper type that is the unit of persistence and processing.
 
-**When to use:** Always — it's the locked architecture.
+**When to use:** Everywhere blocks are passed — storage writes, EventSource returns, coordinator input.
 
 ```rust
-// Source: CONTEXT.md locked decision + rusqlite native sync API
-pub trait Storage: Send + Sync + 'static {
+// Source: CONTEXT.md locked decisions + standard block chain data model
+use crate::cursor::ChainCursor;
+use crate::event::Event;
+
+#[derive(Debug, Clone)]
+pub struct Block<C: ChainCursor, E> {
+    /// SHA-256 (or chain-native) hash of this block. 32 bytes.
+    pub block_hash: [u8; 32],
+    /// Hash of the parent block. All-zeros for genesis.
+    pub parent_hash: [u8; 32],
+    /// Block height (0-indexed from genesis).
+    pub height: u64,
+    /// Events in this block, in cursor order.
+    pub events: Vec<Event<C, E>>,
+}
+```
+
+### Pattern 2: Modified Event<C, E> (Remove block_hash)
+
+**What:** `Event` no longer holds `block_hash` — that context lives on `Block`.
+
+```rust
+// MODIFY src/event.rs: remove block_hash field
+#[derive(Debug, Clone)]
+pub struct Event<C: ChainCursor, E> {
+    pub cursor: C,
+    pub data: E,
+    // block_hash removed — lives on Block<C,E> instead
+}
+```
+
+### Pattern 3: Updated EventSource Trait
+
+**What:** `fetch_blocks` replaces `fetch_events`. `subscribe` returns `Stream<Block>`.
+
+```rust
+// Source: CONTEXT.md locked decisions
+#[async_trait::async_trait]
+pub trait EventSource: Send + Sync {
     type Cursor: ChainCursor;
+    type Event: Send + 'static;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    // Events
-    fn write_events_batch(&self, events: &[StoredEvent<Self::Cursor>]) -> Result<(), Self::Error>;
-    fn events_in_range(
+    /// Fetch initial state snapshot at a specific cursor (cold start, no blocks in DB).
+    async fn fetch_state(&self, at: &Self::Cursor) -> Result<Vec<u8>, Self::Error>;
+
+    /// Fetch blocks in the height range [from_height, to_height).
+    /// Returns blocks in ascending height order. Implementations respect RPC page limits.
+    async fn fetch_blocks(
         &self,
-        source_id: &str,
-        from: &Self::Cursor,
-        to: &Self::Cursor,
-    ) -> Result<Vec<StoredEvent<Self::Cursor>>, Self::Error>;
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<Vec<Block<Self::Cursor, Self::Event>>, Self::Error>;
 
-    // Snapshots
-    fn write_snapshot(&self, snap: &Snapshot<Self::Cursor>) -> Result<(), Self::Error>;
-    fn latest_snapshot(&self, source_id: &str) -> Result<Option<Snapshot<Self::Cursor>>, Self::Error>;
-    fn snapshots_before(
+    /// Subscribe to live blocks from the given block height onwards.
+    async fn subscribe(
         &self,
-        source_id: &str,
-        at: &Self::Cursor,
-    ) -> Result<Vec<Snapshot<Self::Cursor>>, Self::Error>;
-
-    // Anchors
-    fn write_anchor(&self, anchor: &Anchor<Self::Cursor>) -> Result<(), Self::Error>;
-    fn read_anchor(&self, source_id: &str, name: &str) -> Result<Option<Anchor<Self::Cursor>>, Self::Error>;
-
-    // Coverage
-    fn add_coverage(&self, source_id: &str, from: &Self::Cursor, to: &Self::Cursor) -> Result<(), Self::Error>;
-    fn is_fully_cached(&self, source_id: &str, from: &Self::Cursor, to: &Self::Cursor) -> Result<bool, Self::Error>;
-    fn cached_tip(&self, source_id: &str) -> Result<Option<Self::Cursor>, Self::Error>;
+        from_height: u64,
+    ) -> Result<
+        Box<dyn futures_core::Stream<
+            Item = Result<Block<Self::Cursor, Self::Event>, Self::Error>
+        > + Unpin + Send>,
+        Self::Error,
+    >;
 }
 ```
 
-### Pattern 2: SQLite Connection Setup (WAL Mode)
+Note: Phase 2 only implements `fetch_blocks` for recovery. `subscribe()` is wired up in Phase 3. The trait must compile with `subscribe()` present but Phase 2 tests only exercise `fetch_blocks` and `fetch_state`.
 
-**What:** Connection initialization with WAL and recommended pragmas. Must be called once after opening.
+### Pattern 4: Normalized Block DAG Schema
 
-**When to use:** Every connection open.
+**What:** Three tables for block data + one for canonical tip tracking. Migration adds a new version to the existing `rusqlite_migration` chain.
 
-```rust
-// Source: https://cj.rs/blog/sqlite-pragma-cheatsheet-for-performance-and-consistency/
-// Source: rusqlite 0.38.0 docs (pragma_update)
-fn configure_connection(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;"
-    )
-}
+**Key design points:**
+- `blocks.hash` is BLOB(32) primary key — binary hash, not text
+- `events.block_hash` foreign key enforces referential integrity
+- `canonical_tip` is an upsert table — single row per source_id
+- `snapshots.block_hash` keys snapshots to specific blocks (not cursors)
+
+```sql
+-- Migration v2 (replaces v1 tables entirely — or run as separate migration step)
+-- OPTION A: Drop-and-replace (acceptable since this is a redesign, old data is invalid)
+DROP TABLE IF EXISTS coverage;
+DROP TABLE IF EXISTS anchors;
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS snapshots;
+
+CREATE TABLE blocks (
+    hash        BLOB    NOT NULL PRIMARY KEY,  -- 32-byte block hash
+    parent_hash BLOB    NOT NULL,              -- 32-byte parent hash (all-zeros for genesis)
+    height      INTEGER NOT NULL,
+    source_id   TEXT    NOT NULL
+);
+
+CREATE INDEX idx_blocks_source_height
+    ON blocks(source_id, height);
+
+CREATE INDEX idx_blocks_source_parent
+    ON blocks(source_id, parent_hash);
+
+CREATE TABLE events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    block_hash  BLOB    NOT NULL REFERENCES blocks(hash),
+    cursor      BLOB    NOT NULL,  -- postcard-serialized ChainCursor
+    payload     BLOB    NOT NULL   -- client-owned opaque bytes
+);
+
+CREATE INDEX idx_events_block
+    ON events(block_hash);
+
+CREATE TABLE snapshots (
+    source_id   TEXT    NOT NULL,
+    block_hash  BLOB    NOT NULL REFERENCES blocks(hash),
+    payload     BLOB    NOT NULL,  -- client-owned opaque state bytes
+    PRIMARY KEY (source_id, block_hash)
+);
+
+CREATE TABLE canonical_tip (
+    source_id   TEXT    NOT NULL PRIMARY KEY,
+    block_hash  BLOB    NOT NULL REFERENCES blocks(hash)
+);
 ```
 
-WAL is persistent — once set on a database file, it survives connection close/reopen. `synchronous = NORMAL` is the right balance for WAL: safe from OS crashes, lower fsync overhead than FULL.
+### Pattern 5: Block Write — Single Transaction
 
-### Pattern 3: tokio-rusqlite Async Bridge
+**What:** Block row + all event rows written atomically. canonical_tip updated in the same transaction.
 
-**What:** Using tokio-rusqlite's `call()` to run sync rusqlite closures from async coordinator code.
-
-**When to use:** Every time the coordinator needs to call Storage from an async context.
+**Critical invariant:** If block_hash already exists in blocks table, the entire block (including all events) is skipped — deduplication at block granularity.
 
 ```rust
-// Source: https://docs.rs/tokio-rusqlite/latest/tokio_rusqlite/struct.Connection.html
-use tokio_rusqlite::Connection;
-
-// Connection is Clone + Send + Sync — share cheaply via Arc or clone
-let conn: Connection = Connection::open("chainfold.db").await?;
-
-// From async coordinator — call() runs the closure on the dedicated SQLite thread
-let events = conn.call(|rusqlite_conn| {
-    // Everything in here is sync rusqlite
-    let mut stmt = rusqlite_conn.prepare(
-        "SELECT cursor_major, cursor_minor, payload FROM events
-         WHERE source_id = ?1
-           AND cursor_major >= ?2 AND cursor_minor >= ?3
-           AND cursor_major <= ?4"
-    )?;
-    // ... collect results
-    Ok(events)
-}).await?;
-```
-
-Key: `call()` accepts `FnOnce(&rusqlite::Connection) -> Result<T, E>` where E: Into<Box<dyn Error + Send + Sync>>. Returns `impl Future<Output = Result<T, tokio_rusqlite::Error>>`.
-
-### Pattern 4: Schema Migrations with rusqlite_migration
-
-**What:** Declare all DDL as a const slice of migrations; apply on connection open. `user_version` tracks current schema version.
-
-**When to use:** Phase 2 introduces the initial schema — this is migration v1.
-
-```rust
-// Source: https://docs.rs/rusqlite_migration/latest/rusqlite_migration/
-use rusqlite_migration::{Migrations, M};
-
-const MIGRATIONS_SLICE: &[M<'_>] = &[
-    M::up("
-        CREATE TABLE events (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id      TEXT    NOT NULL,
-            cursor_major   INTEGER NOT NULL,
-            cursor_minor   INTEGER NOT NULL,
-            payload        BLOB    NOT NULL,
-            UNIQUE(source_id, cursor_major, cursor_minor)
-        );
-        CREATE INDEX idx_events_source_cursor
-            ON events(source_id, cursor_major, cursor_minor);
-
-        CREATE TABLE snapshots (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id      TEXT    NOT NULL,
-            cursor_major   INTEGER NOT NULL,
-            cursor_minor   INTEGER NOT NULL,
-            payload        BLOB    NOT NULL,
-            created_at     INTEGER NOT NULL  -- unix epoch seconds
-        );
-        CREATE INDEX idx_snapshots_source_cursor
-            ON snapshots(source_id, cursor_major DESC, cursor_minor DESC);
-
-        CREATE TABLE anchors (
-            source_id      TEXT    NOT NULL,
-            name           TEXT    NOT NULL,
-            cursor_major   INTEGER NOT NULL,
-            cursor_minor   INTEGER NOT NULL,
-            PRIMARY KEY(source_id, name)
-        );
-
-        CREATE TABLE coverage (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id      TEXT    NOT NULL,
-            range_start_major  INTEGER NOT NULL,
-            range_start_minor  INTEGER NOT NULL,
-            range_end_major    INTEGER NOT NULL,
-            range_end_minor    INTEGER NOT NULL
-        );
-        CREATE INDEX idx_coverage_source
-            ON coverage(source_id, range_start_major, range_start_minor);
-    "),
-];
-const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_SLICE);
-
-// On connection open:
-MIGRATIONS.to_latest(&mut conn)?;
-```
-
-### Pattern 5: Deduplication via INSERT OR IGNORE
-
-**What:** UNIQUE constraint on (source_id, cursor_major, cursor_minor) + INSERT OR IGNORE. Duplicate events from overlapping backfill + live windows silently dropped.
-
-**When to use:** All event batch writes.
-
-```rust
-// Source: https://sqlite.org/lang_conflict.html
-// Source: CONTEXT.md locked decision
-tx.execute(
-    "INSERT OR IGNORE INTO events
-        (source_id, cursor_major, cursor_minor, payload)
-     VALUES (?1, ?2, ?3, ?4)",
-    rusqlite::params![source_id, major, minor, payload_bytes],
-)?;
-```
-
-### Pattern 6: Batch Writes in Single Transaction
-
-**What:** Accumulate events in memory, flush as a single SQLite transaction. Anchor update in the same transaction.
-
-**When to use:** The coordinator's flush path.
-
-```rust
-// Source: rusqlite Transaction docs + CONTEXT.md locked decision
-fn write_batch_with_anchor(
+// Source: CONTEXT.md locked decisions + rusqlite transaction pattern
+fn write_block<C: ChainCursor, E>(
     conn: &rusqlite::Connection,
     source_id: &str,
-    events: &[StoredEvent],
-    anchor_name: &str,
-    anchor_cursor_major: i64,
-    anchor_cursor_minor: i64,
-) -> rusqlite::Result<()> {
-    let tx = conn.transaction()?;
+    block: &Block<C, E>,
+    encode_cursor: impl Fn(&C) -> Vec<u8>,   // postcard::to_allocvec
+    encode_payload: impl Fn(&E) -> Vec<u8>,   // client-provided
+) -> rusqlite::Result<bool> {  // returns true if block was new, false if duplicate
+    // Check for duplicate block first (block-level dedup)
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM blocks WHERE hash = ?1)",
+        rusqlite::params![&block.block_hash[..]],
+        |row| row.get(0),
+    )?;
+    if exists {
+        return Ok(false);  // skip entire block
+    }
 
+    let tx = conn.unchecked_transaction()?;
+
+    // Insert block metadata
+    tx.execute(
+        "INSERT INTO blocks (hash, parent_hash, height, source_id)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            &block.block_hash[..],
+            &block.parent_hash[..],
+            block.height as i64,
+            source_id,
+        ],
+    )?;
+
+    // Insert events
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT OR IGNORE INTO events
-                (source_id, cursor_major, cursor_minor, payload)
-             VALUES (?1, ?2, ?3, ?4)"
+            "INSERT INTO events (block_hash, cursor, payload) VALUES (?1, ?2, ?3)"
         )?;
-        for event in events {
+        for event in &block.events {
+            let cursor_bytes = encode_cursor(&event.cursor);
+            let payload_bytes = encode_payload(&event.data);
             stmt.execute(rusqlite::params![
-                source_id, event.major, event.minor, &event.payload
+                &block.block_hash[..],
+                cursor_bytes,
+                payload_bytes,
             ])?;
         }
     }
 
+    // Update canonical_tip
     tx.execute(
-        "INSERT INTO anchors (source_id, name, cursor_major, cursor_minor)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(source_id, name) DO UPDATE SET
-             cursor_major = excluded.cursor_major,
-             cursor_minor = excluded.cursor_minor",
-        rusqlite::params![source_id, anchor_name, anchor_cursor_major, anchor_cursor_minor],
+        "INSERT INTO canonical_tip (source_id, block_hash) VALUES (?1, ?2)
+         ON CONFLICT(source_id) DO UPDATE SET block_hash = excluded.block_hash",
+        rusqlite::params![source_id, &block.block_hash[..]],
     )?;
 
-    tx.commit()
+    tx.commit()?;
+    Ok(true)
 }
 ```
 
-`prepare_cached()` reuses compiled statement objects across calls — important for batch inserts.
+### Pattern 6: Parent Pointer Walk for Recovery
 
-### Pattern 7: Coverage Interval Merge
+**What:** Starting from canonical tip, walk parent_hash pointers backward through the blocks table to find the nearest block with a snapshot.
 
-**What:** When adding a new [from, to) range to coverage, merge with adjacent or overlapping existing intervals for the same source_id. All within a single transaction.
-
-**When to use:** After every successful event batch write or gap fetch.
-
-The algorithm (pure Rust, executed inside the `call()` closure):
+**When to use:** Recovery step 1 — finding the snapshot to load.
 
 ```rust
-// Source: interval merge algorithm (standard CS, verified against CONTEXT.md requirements)
-fn add_coverage_and_merge(
+// Source: CONTEXT.md recovery pipeline design
+fn find_nearest_snapshot(
     conn: &rusqlite::Connection,
     source_id: &str,
-    new_start: (i64, i64),  // (major, minor)
-    new_end: (i64, i64),
-) -> rusqlite::Result<()> {
-    let tx = conn.transaction()?;
+    tip_hash: [u8; 32],
+) -> rusqlite::Result<Option<([u8; 32], Vec<u8>)>> {
+    // Walk from tip toward genesis, check for snapshot at each block
+    let mut current_hash = tip_hash;
+    loop {
+        // Check for snapshot at current block
+        let snap: Option<Vec<u8>> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT payload FROM snapshots WHERE source_id = ?1 AND block_hash = ?2"
+            )?;
+            let mut rows = stmt.query_map(
+                rusqlite::params![source_id, &current_hash[..]],
+                |row| row.get(0),
+            )?;
+            rows.next().transpose()?
+        };
 
-    // 1. Find all existing intervals that overlap or are adjacent to the new range.
-    //    An interval [a,b) is adjacent-or-overlapping with [c,d) if a <= d AND b >= c.
-    let mut stmt = tx.prepare(
-        "SELECT id, range_start_major, range_start_minor, range_end_major, range_end_minor
-         FROM coverage
-         WHERE source_id = ?1
-           AND NOT (range_end_major < ?2 OR (range_end_major = ?2 AND range_end_minor < ?3))
-           AND NOT (range_start_major > ?4 OR (range_start_major = ?4 AND range_start_minor > ?5))"
-    )?;
+        if let Some(payload) = snap {
+            return Ok(Some((current_hash, payload)));
+        }
 
-    let overlapping: Vec<(i64, (i64,i64), (i64,i64))> = stmt.query_map(
-        rusqlite::params![
-            source_id,
-            new_start.0, new_start.1,
-            new_end.0, new_end.1
-        ],
-        |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?), (row.get(3)?, row.get(4)?))),
-    )?.filter_map(|r| r.ok()).collect();
+        // Walk to parent
+        let parent: Option<[u8; 32]> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT parent_hash FROM blocks WHERE hash = ?1"
+            )?;
+            let mut rows = stmt.query_map(
+                rusqlite::params![&current_hash[..]],
+                |row| {
+                    let bytes: Vec<u8> = row.get(0)?;
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    Ok(arr)
+                },
+            )?;
+            rows.next().transpose()?
+        };
 
-    // 2. Delete all overlapping intervals.
-    for (id, _, _) in &overlapping {
-        tx.execute("DELETE FROM coverage WHERE id = ?1", rusqlite::params![id])?;
+        match parent {
+            None => return Ok(None),  // genesis reached, no snapshot
+            Some(p) if p == [0u8; 32] => return Ok(None),  // parent is all-zeros (genesis sentinel)
+            Some(p) => current_hash = p,
+        }
     }
-
-    // 3. Compute merged interval: min of starts, max of ends.
-    let merged_start = overlapping.iter()
-        .map(|(_, s, _)| *s)
-        .chain(std::iter::once(new_start))
-        .min()
-        .unwrap_or(new_start);
-    let merged_end = overlapping.iter()
-        .map(|(_, _, e)| *e)
-        .chain(std::iter::once(new_end))
-        .max()
-        .unwrap_or(new_end);
-
-    // 4. Insert the merged interval.
-    tx.execute(
-        "INSERT INTO coverage
-            (source_id, range_start_major, range_start_minor, range_end_major, range_end_minor)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![source_id, merged_start.0, merged_start.1, merged_end.0, merged_end.1],
-    )?;
-
-    tx.commit()
 }
 ```
 
-The (major, minor) comparison ordering in SQL must match the Rust Ord semantics: major first, then minor. The WHERE clause handles both components.
+### Pattern 7: Canonical Chain Forward Replay
 
-### Pattern 8: Recovery Pipeline Sequencing
+**What:** After finding the snapshot block, collect all blocks on the canonical chain between snapshot and tip, in forward order, then replay their events.
 
-**What:** On cold start, execute the deterministic recovery sequence.
+**The challenge:** We have the tip and walk backward. To replay forward, collect the path during the backward walk, then reverse it.
+
+```rust
+// Source: CONTEXT.md recovery pipeline design
+fn collect_canonical_chain(
+    conn: &rusqlite::Connection,
+    from_hash: [u8; 32],   // snapshot block (exclusive — state already loaded)
+    to_hash: [u8; 32],     // canonical tip (inclusive)
+) -> rusqlite::Result<Vec<[u8; 32]>> {
+    // Walk backward from tip to from_hash, collect hashes, reverse
+    let mut chain: Vec<[u8; 32]> = Vec::new();
+    let mut current = to_hash;
+
+    while current != from_hash {
+        chain.push(current);
+
+        let parent = conn.query_row(
+            "SELECT parent_hash FROM blocks WHERE hash = ?1",
+            rusqlite::params![&current[..]],
+            |row| {
+                let bytes: Vec<u8> = row.get(0)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(arr)
+            },
+        )?;
+        current = parent;
+    }
+
+    chain.reverse();  // now in forward order: first block to replay, last is tip
+    Ok(chain)
+}
+```
+
+### Pattern 8: Recovery Pipeline
+
+**What:** Full recovery sequence, orchestrating patterns 6 and 7.
 
 ```
-1. Query: latest snapshot for source_id (ordered by cursor DESC)
-2. Loop: try to deserialize snapshot.payload via client-provided fn
-   - If deserialize fails: query next-oldest snapshot, retry
-   - If no snapshots or all fail: call EventSource::fetch_state(at_genesis)
-3. snapshot_cursor = cursor of the deserialized snapshot (or genesis)
-4. replay_events = storage.events_in_range(source_id, snapshot_cursor, cached_tip)
-5. For each replay_event: coordinator.apply(event) [NO storage write — already stored]
-6. gap_start = cached_tip (or snapshot_cursor if no cached events)
-7. loop: fetch_events(gap_start, live_tip) in chunks
-   - write each chunk to storage (INSERT OR IGNORE)
-   - update coverage
-   - apply events
-   - advance gap_start to last received cursor
-   - stop when gap_start >= live_tip
+RECOVERY SEQUENCE:
+1. Read canonical_tip → get tip_hash (None = no data, proceed to cold start)
+2. Walk parent pointers from tip_hash → find (snapshot_block_hash, snapshot_payload)
+   - If no snapshot: call EventSource::fetch_state() for cold start state
+3. Decode snapshot payload via client Codec → load state into ReducerCore
+4. Collect canonical chain from snapshot_block_hash to tip_hash (Pattern 7)
+5. For each block_hash in canonical chain:
+   a. Load events from storage (SELECT * FROM events WHERE block_hash = ?)
+   b. Decode each event via client Codec
+   c. Call ReducerCore::apply(&event) — NO storage write (replay only)
+6. Determine gap: tip_hash.height → live_tip_height
+7. If gap > 0: call EventSource::fetch_blocks(tip_height + 1, live_tip_height)
+   - For each returned block: write_block() (stores + updates canonical_tip) + apply events
 8. Hand off to Phase 3 live subscription
 ```
 
-The critical invariant: replaying already-stored events does NOT re-write them to storage. The coordinator calls `ReducerCore::apply()` (not `apply_and_accumulate()`-style) for the replay phase.
+### Pattern 9: Simplified Codec Trait
+
+**What:** Client provides encode/decode for event payloads and state only. Cursor serialization is library-internal (postcard).
+
+```rust
+// Source: CONTEXT.md codec simplification decision
+pub trait Codec: Send + Sync + 'static {
+    type Cursor: ChainCursor;
+    type Event: Send + 'static;
+    type State: Clone + Send + 'static;
+
+    /// Serialize event payload to bytes. Library wraps with block/cursor metadata.
+    fn encode_event(&self, event: &Event<Self::Cursor, Self::Event>) -> Vec<u8>;
+
+    /// Deserialize event payload. Returns None on corrupt/incompatible data.
+    fn decode_event(
+        &self,
+        cursor: Self::Cursor,   // decoded by library via postcard
+        payload: &[u8],
+    ) -> Option<Event<Self::Cursor, Self::Event>>;
+
+    /// Serialize state to opaque bytes for snapshot storage.
+    fn encode_state(&self, state: &Self::State) -> Vec<u8>;
+
+    /// Deserialize state from snapshot bytes. Returns None on corrupt/incompatible.
+    fn decode_state(&self, bytes: &[u8]) -> Option<Self::State>;
+}
+```
+
+Note: `cursor_to_tuple`/`tuple_to_cursor` from the old Codec are gone — no longer needed since cursors are stored via postcard, not as (major, minor) integer pairs in the block DAG schema.
 
 ### Anti-Patterns to Avoid
 
-- **Writing events to storage and in-memory in the same atomic step in ReducerCore:** ReducerCore stays pure — it has no storage awareness. The coordinator sequences: write to storage first, then apply to ReducerCore. If apply panics (it's infallible, so this shouldn't happen), the event is in storage but not in memory — safe, recovery replays it.
+- **Deduplication at event granularity (old model):** The new model deduplicates at block granularity. If `block_hash` exists in the blocks table, skip the ENTIRE block. Never try to partially insert a block's events.
 
-- **Using `tokio::sync::Mutex<rusqlite::Connection>` directly:** rusqlite Connection is `!Sync`. Even wrapping in `tokio::sync::Mutex` is problematic because async mutexes hold the guard across await points. Use tokio-rusqlite's dedicated-thread model instead.
+- **Walking the full chain from genesis on every recovery:** Walk backward from tip until you find a snapshot, then stop. Do not traverse the entire chain.
 
-- **Opening a new rusqlite connection per operation:** Expensive. Open once; pass the tokio-rusqlite `Connection` handle (which is `Clone`) to wherever it's needed.
+- **Using the old Storage trait methods (`write_events`, `cached_tip`, `add_coverage`, `write_anchor`):** These are all removed. The new API is block-oriented. Do not try to adapt old code — it must be replaced.
 
-- **Storing cursor data as a serialized BLOB instead of INTEGER pair columns:** The locked decision explicitly uses (major, minor) INTEGER columns for range queries and B-tree indexing. Do not serialize cursors to BLOB — it prevents efficient `WHERE cursor_major >= X` queries.
+- **Storing block_hash as TEXT (hex):** Store as BLOB(32). Equality checks on BLOB are faster than TEXT comparison. The CLI can display as hex with `hex(hash)` if needed.
 
-- **Applying events before writing them to storage:** Invert this. Write first, apply second. On crash after write but before apply: recovery will replay the event. On crash after apply but before write: event is lost — catastrophic for correctness.
+- **Committing block rows and event rows in separate transactions:** Block + all its events must be atomic. On crash between block insert and event inserts, the block would exist with no events — state would be wrong on recovery.
+
+- **Applying events before writing the block to storage:** Write-first invariant from the old model still applies. Store the block atomically, then apply its events to ReducerCore.
 
 ---
 
@@ -462,172 +515,224 @@ The critical invariant: replaying already-stored events does NOT re-write them t
 
 | Problem | Don't Build | Use Instead | Why |
 |---------|-------------|-------------|-----|
-| Schema versioning | Manual `CREATE TABLE IF NOT EXISTS` + version table | rusqlite_migration | `user_version` pragma is atomic; handles upgrade paths correctly; const-constructable |
-| Async SQLite bridge | Raw `spawn_blocking` + `Arc<Mutex<Connection>>` | tokio-rusqlite | Handles the `!Send` `!Sync` issue correctly via dedicated thread; `Connection` is `Clone + Send + Sync` |
-| Coverage interval overlap query | Custom Rust data structure | Pure SQL within rusqlite transaction | Interval overlap in SQL is 2 conditions; transactional merge is simpler than a concurrent in-memory structure |
+| Schema migrations | Manual `CREATE TABLE IF NOT EXISTS` + version tracking | rusqlite_migration (already in Cargo.toml) | Already used; user_version pragma is atomic; add a new M::up() for the DAG schema |
+| Cursor serialization to bytes | Custom binary format | `postcard::to_allocvec` (already in Cargo.toml) | Already chosen in STATE.md; stable wire format; already present |
+| Block hash → bytes conversion | New type | `[u8; 32]` directly | Block hashes ARE 32-byte arrays; no wrapper needed |
+| Forward chain reconstruction | Graph algorithm | Backward walk + Vec::reverse() | Simple, no extra data structures needed since chain is linear between snapshot and tip |
 
-**Key insight:** The async-SQLite impedance mismatch (rusqlite is sync, tokio is async) has a well-established solution in tokio-rusqlite. Don't fight it with mutex gymnastics.
+**Key insight:** The block DAG model is simpler than the old coverage/anchor model. Block existence IS coverage. canonical_tip IS the anchor. The parent pointer chain IS the recovery path. The schema reflects these simplifications — four lightweight tables instead of the old events+snapshots+anchors+coverage.
 
 ---
 
 ## Common Pitfalls
 
-### Pitfall 1: tokio-rusqlite version pinning rusqlite
+### Pitfall 1: Block-level vs Event-level Deduplication
 
-**What goes wrong:** tokio-rusqlite 0.7.0 pins `rusqlite ^0.37.0`. If chainfold takes rusqlite 0.38.0 directly, Cargo may resolve two different rusqlite versions, causing type incompatibility at the `call()` boundary.
+**What goes wrong:** Code checks for duplicate events by (block_hash, cursor) instead of checking for duplicate blocks by block_hash alone. This is slower and misses the architectural point — a block always arrives with all its events.
 
-**Why it happens:** tokio-rusqlite uses `rusqlite::Connection` directly in its closure signature. If Cargo selects different patch versions, the types don't unify.
+**Why it happens:** Carrying over the old cursor-level dedup mindset.
 
-**How to avoid:** Check that tokio-rusqlite 0.7.0 is compatible with rusqlite 0.38.0 before committing to both pinned versions. If incompatible, either use rusqlite 0.37.x or wait for a tokio-rusqlite release that targets 0.38. The `^0.37.0` semver range should accept 0.38 (minor version bump) — verify this during implementation.
+**How to avoid:** Single check: `SELECT EXISTS(SELECT 1 FROM blocks WHERE hash = ?1)`. If true, skip the entire block, return `inserted = false`. Never partially insert a block.
 
-**Warning signs:** `mismatched types` compiler errors at the `call()` closure boundary mentioning rusqlite types.
+**Warning signs:** Events table growing with duplicate entries; tests showing partial block inserts.
 
-### Pitfall 2: WAL mode on network filesystems
+### Pitfall 2: Forward Replay from Wrong Start Point
 
-**What goes wrong:** WAL mode is incompatible with NFS and some other network filesystems. The WAL file uses shared-memory mapping which doesn't work over the network.
+**What goes wrong:** Recovery replays from the snapshot's parent block rather than the snapshot block itself. Events in the snapshot block get applied twice (once in the snapshot, once replayed). State becomes wrong.
 
-**Why it happens:** WAL uses `-wal` and `-shm` sidecar files that require POSIX shared memory semantics.
+**Why it happens:** Off-by-one confusion about whether the snapshot block's events are included in the snapshot payload.
 
-**How to avoid:** This is a local-file cache (PROJECT.md: "cache, not transport"). Document that the SQLite file must be on local disk. Not a practical concern for the project's use case, but worth noting in docs.
+**How to avoid:** The snapshot is keyed by `block_hash`. The snapshot payload contains state AFTER applying all events in that block. Therefore, forward replay starts from the NEXT block after the snapshot block (i.e., walk from snapshot_block.parent toward tip, but collect blocks AFTER the snapshot block). Concretely: `collect_canonical_chain(from_hash = snapshot_block_hash, to_hash = tip_hash)` — the from_hash block is excluded from replay.
 
-**Warning signs:** SQLite errors on open if someone tries to put the DB on NFS.
+**Warning signs:** State after recovery is higher than expected; crash-recovery round-trip test fails with off-by-N-events error.
 
-### Pitfall 3: Coverage query with (major, minor) composite ordering
+### Pitfall 3: Parent Pointer Walk Infinite Loop
 
-**What goes wrong:** Writing the interval overlap query with only `major` comparison gives wrong results when ranges span the same `major` with different `minor` values.
+**What goes wrong:** The parent pointer walk doesn't terminate when reaching genesis (all-zeros parent hash). If genesis has no snapshot, the walk loops forever.
 
-**Why it happens:** Cursors are (major, minor) pairs with lexicographic order. A range from (100, 5) to (100, 20) must be handled correctly — it's within a single block.
+**Why it happens:** Genesis block's parent_hash is `[0u8; 32]` sentinel. If the walk doesn't recognize this sentinel, it tries to query a block with hash = all-zeros, finds nothing, and panics or loops.
 
-**How to avoid:** The overlap condition for [(s_major, s_minor), (e_major, e_minor)] vs [(a_major, a_minor), (b_major, b_minor)] requires full tuple comparison in SQL. Use the pattern shown in Pattern 7: four separate column comparisons, not just `range_end_major >= new_start_major`.
+**How to avoid:** In `find_nearest_snapshot`, explicitly check: `if parent_hash == [0u8; 32] { break }`. Also check if the block doesn't exist in the DB at all (should not happen if data is consistent, but defensively handle it).
 
-**Warning signs:** Coverage queries returning `false` for ranges correctly within cached coverage due to same-block cursor ranges.
+**Warning signs:** Recovery hanging indefinitely; query returning None for parent_hash unexpectedly.
 
-### Pitfall 4: Snapshot write timing and event count
+### Pitfall 4: Transaction Scope for canonical_tip Update
 
-**What goes wrong:** Snapshot count is incremented even when INSERT OR IGNORE silently drops a duplicate event (which doesn't advance state). Snapshot triggers sooner than expected; worst-case replay cost is artificially bounded lower than N distinct events.
+**What goes wrong:** `canonical_tip` is updated in a separate transaction after the block+events transaction commits. Process crashes between the two commits. canonical_tip still points to the old tip. On recovery, the new block's events are replayed (block is in DB) but canonical_tip doesn't include it — recovery stops one block short.
 
-**Why it happens:** The coordinator increments its event counter on every `write_events_batch` call, not on successful distinct inserts.
+**Why it happens:** Splitting what should be one transaction into two for "simplicity."
 
-**How to avoid:** Use `conn.changes()` after batch insert to get the count of rows actually inserted (not ignored). Increment the snapshot counter by `changes()`, not by batch size.
+**How to avoid:** ALWAYS update canonical_tip in the SAME transaction as the block and event rows. See Pattern 5 — it is a single `tx.commit()`.
 
-**Warning signs:** Snapshots created more frequently than expected; deduplication tests showing snapshot files created on duplicate-only batches.
+**Warning signs:** After crash-recovery test, state is one block behind expected; canonical_tip doesn't match the highest block in the blocks table.
 
-### Pitfall 5: Recovery replay re-writing stored events
+### Pitfall 5: Gap Fetch Pagination with Block Heights
 
-**What goes wrong:** During recovery replay (step 4 in the pipeline), the coordinator calls a write-then-apply path instead of a replay-only path. Events get re-inserted (INSERT OR IGNORE handles this but wastes work), more importantly the coverage table may get spurious entries, and the event counter resets the snapshot trigger.
+**What goes wrong:** Gap fetch calls `fetch_blocks(from_height, to_height)` but the implementation advances `from_height` by the returned block count rather than by the actual height of the last returned block + 1. If the source returns blocks non-contiguously (e.g., skips heights), the cursor math is wrong.
 
-**Why it happens:** The coordinator has a single "process event" method that always writes + applies.
+**Why it happens:** Assuming returned block count == height range size.
 
-**How to avoid:** Separate `apply_stored_event(event)` (apply only, no storage write) from `process_new_event(event)` (write then apply). The recovery pipeline calls the former for cached replay, the latter for gap fetch.
+**How to avoid:** Advance from_height by `last_returned_block.height + 1`, not by `returned_blocks.len()`. Check the actual height of the last block in each chunk.
 
-**Warning signs:** Events in the events table have duplicate-looking timestamps in created_at after a crash/restart cycle.
+**Warning signs:** Duplicate blocks fetched across chunk boundaries; gap never closes.
 
-### Pitfall 6: Atomic anchor update
+### Pitfall 6: Snapshot Trigger Counting on Duplicate Blocks
 
-**What goes wrong:** Anchor and event batch are written in separate transactions. Process crashes between the two writes. On recovery, anchor is ahead of stored events — gap calculation is wrong (anchor says "I processed up to X" but events only go to X-1).
+**What goes wrong:** `blocks_since_snapshot` counter increments even when a block is a duplicate (already in DB). Snapshots trigger more frequently than expected.
 
-**Why it happens:** Two separate `commit()` calls instead of one.
+**Why it happens:** Incrementing the counter before checking for duplicate, or incrementing regardless of `write_block` return value.
 
-**How to avoid:** Anchor write MUST be in the same transaction as the event batch. This is a locked decision and must not be violated. Verify this in tests by simulating a crash (drop the connection mid-sequence) and confirming anchor and events are always consistent.
+**How to avoid:** Only increment `blocks_since_snapshot` when `write_block()` returns `true` (new block inserted). If it returns `false` (duplicate), do not count it.
 
-**Warning signs:** After crash-restart tests, state reconstruction produces different results than expected, with anchors appearing to be ahead of actual stored events.
+**Warning signs:** Snapshots created far more frequently than the configured N-block interval.
+
+### Pitfall 7: Migration Strategy for Old Schema
+
+**What goes wrong:** The existing migration v1 (events/snapshots/anchors/coverage tables) conflicts with the new v2 schema. Using `CREATE TABLE IF NOT EXISTS` would silently leave old tables and use new ones simultaneously.
+
+**Why it happens:** Not properly versioning the schema change.
+
+**How to avoid:** Add migration v2 to the `rusqlite_migration` chain that DROPS the old tables and CREATES the new ones. Existing test databases will migrate on open. Since this is a development-phase redesign (no production deployments), dropping old data is acceptable. The migration must be:
+```rust
+M::up("
+    DROP TABLE IF EXISTS coverage;
+    DROP TABLE IF EXISTS anchors;
+    -- Note: cannot drop events/snapshots yet if FK constraints exist
+    -- Drop in correct order respecting existing FKs
+    ...
+    CREATE TABLE blocks (...);
+    CREATE TABLE events (...);
+    ...
+")
+```
+
+**Warning signs:** Tests passing against old schema; new schema queries failing against stale test DBs.
 
 ---
 
 ## Code Examples
 
-Verified patterns from official sources:
+Verified patterns from the codebase and official sources:
 
-### SQLite Connection Open + Configure + Migrate (rusqlite)
+### rusqlite Transaction + prepare_cached Pattern (already used in codebase)
 
 ```rust
-// Source: rusqlite 0.38.0 docs + https://cj.rs/blog/sqlite-pragma-cheatsheet-for-performance-and-consistency/
-// Source: rusqlite_migration 2.4.0 docs
-use rusqlite::Connection;
+// Source: src/storage/sqlite.rs (existing codebase — proven working)
+let tx = conn.unchecked_transaction()?;
+{
+    let mut stmt = tx.prepare_cached(
+        "INSERT OR IGNORE INTO events (source_id, cursor_major, cursor_minor, payload)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for ev in events {
+        stmt.execute(rusqlite::params![
+            ev.source_id, ev.cursor_major, ev.cursor_minor, ev.payload
+        ])?;
+    }
+}
+tx.commit()?;
+```
+
+The DAG version follows the same pattern with block_hash instead of cursor columns.
+
+### BLOB Primary Key Query Pattern
+
+```rust
+// Source: rusqlite docs — BLOB params via slice reference
+let block_hash: [u8; 32] = /* ... */;
+let exists: bool = conn.query_row(
+    "SELECT EXISTS(SELECT 1 FROM blocks WHERE hash = ?1)",
+    rusqlite::params![&block_hash[..]],  // &[u8] implements ToSql as BLOB
+    |row| row.get(0),
+)?;
+```
+
+### postcard Cursor Serialization (library-internal)
+
+```rust
+// Source: src/storage (postcard already in Cargo.toml, decision in STATE.md)
+use postcard::{to_allocvec, from_bytes};
+use serde::{Serialize, de::DeserializeOwned};
+
+fn serialize_cursor<C: Serialize>(cursor: &C) -> Vec<u8> {
+    postcard::to_allocvec(cursor).expect("cursor serialization is infallible for well-formed types")
+}
+
+fn deserialize_cursor<C: DeserializeOwned>(bytes: &[u8]) -> Option<C> {
+    postcard::from_bytes(bytes).ok()
+}
+```
+
+ChainCursor already requires `Serialize + DeserializeOwned` bounds (see `src/cursor/mod.rs`), so this works without any new trait bounds.
+
+### InMemoryStorage Clone Pattern (already proven)
+
+```rust
+// Source: src/storage/memory.rs — existing pattern, reuse for new DAG InMemoryStorage
+#[derive(Clone)]
+pub struct InMemoryStorage {
+    inner: Arc<Mutex<Inner>>,
+}
+// Clone gives shared state — test harness and engine share the same storage
+```
+
+### rusqlite_migration New Migration Version
+
+```rust
+// Source: src/storage/schema.rs (existing) — extend the migration chain
 use rusqlite_migration::{Migrations, M};
 
-const MIGRATIONS: Migrations<'_> = Migrations::from_slice(&[
-    M::up(/* see Pattern 4 DDL */),
-]);
+pub fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![
+        M::up("/* v1 — old linear schema */"),
+        M::up("
+            /* v2 — block DAG schema */
+            DROP TABLE IF EXISTS coverage;
+            DROP TABLE IF EXISTS anchors;
+            DROP TABLE IF EXISTS events;
+            DROP TABLE IF EXISTS snapshots;
 
-fn open_storage(path: &str) -> rusqlite::Result<Connection> {
-    let mut conn = Connection::open(path)?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;"
-    )?;
-    MIGRATIONS.to_latest(&mut conn).expect("migrations failed");
-    Ok(conn)
+            CREATE TABLE blocks ( ... );
+            CREATE TABLE events ( ... );
+            CREATE TABLE snapshots ( ... );
+            CREATE TABLE canonical_tip ( ... );
+        "),
+    ])
 }
 ```
 
-### Async Call via tokio-rusqlite
+---
 
-```rust
-// Source: https://docs.rs/tokio-rusqlite/latest/tokio_rusqlite/struct.Connection.html
-use tokio_rusqlite::Connection;
+## What Must Be Deleted Before Implementing
 
-let conn = Connection::open("chainfold.db").await?;
+The CONTEXT.md explicitly calls out old code that must be removed. These files must be deleted/rewritten — do not try to incrementally patch them:
 
-// From async context — coordinator calls this
-let result = conn.call(|db| {
-    // db is &rusqlite::Connection — fully sync here
-    let count: i64 = db.query_row(
-        "SELECT COUNT(*) FROM events WHERE source_id = ?1",
-        [source_id],
-        |row| row.get(0),
-    )?;
-    Ok(count)
-}).await?;
-```
+| File | Status | Reason |
+|------|--------|--------|
+| `src/storage/mod.rs` | REWRITE | Storage trait changes completely (block-oriented API, no coverage/anchor methods) |
+| `src/storage/sqlite.rs` | REWRITE | New schema, new write_block logic, parent pointer walk |
+| `src/storage/memory.rs` | REWRITE | New InMemoryStorage for block DAG semantics |
+| `src/storage/schema.rs` | MODIFY | Add migration v2 that drops old tables, creates new ones |
+| `src/coordinator/mod.rs` | REWRITE | Engine becomes block-oriented (receives Block, not Vec<Event>) |
+| `src/coordinator/recovery.rs` | REWRITE | New recovery pipeline using parent pointer walk |
+| `src/event.rs` | MODIFY | Remove `block_hash` field |
+| `src/source.rs` | MODIFY | Replace `fetch_events` with `fetch_blocks`; change `subscribe` return type |
+| `src/lib.rs` | MODIFY | Update re-exports for new types |
 
-### ToSql for Vec<u8> (BLOB payload)
+New file to create:
+| File | Status |
+|------|--------|
+| `src/block.rs` | NEW: `Block<C, E>` type |
 
-```rust
-// Source: rusqlite 0.38.0 ToSql impls — Vec<u8> implements ToSql natively
-// No wrapping needed. Pass directly as parameter.
-stmt.execute(rusqlite::params![
-    source_id,          // TEXT — &str implements ToSql
-    cursor_major,       // INTEGER — i64 implements ToSql
-    cursor_minor,       // INTEGER — i64 implements ToSql
-    payload_bytes,      // BLOB — Vec<u8> implements ToSql directly
-])?;
-```
+Tests to delete (old model, will fail against new API):
+- `tests/coordinator_tests.rs` — tests old Engine API
+- `tests/recovery_tests.rs` — tests old recovery pipeline
+- `tests/storage_tests.rs` — tests old Storage trait methods
+- `tests/event_source_tests.rs` — tests old fetch_events API
 
-### Batch Write with Transaction
-
-```rust
-// Source: rusqlite Transaction docs — Transaction implements Deref<Target=Connection>
-let tx = conn.transaction()?;
-let mut stmt = tx.prepare_cached(
-    "INSERT OR IGNORE INTO events (source_id, cursor_major, cursor_minor, payload)
-     VALUES (?1, ?2, ?3, ?4)"
-)?;
-for event in &batch {
-    stmt.execute(rusqlite::params![
-        &event.source_id, event.major, event.minor, &event.payload
-    ])?;
-}
-drop(stmt); // release borrow before commit
-tx.commit()?;
-let rows_inserted = conn.changes(); // how many were NOT ignored
-```
-
-### Postcard Serialization (only if internal BLOBs needed)
-
-```rust
-// Source: https://docs.rs/postcard/1.1.3/postcard/
-// Stable wire format since postcard v1.0.0
-use postcard::{to_allocvec, from_bytes};
-
-// Serialize
-let bytes: Vec<u8> = postcard::to_allocvec(&value)?;
-
-// Deserialize
-let value: MyType = postcard::from_bytes(&bytes)?;
-```
+Tests to keep (still valid):
+- `tests/cursor_tests.rs` — cursors unchanged
+- `tests/reducer_tests.rs` — ReducerCore unchanged (Phase 1)
 
 ---
 
@@ -635,37 +740,81 @@ let value: MyType = postcard::from_bytes(&bytes)?;
 
 | Old Approach | Current Approach | When Changed | Impact |
 |--------------|------------------|--------------|--------|
-| bincode v2 for serialization | postcard 1.1.3 | Dec 2025 (bincode tombstone) | STATE.md tombstone; postcard is the replacement for no_std-friendly compact binary serde |
-| Manual `user_version` tracking | rusqlite_migration with `from_slice` | 2025 (added const constructor in 2.x) | Can now declare migrations as a `const` — zero runtime allocation |
-| `tokio::task::spawn_blocking` directly | tokio-rusqlite 0.7.0 | Ecosystem convergence ~2023-2024 | Dedicated thread model; `Connection` is `Clone + Send + Sync` vs spawn_blocking requiring `move` closures with Arc |
+| Flat events table with (cursor_major, cursor_minor) | Normalized blocks + events with BLOB block_hash | 2026-03-05 (DAG architecture decision) | Parent pointer traversal replaces coverage intervals; block existence IS coverage |
+| Coverage table (interval list) | No coverage table — block existence in blocks table IS coverage | 2026-03-05 | Eliminates the complex interval merge algorithm entirely |
+| Anchors table (named cursors) | canonical_tip table (single bookmark per source) | 2026-03-05 | Simpler: one row per source, updated atomically with block writes |
+| Cursor-level deduplication (UNIQUE on cursor_major, cursor_minor) | Block-level deduplication (check block_hash existence before insert) | 2026-03-05 | Coarser granularity — whole block skip instead of per-event dedup |
+| Cursor → (major, minor) INTEGER pair in Codec | Cursor → postcard bytes in blocks.events.cursor column | 2026-03-05 | Codec no longer needs cursor_to_tuple/tuple_to_cursor; postcard handles generic ChainCursor |
+| tokio-rusqlite for async bridge | Mutex<Connection> (already implemented, working) | Existing codebase | Simpler, no new dependency; Storage trait is sync |
+| bincode for serialization | postcard (tombstone Dec 2025) | STATE.md decision | Already in Cargo.toml as postcard |
 
-**Deprecated/outdated:**
-- bincode: tombstone release December 2025. Do not use. Replacement is postcard (for compact binary) or serde_json (for human-readable).
-- `pragma_update_and_check` for WAL: works, but `execute_batch` is simpler when setting multiple pragmas at once.
+---
+
+## Validation Architecture
+
+### Test Framework
+
+| Property | Value |
+|----------|-------|
+| Framework | Rust built-in (`#[test]` + `#[tokio::test]`) |
+| Config file | none (standard cargo test) |
+| Quick run command | `cargo test` |
+| Full suite command | `cargo test` |
+
+### Phase Requirements → Test Map
+
+| Req ID | Behavior | Test Type | Automated Command | File Exists? |
+|--------|----------|-----------|-------------------|-------------|
+| INGEST-02 | fetch_blocks called in loop for gap > page_size | integration | `cargo test test_chunked_gap_fetch` | ❌ Wave 0 |
+| INGEST-03 | gap between canonical_tip and live tip fetched without duplication | integration | `cargo test test_gap_fetch_no_duplication` | ❌ Wave 0 |
+| INGEST-04 | duplicate block_hash skips entire block | unit | `cargo test test_block_level_deduplication` | ❌ Wave 0 |
+| PERSIST-01 | blocks, events, snapshots written to SQLite with WAL | integration | `cargo test test_sqlite_block_write` | ❌ Wave 0 |
+| PERSIST-02 | blocks table tracks parent_hash; canonical_tip updated | unit | `cargo test test_canonical_tip_update` | ❌ Wave 0 |
+| PERSIST-03 | crash recovery: tip → walk parents → snapshot → replay → gap fetch | integration | `cargo test test_crash_recovery_full_cycle` | ❌ Wave 0 |
+| PERSIST-04 | snapshot created every N blocks on distinct block inserts | unit | `cargo test test_snapshot_every_n_blocks` | ❌ Wave 0 |
+| PERSIST-05 | canonical_tip updated atomically with block write | unit | `cargo test test_canonical_tip_atomic_with_block` | ❌ Wave 0 |
+
+### Sampling Rate
+- **Per task commit:** `cargo test`
+- **Per wave merge:** `cargo test`
+- **Phase gate:** Full suite green before `/gsd:verify-work`
+
+### Wave 0 Gaps
+
+These test files are NET NEW (old test files for the linear model will be deleted):
+
+- [ ] `tests/block_tests.rs` — covers Block<C,E> type construction; INGEST-04 (block-level dedup)
+- [ ] `tests/storage_tests.rs` — REWRITE: covers new Storage trait (write_block, canonical_tip, snapshots by block_hash); PERSIST-01, PERSIST-02, PERSIST-05
+- [ ] `tests/recovery_tests.rs` — REWRITE: covers full crash recovery pipeline; PERSIST-03, PERSIST-04, INGEST-02, INGEST-03
+- [ ] `tests/coordinator_tests.rs` — REWRITE: covers Engine block processing pipeline
+
+Existing files to keep (no changes needed):
+- `tests/cursor_tests.rs` — all 13 tests still pass, cursors unchanged
+- `tests/reducer_tests.rs` — all 9 tests still pass, ReducerCore unchanged
 
 ---
 
 ## Open Questions
 
-1. **tokio-rusqlite 0.7.0 + rusqlite 0.38.0 compatibility**
-   - What we know: tokio-rusqlite 0.7.0 pins `rusqlite ^0.37.0`; semver `^0.37.0` allows 0.37.x and 0.38.x (semver minor is not breaking in Rust crates)
-   - What's unclear: Whether rusqlite 0.37→0.38 had any breaking changes that affect tokio-rusqlite's usage of internal Connection types
-   - Recommendation: During Wave 0, run `cargo add rusqlite@0.38 tokio-rusqlite@0.7` and verify it compiles. If tokio-rusqlite forces a downgrade to 0.37, use rusqlite 0.37 and note that 0.38 features (if any are needed) are not available.
+1. **How does `fetch_blocks` pagination work — by height range or by block hash?**
+   - What we know: The signature `fetch_blocks(from_height: u64, to_height: u64)` uses height ranges. This matches EVM's block range RPC calls (eth_getLogs, eth_getBlockByNumber).
+   - What's unclear: For EVM, the source fetches logs for a block range and constructs Block<EvmCursor, E> objects. This is a Phase 3 concern (EVM adapter), but the trait shape must accommodate it in Phase 2.
+   - Recommendation: Use height range in the signature. Phase 2 only needs MockEventSource implementations in tests. Leave EVM adapter for Phase 3.
 
-2. **Coverage query: tuple comparison correctness at block boundaries**
-   - What we know: The (major, minor) overlap query requires four independent column comparisons to correctly handle same-major ranges
-   - What's unclear: Whether the SQL WHERE clause in Pattern 7 correctly handles the edge case where new_start.major == existing_end.major with different minors
-   - Recommendation: Write a unit test specifically for same-major coverage merging before considering Pattern 7 verified.
+2. **Genesis block representation**
+   - What we know: Genesis has no parent. Convention: `parent_hash = [0u8; 32]` sentinel.
+   - What's unclear: Should genesis be stored in the blocks table, or is it an implied starting point? If `fetch_state` is called at genesis, the state is loaded without any blocks in the DB.
+   - Recommendation: Genesis does NOT need to be in the blocks table. Cold start (no blocks in DB): call `fetch_state()`, initialize ReducerCore. First real block from `fetch_blocks` has some height > 0, its parent_hash is the genesis hash which isn't in DB — that's OK, we don't need to validate parent existence.
 
-3. **postcard need in Phase 2**
-   - What we know: Event and snapshot payloads are client-owned bytes — no internal serialization. Coverage stored as INTEGER columns. Anchors stored as INTEGER columns.
-   - What's unclear: Whether any Phase 2 internal data structures end up needing BLOB storage
-   - Recommendation: Do NOT add postcard as a dependency for Phase 2 unless an actual need arises. The schema as designed stores everything either as TEXT or INTEGER pairs. Mark postcard as a Phase 3+ candidate.
+3. **What happens when canonical_tip has no snapshot on the canonical chain at all?**
+   - What we know: Walk backward from tip looking for snapshot. If genesis reached with no snapshot, fall back to `fetch_state()` and then replay ALL blocks in the canonical chain from genesis to tip.
+   - What's unclear: How far back can this walk go? Potentially thousands of blocks if snapshots are absent.
+   - Recommendation: This is the correct fallback. With N=1000 snapshot interval, worst case is replaying 1000 blocks. Document that the first run (no snapshots) replays everything — expected behavior.
 
-4. **`conn.changes()` after batch INSERT OR IGNORE**
-   - What we know: rusqlite exposes `Connection::changes()` returning the count of rows affected by the last executed DML statement
-   - What's unclear: Whether `changes()` returns correctly after a batch of INSERT OR IGNORE statements (does it return total changes across all statements, or only the last?)
-   - Recommendation: Test this explicitly. If `changes()` only reflects the last statement, count ignores manually or use a counter variable during the batch loop.
+4. **Event cursor column: what type is the cursor in the events table?**
+   - What we know: CONTEXT.md says "Cursor serialization for storage uses postcard (library-internal)." So `events.cursor` is a BLOB containing postcard-serialized `C`.
+   - What's unclear: Does Phase 2 actually need to query events by cursor? Recovery replays events within a block (fetching by block_hash), not by cursor range. Cursor in events table is informational only.
+   - Recommendation: Store cursor as BLOB (postcard bytes) in the events table. No index needed on events.cursor for Phase 2 — only `events.block_hash` is queried. Phase 4 (At(cursor) queries) will add the cursor index if needed.
 
 ---
 
@@ -673,31 +822,30 @@ let value: MyType = postcard::from_bytes(&bytes)?;
 
 ### Primary (HIGH confidence)
 
-- rusqlite 0.38.0 — https://docs.rs/rusqlite/0.38.0/rusqlite/ — Connection API, Transaction, ToSql impls, pragma_update, WAL setup
-- tokio-rusqlite 0.7.0 — https://docs.rs/tokio-rusqlite/latest/tokio_rusqlite/ — Connection::call() pattern, async bridge architecture
-- postcard 1.1.3 — https://docs.rs/postcard/1.1.3/postcard/ — to_allocvec, from_bytes, stable wire format
-- rusqlite_migration 2.4.0 — https://docs.rs/rusqlite_migration/latest/rusqlite_migration/ — Migrations::from_slice, M::up, to_latest
-- SQLite official docs — https://sqlite.org/lang_conflict.html — INSERT OR IGNORE / ON CONFLICT behavior
-- SQLite WAL docs — https://sqlite.org/wal.html — WAL persistence, synchronous=NORMAL behavior
+- Existing codebase (`src/storage/`, `src/coordinator/`, `src/cursor/mod.rs`) — verified by reading source; patterns from sqlite.rs, memory.rs, schema.rs are proven working (all tests pass)
+- rusqlite 0.34 docs — BLOB parameter handling (`&[u8]` implements `ToSql`), `Connection::query_row`, `prepare_cached`, transactions
+- rusqlite_migration 2.x — `Migrations::new(vec![M::up(...)])` pattern (currently used in schema.rs)
+- postcard 1.x — `to_allocvec`, `from_bytes`; ChainCursor already has Serialize + DeserializeOwned bounds
+- CONTEXT.md (02-CONTEXT.md) — locked decisions; authoritative for all architectural choices
+- STATE.md — accumulated project decisions; bincode dead, postcard chosen, block DAG decision
 
 ### Secondary (MEDIUM confidence)
 
-- SQLite pragma cheatsheet — https://cj.rs/blog/sqlite-pragma-cheatsheet-for-performance-and-consistency/ — recommended pragma set for WAL mode with rusqlite
-- crates.io API — rusqlite 0.38.0 features verified (bundled, cache, etc.)
-- STATE.md — bincode tombstone decision (Dec 2025), postcard 1.1.3 as replacement
+- SQLite BLOB primary key behavior — BLOB equality comparison is byte-for-byte; correct for block hashes
+- Parent pointer traversal pattern — standard linked-list walk; applies directly to block parent_hash chain
 
 ### Tertiary (LOW confidence)
 
-- WebSearch: tokio spawn_blocking pattern — confirmed by multiple sources that tokio-rusqlite is the accepted community solution; underlying mechanism verified against tokio-rusqlite docs
+- None — all claims verified against codebase or official decisions
 
 ---
 
 ## Metadata
 
 **Confidence breakdown:**
-- Standard stack: HIGH — versions verified directly from crates.io API; APIs verified from official docs.rs
-- Architecture: HIGH — patterns derived from locked decisions in CONTEXT.md plus official library docs; no novel inventions
-- Pitfalls: MEDIUM-HIGH — most derived from understanding the libraries deeply; pitfall 1 (version pinning) is a real operational concern flagged as open question; pitfall 2 (WAL+NFS) is documented SQLite behavior; others are design-level reasoning from the architecture
+- Standard stack: HIGH — no new dependencies; all libraries already in Cargo.toml, already proven working
+- Architecture: HIGH — derived directly from locked decisions in CONTEXT.md; backed by existing working code patterns in the codebase
+- Pitfalls: HIGH — derived from understanding the new model deeply vs the old model; most pitfalls are architectural (wrong granularity, wrong transaction scope), not library-specific
 
-**Research date:** 2026-03-03
-**Valid until:** 2026-06-03 (rusqlite and tokio-rusqlite are stable; postcard wire format stable since v1.0; rusqlite_migration actively maintained but API is stable)
+**Research date:** 2026-03-05
+**Valid until:** 2026-06-05 (libraries stable; architecture locked by CONTEXT.md decisions)
