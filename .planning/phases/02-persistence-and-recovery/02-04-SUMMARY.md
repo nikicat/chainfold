@@ -77,7 +77,7 @@ completed: 2026-03-05
 1. **Task 1: Implement block DAG recovery pipeline** - `f5e1fda` (feat)
 2. **Task 2: Write recovery integration tests** - `a20cc77` (test)
 
-**Plan metadata:** (TBD after this commit)
+**Plan metadata:** `07492fc` (docs: complete plan)
 
 ## Files Created/Modified
 
