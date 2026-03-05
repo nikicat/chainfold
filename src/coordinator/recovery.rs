@@ -228,7 +228,9 @@ where
 /// - Triggers a snapshot if the snapshot threshold is crossed
 ///
 /// Blocks already in storage (duplicates) are silently skipped by process_block.
-async fn fetch_gap_blocks<SM, S, ES, C>(
+///
+/// pub(crate): exposed so Engine::run() in Plan 03 can call this directly.
+pub(crate) async fn fetch_gap_blocks<SM, S, ES, C>(
     engine: &mut Engine<SM, S, C>,
     source: &ES,
     from_height: u64,

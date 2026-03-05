@@ -132,6 +132,10 @@ where
     config: EngineConfig,
     /// Count of new (non-duplicate) block inserts since the last snapshot.
     blocks_since_snapshot: usize,
+    /// Initial state captured at construction time. Used during reorg recovery
+    /// when no snapshot exists on the canonical chain — allows re-deriving state
+    /// from genesis without needing to re-fetch from the source.
+    initial_state: SM::State,
 }
 
 impl<SM, S, C> Engine<SM, S, C>
@@ -142,12 +146,17 @@ where
 {
     /// Create a new Engine with the given components and configuration.
     pub fn new(core: ReducerCore<SM>, storage: S, codec: C, config: EngineConfig) -> Self {
+        // Capture the initial state from the watch channel at construction time.
+        // This is used during reorg recovery when no snapshot exists on the canonical
+        // chain — the engine needs to replay from genesis using the same starting state.
+        let initial_state = core.subscribe().borrow().clone();
         Self {
             core,
             storage,
             codec,
             config,
             blocks_since_snapshot: 0,
+            initial_state,
         }
     }
 
@@ -255,5 +264,230 @@ where
         for event in events {
             self.core.apply(event);
         }
+    }
+
+    // ================================================================
+    // Reorg detection and state re-derivation
+    // ================================================================
+
+    /// Process a block, detecting and handling reorgs transparently.
+    ///
+    /// If the incoming block's parent_hash matches the current canonical tip,
+    /// this is a normal extension of the chain — delegates to process_block.
+    ///
+    /// If the parent_hash does NOT match the canonical tip, a reorg has occurred.
+    /// The Engine:
+    /// 1. Finds the common ancestor between old and new chains
+    /// 2. Notifies the client via on_reorg callback (BEFORE state changes)
+    /// 3. Re-derives state from fork point (snapshot + replay to common_ancestor)
+    /// 4. Updates canonical_tip to common_ancestor
+    /// 5. Processes the incoming block (which extends from the new branch)
+    ///
+    /// Returns Ok(true) if the block was new, Ok(false) if duplicate.
+    pub fn process_or_reorg(
+        &mut self,
+        block: &Block<SM::Cursor, SM::Event>,
+        on_reorg: &mut impl FnMut(ReorgEvent),
+    ) -> Result<bool, EngineError> {
+        let canonical_tip = self
+            .storage
+            .get_canonical_tip(&self.config.source_id)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?;
+
+        if let Some(tip_hash) = canonical_tip {
+            if block.parent_hash != tip_hash {
+                // Reorg detected: incoming block's parent is NOT the current tip.
+                self.handle_reorg(&tip_hash, block, on_reorg)?;
+            }
+        }
+        // else: no canonical tip — first block ever, just process normally.
+
+        self.process_block(block)
+            .map_err(|e| EngineError::Storage(Box::new(e)))
+    }
+
+    /// Walk parent pointers from both the old tip and the new block's parent chain
+    /// to find the common ancestor (fork point).
+    ///
+    /// Algorithm:
+    /// 1. Walk backward from old_tip, collecting all hashes into a HashSet
+    /// 2. Walk backward from new_parent until finding a hash in the old set
+    ///
+    /// This is O(depth_old + depth_new) — typically O(1-5) for real chain reorgs.
+    fn find_common_ancestor(
+        &self,
+        old_tip: &[u8; 32],
+        new_parent: &[u8; 32],
+    ) -> Result<[u8; 32], EngineError> {
+        let zero_hash = [0u8; 32];
+
+        // Build set of all hashes on the old canonical chain.
+        let mut old_chain = std::collections::HashSet::new();
+        let mut cursor = *old_tip;
+        loop {
+            old_chain.insert(cursor);
+            let parent = self
+                .storage
+                .get_parent_hash(&cursor)
+                .map_err(|e| EngineError::Storage(Box::new(e)))?;
+            match parent {
+                None => break,                       // block not found — stop walking
+                Some(p) if p == zero_hash => break,  // genesis sentinel — stop
+                Some(p) => cursor = p,
+            }
+        }
+
+        // Walk new chain backward until finding a hash in old_chain.
+        let mut new_cursor = *new_parent;
+        loop {
+            if old_chain.contains(&new_cursor) {
+                return Ok(new_cursor);
+            }
+            let parent = self
+                .storage
+                .get_parent_hash(&new_cursor)
+                .map_err(|e| EngineError::Storage(Box::new(e)))?;
+            match parent {
+                None => return Err(EngineError::ReorgWithoutAncestor),
+                Some(p) if p == zero_hash => {
+                    // Reached genesis of new chain. Check if genesis itself is in old chain.
+                    if old_chain.contains(&new_cursor) {
+                        return Ok(new_cursor);
+                    }
+                    return Err(EngineError::ReorgWithoutAncestor);
+                }
+                Some(p) => new_cursor = p,
+            }
+        }
+    }
+
+    /// Handle a detected reorg: notify client, re-derive state from fork point.
+    ///
+    /// Steps:
+    /// 1. Find common ancestor between old_tip and new block's parent chain
+    /// 2. Compute reorg depth (old_tip_height - ancestor_height)
+    /// 3. Fire on_reorg callback with ReorgEvent (BEFORE state changes)
+    /// 4. Re-derive state: find nearest snapshot to ancestor, load it, replay to ancestor
+    /// 5. Update canonical_tip to point to common_ancestor
+    ///
+    /// After this returns, the caller processes the incoming block via process_block,
+    /// which extends the chain from common_ancestor and updates canonical_tip.
+    fn handle_reorg(
+        &mut self,
+        old_tip: &[u8; 32],
+        incoming_block: &Block<SM::Cursor, SM::Event>,
+        on_reorg: &mut impl FnMut(ReorgEvent),
+    ) -> Result<(), EngineError> {
+        // Step 1: Find common ancestor.
+        let common_ancestor =
+            self.find_common_ancestor(old_tip, &incoming_block.parent_hash)?;
+
+        // Step 2: Compute reorg depth.
+        let old_height = self
+            .storage
+            .get_block_height(old_tip)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?
+            .unwrap_or(0);
+        let ancestor_height = self
+            .storage
+            .get_block_height(&common_ancestor)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?
+            .unwrap_or(0);
+        let depth = old_height.saturating_sub(ancestor_height) as u32;
+
+        // Step 3: Notify client BEFORE state re-derivation.
+        on_reorg(ReorgEvent {
+            common_ancestor,
+            old_tip: *old_tip,
+            new_tip: incoming_block.block_hash,
+            depth,
+        });
+
+        // Step 4: Re-derive state from the fork point.
+        // Find the nearest snapshot on the canonical chain up to common_ancestor.
+        let snapshot = self
+            .storage
+            .find_nearest_snapshot(&self.config.source_id, &common_ancestor)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?;
+
+        let zero_hash = [0u8; 32];
+        match snapshot {
+            Some((snap_hash, snap_payload)) => {
+                let state = self
+                    .codec
+                    .decode_state(&snap_payload)
+                    .ok_or(EngineError::DecodeState)?;
+                self.replace_state(state);
+                // Replay from snapshot to common_ancestor (if they differ).
+                if snap_hash != common_ancestor {
+                    self.replay_chain_for_reorg(&snap_hash, &common_ancestor)?;
+                }
+            }
+            None => {
+                // No snapshot on the chain up to common_ancestor.
+                // Reset to initial state and replay all blocks from genesis to ancestor.
+                self.replace_state(self.initial_state.clone());
+                let chain = self
+                    .storage
+                    .collect_canonical_chain(&zero_hash, &common_ancestor)
+                    .map_err(|e| EngineError::Storage(Box::new(e)))?;
+                for block_hash in chain {
+                    self.replay_block_events_for_reorg(&block_hash)?;
+                }
+            }
+        }
+
+        // Step 5: Update canonical_tip to common_ancestor.
+        // process_block (called after handle_reorg) will then extend from here.
+        self.storage
+            .set_canonical_tip(&self.config.source_id, &common_ancestor)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?;
+
+        // Reset snapshot counter — we're starting fresh from the fork point.
+        self.blocks_since_snapshot = 0;
+
+        Ok(())
+    }
+
+    /// Replay stored events from from_hash (exclusive) to to_hash (inclusive).
+    ///
+    /// Reuses the DAG walk pattern from recovery. Adapts storage errors to EngineError.
+    fn replay_chain_for_reorg(
+        &mut self,
+        from_hash: &[u8; 32],
+        to_hash: &[u8; 32],
+    ) -> Result<(), EngineError> {
+        let chain = self
+            .storage
+            .collect_canonical_chain(from_hash, to_hash)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?;
+        for block_hash in chain {
+            self.replay_block_events_for_reorg(&block_hash)?;
+        }
+        Ok(())
+    }
+
+    /// Decode and replay events for a single block through the engine WITHOUT writing to storage.
+    ///
+    /// Used during reorg re-derivation: loads raw (cursor_bytes, payload_bytes) from
+    /// storage, decodes each event via Codec, and calls replay_events.
+    fn replay_block_events_for_reorg(
+        &mut self,
+        block_hash: &[u8; 32],
+    ) -> Result<(), EngineError> {
+        let stored = self
+            .storage
+            .load_block_events(block_hash)
+            .map_err(|e| EngineError::Storage(Box::new(e)))?;
+        let events: Vec<Event<SM::Cursor, SM::Event>> = stored
+            .iter()
+            .filter_map(|(cursor_bytes, payload_bytes)| {
+                let cursor: SM::Cursor = postcard::from_bytes(cursor_bytes).ok()?;
+                let data: SM::Event = self.codec.decode_event(payload_bytes)?;
+                Some(Event { cursor, data })
+            })
+            .collect();
+        self.replay_events(&events);
+        Ok(())
     }
 }
