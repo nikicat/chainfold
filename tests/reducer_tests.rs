@@ -35,7 +35,6 @@ fn make_event(block_number: u64, log_index: u32, amount: i128) -> Event<EvmCurso
             log_index,
         },
         data: amount,
-        block_hash: None,
     }
 }
 

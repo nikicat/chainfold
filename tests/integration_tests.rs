@@ -8,6 +8,7 @@
 //! CORE-04: In-memory reducer determinism
 //! CORE-05: Generic type parameter propagation (no runtime dispatch)
 
+use chainfold::block::Block;
 use chainfold::cursor::{BtcCursor, CexCursor, EvmCursor};
 use chainfold::event::Event;
 use chainfold::machine::{ReducerCore, StateMachine};
@@ -43,19 +44,38 @@ fn evm_event(block_number: u64, log_index: u32, amount: i128) -> Event<EvmCursor
             log_index,
         },
         data: amount,
-        block_hash: None,
     }
 }
 
-/// MockEventSource: holds a fixed Vec of events, filters by cursor range.
-/// E requires Clone + Send + Sync because EventSource requires Sync on the impl.
-struct MockEventSource<C: chainfold::ChainCursor, E: Clone + Send + Sync + 'static> {
-    events: Vec<Event<C, E>>,
+fn make_block_u64(height: u64, data: u64) -> Block<EvmCursor, u64> {
+    let mut hash = [0u8; 32];
+    hash[0] = (height & 0xff) as u8;
+    let mut parent_hash = [0u8; 32];
+    if height > 0 {
+        parent_hash[0] = ((height - 1) & 0xff) as u8;
+    }
+    Block {
+        block_hash: hash,
+        parent_hash,
+        height,
+        events: vec![Event {
+            cursor: EvmCursor {
+                block_number: height,
+                log_index: 0,
+            },
+            data,
+        }],
+    }
+}
+
+/// MockBlockSource: holds a fixed Vec of blocks, filters by height range.
+struct MockBlockSource<C: chainfold::ChainCursor, E: Clone + Send + Sync + 'static> {
+    blocks: Vec<Block<C, E>>,
     state_bytes: Vec<u8>,
 }
 
 #[async_trait::async_trait]
-impl<C, E> EventSource for MockEventSource<C, E>
+impl<C, E> EventSource for MockBlockSource<C, E>
 where
     C: chainfold::ChainCursor,
     E: Clone + Send + Sync + 'static,
@@ -68,15 +88,15 @@ where
         Ok(self.state_bytes.clone())
     }
 
-    async fn fetch_events(
+    async fn fetch_blocks(
         &self,
-        from: &C,
-        to: &C,
-    ) -> Result<Vec<Event<C, E>>, Self::Error> {
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<Vec<Block<C, E>>, Self::Error> {
         let filtered = self
-            .events
+            .blocks
             .iter()
-            .filter(|e| &e.cursor >= from && &e.cursor < to)
+            .filter(|b| b.height >= from_height && b.height < to_height)
             .cloned()
             .collect();
         Ok(filtered)
@@ -84,11 +104,11 @@ where
 
     async fn subscribe(
         &self,
-        _from: &C,
+        _from_height: u64,
     ) -> Result<
         Box<
             dyn futures_core::Stream<
-                    Item = Result<Event<C, E>, Self::Error>,
+                    Item = Result<Block<C, E>, Self::Error>,
                 > + Unpin
                 + Send,
         >,
@@ -104,75 +124,45 @@ where
 
 /// Generic helper that uses EventSource without knowing the concrete type.
 /// This proves the trait is a proper abstraction.
-async fn fetch_from_source<S: EventSource>(
+async fn fetch_blocks_from_source<S: EventSource>(
     source: &S,
-    from: &S::Cursor,
-    to: &S::Cursor,
-) -> Vec<Event<S::Cursor, S::Event>> {
-    source.fetch_events(from, to).await.unwrap()
+    from_height: u64,
+    to_height: u64,
+) -> Vec<Block<S::Cursor, S::Event>> {
+    source.fetch_blocks(from_height, to_height).await.unwrap()
 }
 
 /// CORE-01: A caller can implement the EventSource trait for a mock chain and pass it to
 /// library code without knowing about EVM or Bitcoin specifics.
 #[tokio::test]
 async fn core_01_event_source_trait_abstraction() {
-    let source = MockEventSource {
-        events: vec![
-            Event {
-                cursor: EvmCursor {
-                    block_number: 10,
-                    log_index: 0,
-                },
-                data: 100_u64,
-                block_hash: None,
-            },
-            Event {
-                cursor: EvmCursor {
-                    block_number: 20,
-                    log_index: 0,
-                },
-                data: 200_u64,
-                block_hash: None,
-            },
-            Event {
-                cursor: EvmCursor {
-                    block_number: 30,
-                    log_index: 0,
-                },
-                data: 300_u64,
-                block_hash: None,
-            },
-        ],
+    let blocks = vec![
+        make_block_u64(10, 100),
+        make_block_u64(20, 200),
+        make_block_u64(30, 300),
+    ];
+    let source = MockBlockSource {
+        blocks,
         state_bytes: vec![],
     };
 
-    // Call a generic function — no knowledge of EvmCursor inside fetch_from_source.
-    let from = EvmCursor {
-        block_number: 10,
-        log_index: 0,
-    };
-    let to = EvmCursor {
-        block_number: 25,
-        log_index: 0,
-    };
-    let events = fetch_from_source(&source, &from, &to).await;
+    // Call a generic function — no knowledge of EvmCursor inside fetch_blocks_from_source.
+    let events = fetch_blocks_from_source(&source, 10, 25).await;
 
-    assert_eq!(events.len(), 2, "CORE-01: generic fetch returned wrong number of events");
-    assert_eq!(events[0].data, 100);
-    assert_eq!(events[1].data, 200);
+    assert_eq!(events.len(), 2, "CORE-01: generic fetch returned wrong number of blocks");
+    assert_eq!(events[0].events[0].data, 100);
+    assert_eq!(events[1].events[0].data, 200);
 
     // Verify fetch_state also works through the abstraction.
-    let source_with_state = MockEventSource::<EvmCursor, u64> {
-        events: vec![],
+    let source_with_state: MockBlockSource<EvmCursor, u64> = MockBlockSource {
+        blocks: vec![],
         state_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
     };
-    let bytes = source_with_state
-        .fetch_state(&EvmCursor {
-            block_number: 0,
-            log_index: 0,
-        })
-        .await
-        .unwrap();
+    let at = EvmCursor {
+        block_number: 0,
+        log_index: 0,
+    };
+    let bytes = source_with_state.fetch_state(&at).await.unwrap();
     assert_eq!(bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
 }
 
@@ -199,7 +189,6 @@ fn core_02_state_machine_pure_reducer() {
     );
 
     // Verify apply is synchronous — no async machinery involved.
-    // (If this code compiles and runs without tokio::spawn or .await, it proves it's sync.)
     let sm2 = Arc::new(BalanceTracker);
     let (mut core2, receiver2) = ReducerCore::new(sm2, 0_u128);
     for amount in [1000_i128, -250, 75] {

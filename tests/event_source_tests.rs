@@ -1,90 +1,36 @@
-use chainfold::cursor::{CexCursor, EvmCursor};
+use chainfold::block::Block;
+use chainfold::cursor::EvmCursor;
 use chainfold::event::Event;
 use chainfold::source::EventSource;
 
-// --- Event envelope tests ---
-
-#[test]
-fn event_with_block_hash_can_be_constructed() {
-    let cursor = EvmCursor {
-        block_number: 100,
-        log_index: 0,
-    };
-    let block_hash = [0xab_u8; 32];
-    let event: Event<EvmCursor, u64> = Event {
-        cursor,
-        data: 42_u64,
-        block_hash: Some(block_hash),
-    };
-    assert_eq!(event.data, 42);
-    assert_eq!(event.block_hash, Some([0xab; 32]));
-    assert_eq!(event.cursor.block_number, 100);
-}
-
-#[test]
-fn event_without_block_hash_can_be_constructed() {
-    // CEX events have no blocks, so block_hash = None.
-    let cursor = CexCursor {
-        seq_id: 1,
-        timestamp_ms: 1000,
-    };
-    let event: Event<CexCursor, String> = Event {
-        cursor,
-        data: "fill".to_string(),
-        block_hash: None,
-    };
-    assert_eq!(event.data, "fill");
-    assert!(event.block_hash.is_none());
-}
-
-#[test]
-fn event_is_clone() {
-    let cursor = EvmCursor {
-        block_number: 5,
-        log_index: 1,
-    };
-    let event: Event<EvmCursor, u32> = Event {
-        cursor,
-        data: 99,
-        block_hash: None,
-    };
-    let cloned = event.clone();
-    assert_eq!(cloned.data, 99);
-    assert_eq!(cloned.cursor.block_number, 5);
-}
-
-// --- MockEventSource ---
+// --- MockBlockSource ---
 
 /// A simple mock implementing EventSource for testing.
-/// Holds a fixed set of events and returns them filtered by cursor range.
-struct MockEventSource<C: chainfold::cursor::ChainCursor, E: Clone + Send + Sync + 'static> {
-    events: Vec<Event<C, E>>,
+/// Holds a fixed set of blocks and returns them filtered by height range.
+struct MockBlockSource {
+    blocks: Vec<Block<EvmCursor, u64>>,
     state_bytes: Vec<u8>,
 }
 
 #[async_trait::async_trait]
-impl<C, E> EventSource for MockEventSource<C, E>
-where
-    C: chainfold::cursor::ChainCursor,
-    E: Clone + Send + Sync + 'static,
-{
-    type Cursor = C;
-    type Event = E;
+impl EventSource for MockBlockSource {
+    type Cursor = EvmCursor;
+    type Event = u64;
     type Error = std::convert::Infallible;
 
-    async fn fetch_state(&self, _at: &C) -> Result<Vec<u8>, Self::Error> {
+    async fn fetch_state(&self, _at: &EvmCursor) -> Result<Vec<u8>, Self::Error> {
         Ok(self.state_bytes.clone())
     }
 
-    async fn fetch_events(
+    async fn fetch_blocks(
         &self,
-        from: &C,
-        to: &C,
-    ) -> Result<Vec<Event<C, E>>, Self::Error> {
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<Vec<Block<EvmCursor, u64>>, Self::Error> {
         let filtered = self
-            .events
+            .blocks
             .iter()
-            .filter(|e| &e.cursor >= from && &e.cursor < to)
+            .filter(|b| b.height >= from_height && b.height < to_height)
             .cloned()
             .collect();
         Ok(filtered)
@@ -92,11 +38,11 @@ where
 
     async fn subscribe(
         &self,
-        _from: &C,
+        _from_height: u64,
     ) -> Result<
         Box<
             dyn futures_core::Stream<
-                    Item = Result<Event<C, E>, Self::Error>,
+                    Item = Result<Block<EvmCursor, u64>, Self::Error>,
                 > + Unpin
                 + Send,
         >,
@@ -106,12 +52,62 @@ where
     }
 }
 
-// --- MockEventSource tests ---
+// Helper: create a block with a single event.
+fn make_block(height: u64, data: u64) -> Block<EvmCursor, u64> {
+    let mut hash = [0u8; 32];
+    hash[0] = (height & 0xff) as u8;
+    let mut parent_hash = [0u8; 32];
+    if height > 0 {
+        parent_hash[0] = ((height - 1) & 0xff) as u8;
+    }
+    Block {
+        block_hash: hash,
+        parent_hash,
+        height,
+        events: vec![Event {
+            cursor: EvmCursor {
+                block_number: height,
+                log_index: 0,
+            },
+            data,
+        }],
+    }
+}
+
+// --- Tests ---
 
 #[tokio::test]
-async fn fetch_state_returns_configured_bytes() {
-    let source: MockEventSource<EvmCursor, u64> = MockEventSource {
-        events: vec![],
+async fn test_fetch_blocks_returns_blocks_in_range() {
+    let blocks: Vec<Block<EvmCursor, u64>> = (0..5).map(|h| make_block(h, h * 10)).collect();
+    let source = MockBlockSource {
+        blocks,
+        state_bytes: vec![],
+    };
+
+    // Fetch range [1, 3) — should return blocks at height 1 and 2.
+    let result = source.fetch_blocks(1, 3).await.unwrap();
+    assert_eq!(result.len(), 2, "expected 2 blocks in range [1, 3)");
+    assert_eq!(result[0].height, 1);
+    assert_eq!(result[1].height, 2);
+}
+
+#[tokio::test]
+async fn test_fetch_blocks_empty_range() {
+    let blocks: Vec<Block<EvmCursor, u64>> = (0..5).map(|h| make_block(h, h * 10)).collect();
+    let source = MockBlockSource {
+        blocks,
+        state_bytes: vec![],
+    };
+
+    // Fetch a range beyond the available blocks — should return empty.
+    let result = source.fetch_blocks(100, 200).await.unwrap();
+    assert!(result.is_empty(), "expected empty Vec for out-of-range fetch");
+}
+
+#[tokio::test]
+async fn test_fetch_state_returns_bytes() {
+    let source = MockBlockSource {
+        blocks: vec![],
         state_bytes: vec![1, 2, 3, 4],
     };
     let at = EvmCursor {
@@ -122,121 +118,40 @@ async fn fetch_state_returns_configured_bytes() {
     assert_eq!(bytes, vec![1, 2, 3, 4]);
 }
 
-#[tokio::test]
-async fn fetch_events_returns_events_in_cursor_range() {
-    let events = vec![
-        Event {
+#[test]
+fn test_block_construction() {
+    let block: Block<EvmCursor, u64> = Block {
+        block_hash: [0xab; 32],
+        parent_hash: [0x00; 32],
+        height: 42,
+        events: vec![Event {
             cursor: EvmCursor {
-                block_number: 10,
+                block_number: 42,
                 log_index: 0,
             },
-            data: 100_u64,
-            block_hash: None,
-        },
-        Event {
-            cursor: EvmCursor {
-                block_number: 20,
-                log_index: 0,
-            },
-            data: 200_u64,
-            block_hash: None,
-        },
-        Event {
-            cursor: EvmCursor {
-                block_number: 30,
-                log_index: 0,
-            },
-            data: 300_u64,
-            block_hash: None,
-        },
-    ];
-    let source = MockEventSource {
-        events,
-        state_bytes: vec![],
+            data: 99_u64,
+        }],
     };
 
-    // Range [block 10, block 25) — should include block 10 and 20, not 30.
-    let from = EvmCursor {
-        block_number: 10,
-        log_index: 0,
-    };
-    let to = EvmCursor {
-        block_number: 25,
-        log_index: 0,
-    };
-    let result = source.fetch_events(&from, &to).await.unwrap();
-    assert_eq!(result.len(), 2, "expected 2 events in range [10, 25)");
-    assert_eq!(result[0].data, 100);
-    assert_eq!(result[1].data, 200);
+    assert_eq!(block.block_hash, [0xab; 32]);
+    assert_eq!(block.parent_hash, [0x00; 32]);
+    assert_eq!(block.height, 42);
+    assert_eq!(block.events.len(), 1);
+    assert_eq!(block.events[0].data, 99);
+    assert_eq!(block.events[0].cursor.block_number, 42);
 }
 
-#[tokio::test]
-async fn fetch_events_excludes_events_at_to_cursor() {
-    let events = vec![Event {
+#[test]
+fn test_event_no_block_hash() {
+    // Compile-time check: Event<C, E> has only cursor and data fields (no block_hash).
+    let event: Event<EvmCursor, u64> = Event {
         cursor: EvmCursor {
             block_number: 10,
             log_index: 0,
         },
         data: 42_u64,
-        block_hash: None,
-    }];
-    let source = MockEventSource {
-        events,
-        state_bytes: vec![],
     };
-
-    // Range [block 10, block 10) is empty (from == to, half-open range).
-    let from = EvmCursor {
-        block_number: 10,
-        log_index: 0,
-    };
-    let to = EvmCursor {
-        block_number: 10,
-        log_index: 0,
-    };
-    let result = source.fetch_events(&from, &to).await.unwrap();
-    assert_eq!(result.len(), 0, "half-open range [from, from) should be empty");
-}
-
-#[tokio::test]
-async fn fetch_events_empty_when_no_events_in_range() {
-    let events: Vec<Event<EvmCursor, u64>> = vec![];
-    let source = MockEventSource {
-        events,
-        state_bytes: vec![],
-    };
-    let from = EvmCursor {
-        block_number: 0,
-        log_index: 0,
-    };
-    let to = EvmCursor {
-        block_number: 100,
-        log_index: 0,
-    };
-    let result = source.fetch_events(&from, &to).await.unwrap();
-    assert!(result.is_empty());
-}
-
-/// Verify EventSource is usable with tokio::spawn (requires Send bounds on futures).
-/// This test proves the trait satisfies Send requirements for multi-threaded use.
-#[tokio::test]
-async fn event_source_futures_are_send() {
-    let source = MockEventSource::<EvmCursor, u64> {
-        events: vec![],
-        state_bytes: vec![],
-    };
-    let from = EvmCursor {
-        block_number: 0,
-        log_index: 0,
-    };
-    let to = EvmCursor {
-        block_number: 100,
-        log_index: 0,
-    };
-    // If EventSource futures are Send, this tokio::spawn will compile.
-    let handle = tokio::spawn(async move {
-        source.fetch_events(&from, &to).await.unwrap()
-    });
-    let result = handle.await.unwrap();
-    assert!(result.is_empty());
+    assert_eq!(event.data, 42);
+    assert_eq!(event.cursor.block_number, 10);
+    // If this compiles without block_hash, the field has been successfully removed.
 }

@@ -2,9 +2,9 @@ use crate::cursor::ChainCursor;
 
 /// Library-owned envelope wrapping a user event payload.
 ///
-/// The library adds ordering metadata (cursor) and optional chain metadata (block_hash).
-/// The user's event type E is opaque to the library — no Serialize bound is required on E
-/// in Phase 1, as events flow as native Rust types without library-level serialization.
+/// Event carries the cursor (ordering position) and the user's event payload.
+/// Block context (block hash, height, parent hash) lives on Block<C, E>, not here.
+/// Events are always accessed through their containing Block.
 ///
 /// Generic parameters:
 /// - C: ChainCursor — the cursor type for this source (EvmCursor, BtcCursor, CexCursor)
@@ -18,8 +18,4 @@ pub struct Event<C: ChainCursor, E> {
 
     /// The user's event payload. Opaque to the library.
     pub data: E,
-
-    /// Block hash at the cursor position. None for CEX sources (no concept of blocks).
-    /// Used for reorg detection in later phases.
-    pub block_hash: Option<[u8; 32]>,
 }
