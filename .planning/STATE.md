@@ -83,6 +83,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Architecture revised for block DAG model — Phase 2 needs replanning
-Resume file: .planning/ROADMAP.md
-Resume command: /gsd:discuss-phase 2
+Stopped at: Phase 2 context revised for block DAG architecture
+Resume file: .planning/phases/02-persistence-and-recovery/02-CONTEXT.md
+Resume command: /gsd:plan-phase 2
