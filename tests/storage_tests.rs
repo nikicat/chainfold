@@ -1,9 +1,10 @@
-/// Unit tests for InMemoryStorage — block DAG semantics.
+/// Unit tests for InMemoryStorage and SqliteStorage — block DAG semantics.
 ///
-/// These tests validate that InMemoryStorage correctly implements the Storage trait:
-/// block-level deduplication, canonical tip tracking, parent pointer traversal,
-/// snapshot finding, chain collection, and source isolation.
+/// These tests validate that both storage implementations correctly implement
+/// the Storage trait: block-level deduplication, canonical tip tracking, parent
+/// pointer traversal, snapshot finding, chain collection, and source isolation.
 use chainfold::storage::InMemoryStorage;
+use chainfold::storage::SqliteStorage;
 use chainfold::storage::Storage;
 
 // ============================================================
@@ -370,4 +371,159 @@ fn test_block_level_dedup_skips_all_events() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].1, b"original-payload".to_vec(),
         "second write should be entirely skipped, original events preserved");
+}
+
+// ============================================================
+// SqliteStorage tests — same semantics as InMemoryStorage
+// ============================================================
+
+#[test]
+fn test_sqlite_write_block_and_read_tip() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+
+    let is_new = storage
+        .write_block("src1", &hash_a, &GENESIS, 0, &[])
+        .expect("write_block");
+    assert!(is_new, "new block should return true");
+
+    let tip = storage.get_canonical_tip("src1").expect("get_canonical_tip");
+    assert_eq!(tip, Some(hash_a), "canonical tip should be hash_a");
+}
+
+#[test]
+fn test_sqlite_block_dedup() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+
+    let first = storage
+        .write_block("src1", &hash_a, &GENESIS, 0, &[(b"c1".as_ref(), b"payload-original".as_ref())])
+        .expect("first write");
+    assert!(first);
+
+    let second = storage
+        .write_block("src1", &hash_a, &GENESIS, 0, &[(b"c2".as_ref(), b"payload-replacement".as_ref())])
+        .expect("second write");
+    assert!(!second, "duplicate block should return false");
+
+    // Events must be from the first write only.
+    let events = storage.load_block_events(&hash_a).expect("load_block_events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1, b"payload-original".to_vec(),
+        "duplicate write must not overwrite events");
+}
+
+#[test]
+fn test_sqlite_find_nearest_snapshot() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+    let hash_b = make_block_hash(2);
+    let hash_c = make_block_hash(3);
+
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+    storage.write_block("src1", &hash_b, &hash_a, 1, &[]).unwrap();
+    storage.write_block("src1", &hash_c, &hash_b, 2, &[]).unwrap();
+
+    storage.write_snapshot("src1", &hash_b, b"state-at-B").unwrap();
+
+    let found = storage
+        .find_nearest_snapshot("src1", &hash_c)
+        .expect("find_nearest_snapshot");
+
+    let (found_hash, found_payload) = found.expect("should find snapshot");
+    assert_eq!(found_hash, hash_b);
+    assert_eq!(found_payload, b"state-at-B".to_vec());
+}
+
+#[test]
+fn test_sqlite_find_nearest_snapshot_none() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+
+    let found = storage.find_nearest_snapshot("src1", &hash_a).unwrap();
+    assert_eq!(found, None, "no snapshot should return None");
+}
+
+#[test]
+fn test_sqlite_collect_chain() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+    let hash_b = make_block_hash(2);
+    let hash_c = make_block_hash(3);
+    let hash_d = make_block_hash(4);
+
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+    storage.write_block("src1", &hash_b, &hash_a, 1, &[]).unwrap();
+    storage.write_block("src1", &hash_c, &hash_b, 2, &[]).unwrap();
+    storage.write_block("src1", &hash_d, &hash_c, 3, &[]).unwrap();
+
+    let chain = storage
+        .collect_canonical_chain(&hash_a, &hash_d)
+        .expect("collect_canonical_chain");
+
+    // from_hash (A) is exclusive, to_hash (D) is inclusive
+    assert_eq!(chain, vec![hash_b, hash_c, hash_d]);
+}
+
+#[test]
+fn test_sqlite_collect_chain_same_hash() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+    storage.write_block("src1", &hash_a, &GENESIS, 0, &[]).unwrap();
+
+    let chain = storage
+        .collect_canonical_chain(&hash_a, &hash_a)
+        .expect("collect_canonical_chain");
+    assert_eq!(chain, Vec::<[u8; 32]>::new());
+}
+
+#[test]
+fn test_sqlite_load_events() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+
+    let events: &[(&[u8], &[u8])] = &[
+        (b"cursor-1", b"payload-1"),
+        (b"cursor-2", b"payload-2"),
+    ];
+    storage.write_block("src1", &hash_a, &GENESIS, 0, events).unwrap();
+
+    let loaded = storage.load_block_events(&hash_a).expect("load_block_events");
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0], (b"cursor-1".to_vec(), b"payload-1".to_vec()));
+    assert_eq!(loaded[1], (b"cursor-2".to_vec(), b"payload-2".to_vec()));
+}
+
+#[test]
+fn test_sqlite_load_events_empty_for_unknown() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let unknown = make_block_hash(99);
+    let loaded = storage.load_block_events(&unknown).unwrap();
+    assert_eq!(loaded, vec![]);
+}
+
+#[test]
+fn test_sqlite_schema_migration() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    // If we can open and run a trivial query, migrations ran successfully.
+    // Write a block to verify the schema is correct.
+    let hash_a = make_block_hash(1);
+    let result = storage.write_block("src1", &hash_a, &GENESIS, 0, &[]);
+    assert!(result.is_ok(), "schema migration should produce a working schema");
+}
+
+#[test]
+fn test_sqlite_get_block_height() {
+    let storage = SqliteStorage::open_in_memory().expect("open_in_memory");
+    let hash_a = make_block_hash(1);
+    let unknown = make_block_hash(99);
+
+    storage.write_block("src1", &hash_a, &GENESIS, 42, &[]).unwrap();
+
+    let height = storage.get_block_height(&hash_a).unwrap();
+    assert_eq!(height, Some(42));
+
+    let none = storage.get_block_height(&unknown).unwrap();
+    assert_eq!(none, None);
 }
