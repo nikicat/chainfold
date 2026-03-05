@@ -18,11 +18,11 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Event Ingestion
 
-- [ ] **INGEST-01**: Library consumes live events from an EventSource subscription and applies them to state in real-time
+- [x] **INGEST-01**: Library consumes live events from an EventSource subscription and applies them to state in real-time
 - [x] **INGEST-02**: Library fetches historical events via EventSource in chunked range queries respecting RPC provider limits
 - [x] **INGEST-03**: Library stitches the gap between cached blocks and live subscription start without missing or duplicating events
 - [x] **INGEST-04**: Library deduplicates events by (block_hash, cursor) so overlapping backfill and subscription windows don't corrupt state
-- [ ] **INGEST-05**: Hot path is in-process: events flow from source through Apply to callbacks without IPC or serialization on the critical path
+- [x] **INGEST-05**: Hot path is in-process: events flow from source through Apply to callbacks without IPC or serialization on the critical path
 
 ### Persistence & Recovery
 
@@ -37,7 +37,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **SAFETY-01**: Library maintains a block DAG and tracks which block is the canonical tip as reported by EventSource
 - [x] **SAFETY-02**: When the canonical tip changes to a different branch (reorg), the library transparently re-derives state from the fork point on the new canonical chain — client's Current() always reflects canonical state without special reorg handling
-- [ ] **SAFETY-03**: Library handles WebSocket disconnection with exponential backoff, re-subscribe from last anchor, and gap refetch
+- [x] **SAFETY-03**: Library handles WebSocket disconnection with exponential backoff, re-subscribe from last anchor, and gap refetch
 
 ### Query API
 
@@ -99,7 +99,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CORE-03 | Phase 1 | Complete (01-01) |
 | CORE-04 | Phase 1 | Complete (01-02) |
 | CORE-05 | Phase 1 | Complete (01-02) |
-| INGEST-01 | Phase 3 | Pending |
+| INGEST-01 | Phase 3 | Complete |
 | INGEST-02 | Phase 2 | Pending (redesign) |
 | INGEST-03 | Phase 2 | Pending (redesign) |
 | INGEST-04 | Phase 2 | Pending (redesign) |
@@ -112,7 +112,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERSIST-06 | Phase 4 | Pending |
 | SAFETY-01 | Phase 3 | Complete (03-02: process_or_reorg, canonical tip tracking, find_common_ancestor) |
 | SAFETY-02 | Phase 3 | Complete (03-02: handle_reorg, snapshot+replay re-derivation, initial_state for no-snapshot) |
-| SAFETY-03 | Phase 3 | Pending |
+| SAFETY-03 | Phase 3 | Complete |
 | QUERY-01 | Phase 4 | Pending |
 | QUERY-02 | Phase 4 | Pending |
 | QUERY-03 | Phase 4 | Pending |

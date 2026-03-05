@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 3 — Live Subscription (next phase)
+**Current focus:** Phase 3 — Live Subscription (COMPLETE — all 3 plans done)
 
 ## Current Position
 
-Phase: 3 of 4 (Live Subscriptions and Reorg Safety) — IN PROGRESS
-Plan: 2 of 3 (03-02 complete — Reorg detection and state re-derivation)
-Status: Phase 3 in progress. Plans 03-01 and 03-02 complete.
-Last activity: 2026-03-05 — 03-02 executed: process_or_reorg, find_common_ancestor, handle_reorg implemented; 99 tests passing
+Phase: 3 of 4 (Live Subscriptions and Reorg Safety) — COMPLETE
+Plan: 3 of 3 (03-03 complete — Engine::run() live event loop)
+Status: Phase 3 complete. All plans 03-01, 03-02, 03-03 complete.
+Last activity: 2026-03-05 — 03-03 executed: Engine::run() with biased select!, micro-batching, exponential backoff, inline gap fill; 107 tests passing
 
-Progress: [█████████░] 75% (Phase 1 complete, Phase 2 complete, Phase 3 two-thirds done)
+Progress: [██████████] 90% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 remaining)
 
 ## Architecture Revision (2026-03-05)
 
@@ -88,6 +88,11 @@ Recent decisions affecting current work:
 - **03-02: find_common_ancestor algorithm** — HashSet of old chain hashes + backward walk of new chain; O(depth_old + depth_new); returns ReorgWithoutAncestor at genesis sentinel
 - **03-02: on_reorg fires before state mutation** — client callback sees pre-reorg state context; state reflects new branch only after process_or_reorg returns
 - **03-02: fetch_gap_blocks pub(crate)** — exposed for Engine::run() in Plan 03 gap-fill phase
+- **03-03: cancel.is_cancelled() at two points** — top of outer loop AND inside subscribe Err branch; handles race between stream end and cancel token
+- **03-03: source: &ES borrow** — Engine::run() borrows source to allow multiple subscribe() calls and fetch_gap_blocks across reconnect cycles
+- **03-03: Inline gap fill per-block** — check block.height > tip+1 before each block in batch loop; calls fetch_gap_blocks for the range
+- **03-03: tokio macros in main deps** — tokio::select! used in lib code; requires macros + rt-multi-thread in [dependencies] not just [dev-dependencies]
+- **03-03: Test Pattern A preferred** — max_retries=0 causes run() to return Err(ReconnectExhausted) after finite stream; more reliable than watcher-based cancellation with sync mock subscribe()
 
 ### Pending Todos
 
@@ -101,6 +106,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Completed 03-02-PLAN.md (Reorg detection: process_or_reorg, find_common_ancestor, handle_reorg, initial_state field, 10 new tests, 99 total passing)
-Resume file: .planning/phases/03-live-subscriptions-and-reorg-safety/03-03-PLAN.md
-Resume command: /gsd:execute-phase 03-live-subscriptions-and-reorg-safety
+Stopped at: Completed 03-03-PLAN.md (Engine::run(): live event loop with biased select!, exponential backoff, inline gap fill; 8 new tests, 107 total passing; Phase 3 complete)
+Resume file: .planning/phases/04-evm-adapter/04-01-PLAN.md (next phase)
+Resume command: /gsd:execute-phase 04-evm-adapter
