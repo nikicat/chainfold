@@ -1,13 +1,19 @@
 /// In-memory storage implementation for testing.
 ///
-/// Provides identical semantics to SqliteStorage — same deduplication,
-/// same coverage merge logic, same ordering — without filesystem I/O.
+/// Implements the block DAG Storage trait without filesystem I/O.
+/// Provides identical semantics to SqliteStorage:
+/// - Block-level deduplication (block_hash is the dedup key)
+/// - Canonical tip tracking per source_id
+/// - Parent pointer traversal for snapshot finding
+/// - Forward-ordered chain collection
 ///
-/// Use this as a test double when testing the recovery pipeline and coordinator.
+/// Cloning InMemoryStorage produces a new handle to the same underlying
+/// state (Arc<Mutex<Inner>>) — intentional for test harnesses that need
+/// to share storage between an engine instance and an inspector.
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use super::{Anchor, Snapshot, Storage, StoredEvent};
+use super::Storage;
 
 // ============================================================
 // Error type
@@ -23,39 +29,40 @@ pub enum MemoryStorageError {
 // Internal state
 // ============================================================
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CoverageInterval {
-    source_id: String,
-    start: (i64, i64),
-    end: (i64, i64),
+#[derive(Debug, Clone)]
+struct StoredBlock {
+    parent_hash: [u8; 32],
+    height: u64,
+    /// (cursor_bytes, payload_bytes) pairs in insertion order
+    events: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
-    events: Vec<StoredEvent>,
-    snapshots: Vec<Snapshot>,
-    anchors: HashMap<(String, String), Anchor>,
-    coverage: Vec<CoverageInterval>,
+    /// block_hash -> StoredBlock (stores all blocks regardless of source)
+    blocks: HashMap<[u8; 32], StoredBlock>,
+    /// source_id -> canonical tip block_hash
+    canonical_tips: HashMap<String, [u8; 32]>,
+    /// (source_id, block_hash) -> snapshot payload bytes
+    snapshots: HashMap<(String, [u8; 32]), Vec<u8>>,
 }
 
 // ============================================================
 // InMemoryStorage
 // ============================================================
 
-/// In-memory storage backed by an `Arc<Mutex<Inner>>`.
+/// In-memory storage backed by `Arc<Mutex<Inner>>`.
 ///
-/// Cloning produces a new handle to the same underlying state — this is intentional
-/// and matches how the recovery pipeline tests need to share storage between an engine
-/// instance and the test harness for inspection.
+/// Thread-safe: all methods lock the mutex for the duration of the operation.
 #[derive(Clone)]
 pub struct InMemoryStorage {
-    inner: std::sync::Arc<Mutex<Inner>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl InMemoryStorage {
     pub fn new() -> Self {
         Self {
-            inner: std::sync::Arc::new(Mutex::new(Inner::default())),
+            inner: Arc::new(Mutex::new(Inner::default())),
         }
     }
 }
@@ -66,173 +73,150 @@ impl Default for InMemoryStorage {
     }
 }
 
+// The all-zeros hash is the genesis sentinel — it signals "no parent".
+const ZERO_HASH: [u8; 32] = [0u8; 32];
+
 impl Storage for InMemoryStorage {
     type Error = MemoryStorageError;
 
-    fn write_events(&self, _source_id: &str, events: &[StoredEvent]) -> Result<usize, Self::Error> {
+    fn write_block(
+        &self,
+        source_id: &str,
+        block_hash: &[u8; 32],
+        parent_hash: &[u8; 32],
+        height: u64,
+        events: &[(&[u8], &[u8])],
+    ) -> Result<bool, Self::Error> {
         let mut inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        let mut inserted = 0usize;
-        for ev in events {
-            // Deduplicate on (source_id, cursor_major, cursor_minor)
-            let is_dup = inner.events.iter().any(|e| {
-                e.source_id == ev.source_id
-                    && e.cursor_major == ev.cursor_major
-                    && e.cursor_minor == ev.cursor_minor
-            });
-            if !is_dup {
-                inner.events.push(ev.clone());
-                inserted += 1;
-            }
+
+        // Block-level deduplication: if block_hash already exists, skip entirely.
+        if inner.blocks.contains_key(block_hash) {
+            return Ok(false);
         }
-        Ok(inserted)
+
+        let stored = StoredBlock {
+            parent_hash: *parent_hash,
+            height,
+            events: events
+                .iter()
+                .map(|(c, p)| (c.to_vec(), p.to_vec()))
+                .collect(),
+        };
+
+        inner.blocks.insert(*block_hash, stored);
+        inner.canonical_tips.insert(source_id.to_string(), *block_hash);
+
+        Ok(true)
     }
 
-    fn events_in_range(
+    fn get_canonical_tip(&self, source_id: &str) -> Result<Option<[u8; 32]>, Self::Error> {
+        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
+        Ok(inner.canonical_tips.get(source_id).copied())
+    }
+
+    fn get_block_height(&self, block_hash: &[u8; 32]) -> Result<Option<u64>, Self::Error> {
+        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
+        Ok(inner.blocks.get(block_hash).map(|b| b.height))
+    }
+
+    fn write_snapshot(
         &self,
         source_id: &str,
-        from: (i64, i64),
-        to: (i64, i64),
-    ) -> Result<Vec<StoredEvent>, Self::Error> {
-        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        let mut result: Vec<StoredEvent> = inner
-            .events
-            .iter()
-            .filter(|e| {
-                let cursor = (e.cursor_major, e.cursor_minor);
-                e.source_id == source_id && cursor >= from && cursor < to
-            })
-            .cloned()
-            .collect();
-        result.sort_by(|a, b| {
-            (a.cursor_major, a.cursor_minor).cmp(&(b.cursor_major, b.cursor_minor))
-        });
-        Ok(result)
-    }
-
-    fn write_snapshot(&self, snapshot: &Snapshot) -> Result<(), Self::Error> {
-        let mut inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        inner.snapshots.push(snapshot.clone());
-        Ok(())
-    }
-
-    fn latest_snapshot(&self, source_id: &str) -> Result<Option<Snapshot>, Self::Error> {
-        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        let best = inner
-            .snapshots
-            .iter()
-            .filter(|s| s.source_id == source_id)
-            .max_by_key(|s| (s.cursor_major, s.cursor_minor));
-        Ok(best.cloned())
-    }
-
-    fn snapshots_before(
-        &self,
-        source_id: &str,
-        cursor: (i64, i64),
-    ) -> Result<Vec<Snapshot>, Self::Error> {
-        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        let mut result: Vec<Snapshot> = inner
-            .snapshots
-            .iter()
-            .filter(|s| {
-                s.source_id == source_id
-                    && (s.cursor_major, s.cursor_minor) <= cursor
-            })
-            .cloned()
-            .collect();
-        // Newest first
-        result.sort_by(|a, b| {
-            (b.cursor_major, b.cursor_minor).cmp(&(a.cursor_major, a.cursor_minor))
-        });
-        Ok(result)
-    }
-
-    fn write_anchor(&self, anchor: &Anchor) -> Result<(), Self::Error> {
-        let mut inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        inner
-            .anchors
-            .insert((anchor.source_id.clone(), anchor.name.clone()), anchor.clone());
-        Ok(())
-    }
-
-    fn read_anchor(&self, source_id: &str, name: &str) -> Result<Option<Anchor>, Self::Error> {
-        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        Ok(inner
-            .anchors
-            .get(&(source_id.to_string(), name.to_string()))
-            .cloned())
-    }
-
-    fn add_coverage(
-        &self,
-        source_id: &str,
-        from: (i64, i64),
-        to: (i64, i64),
+        block_hash: &[u8; 32],
+        payload: &[u8],
     ) -> Result<(), Self::Error> {
         let mut inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        merge_coverage_interval(&mut inner.coverage, source_id, from, to);
+        inner
+            .snapshots
+            .insert((source_id.to_string(), *block_hash), payload.to_vec());
         Ok(())
     }
 
-    fn is_fully_cached(
+    fn find_nearest_snapshot(
         &self,
         source_id: &str,
-        from: (i64, i64),
-        to: (i64, i64),
-    ) -> Result<bool, Self::Error> {
+        tip_hash: &[u8; 32],
+    ) -> Result<Option<([u8; 32], Vec<u8>)>, Self::Error> {
         let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        Ok(inner.coverage.iter().any(|c| {
-            c.source_id == source_id && c.start <= from && c.end >= to
-        }))
-    }
 
-    fn cached_tip(&self, source_id: &str) -> Result<Option<(i64, i64)>, Self::Error> {
-        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
-        let tip = inner
-            .coverage
-            .iter()
-            .filter(|c| c.source_id == source_id)
-            .max_by_key(|c| c.end);
-        Ok(tip.map(|c| c.end))
-    }
-}
-
-/// Merge a new interval [from, to) into the coverage list for the given source_id,
-/// combining overlapping/adjacent intervals.
-///
-/// An interval [a, b) overlaps or is adjacent to [from, to) when:
-///   a <= to  AND  b >= from
-fn merge_coverage_interval(
-    coverage: &mut Vec<CoverageInterval>,
-    source_id: &str,
-    from: (i64, i64),
-    to: (i64, i64),
-) {
-    let mut merged_start = from;
-    let mut merged_end = to;
-
-    // Collect indices of intervals for this source that overlap or touch [from, to)
-    let mut to_remove: Vec<usize> = Vec::new();
-    for (i, c) in coverage.iter().enumerate() {
-        if c.source_id == source_id && c.start <= to && c.end >= from {
-            to_remove.push(i);
-            if c.start < merged_start {
-                merged_start = c.start;
+        let mut current = *tip_hash;
+        loop {
+            // Check if there's a snapshot at the current block.
+            let key = (source_id.to_string(), current);
+            if let Some(payload) = inner.snapshots.get(&key) {
+                return Ok(Some((current, payload.clone())));
             }
-            if c.end > merged_end {
-                merged_end = c.end;
+
+            // Walk to parent.
+            match inner.blocks.get(&current) {
+                Some(block) => {
+                    let parent = block.parent_hash;
+                    // Genesis: parent is all-zeros — no further ancestors.
+                    if parent == ZERO_HASH {
+                        return Ok(None);
+                    }
+                    current = parent;
+                }
+                // Block not found — chain is broken or we've walked past genesis.
+                None => return Ok(None),
             }
         }
     }
 
-    // Remove in reverse order to preserve indices
-    for &i in to_remove.iter().rev() {
-        coverage.remove(i);
+    fn collect_canonical_chain(
+        &self,
+        from_hash: &[u8; 32],
+        to_hash: &[u8; 32],
+    ) -> Result<Vec<[u8; 32]>, Self::Error> {
+        // Same hash: empty range.
+        if from_hash == to_hash {
+            return Ok(vec![]);
+        }
+
+        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
+
+        // Walk backward from to_hash until we reach from_hash, collecting hashes.
+        // from_hash is excluded; to_hash is included.
+        let mut chain: Vec<[u8; 32]> = Vec::new();
+        let mut current = *to_hash;
+
+        loop {
+            chain.push(current);
+
+            if current == *from_hash {
+                // We've reached from_hash — but since it's exclusive, pop it.
+                chain.pop();
+                break;
+            }
+
+            match inner.blocks.get(&current) {
+                Some(block) => {
+                    let parent = block.parent_hash;
+                    if parent == ZERO_HASH {
+                        // Reached genesis without hitting from_hash.
+                        // This means from_hash isn't on the ancestor chain.
+                        // Return what we have (caller is responsible for valid inputs).
+                        break;
+                    }
+                    current = parent;
+                }
+                None => break,
+            }
+        }
+
+        // Reverse so the order is from oldest (exclusive) to newest (inclusive).
+        chain.reverse();
+        Ok(chain)
     }
 
-    coverage.push(CoverageInterval {
-        source_id: source_id.to_string(),
-        start: merged_start,
-        end: merged_end,
-    });
+    fn load_block_events(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
+        match inner.blocks.get(block_hash) {
+            Some(block) => Ok(block.events.clone()),
+            None => Ok(vec![]),
+        }
+    }
 }

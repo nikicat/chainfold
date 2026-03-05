@@ -1,7 +1,9 @@
+pub mod memory;
 pub mod schema;
 
-// memory.rs is implemented in Plan 02-02.
 // sqlite.rs is implemented in Plan 02-03.
+
+pub use memory::InMemoryStorage;
 
 /// Block DAG storage trait. All methods are synchronous.
 /// Implementations wrap with Mutex<Connection> for thread safety.
