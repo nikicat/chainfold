@@ -2,24 +2,42 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-02)
+See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 2 — Persistence and Recovery
+**Current focus:** Phase 2 — Block DAG Storage and Recovery (redesign)
 
 ## Current Position
 
-Phase: 2 of 4 (Persistence and Recovery)
-Plan: 2 of 4 in current phase
-Status: In progress — Plan 02 complete
-Last activity: 2026-03-04 — Plan 02-02 complete (Engine coordinator + recovery pipeline, 18 tests all passing)
+Phase: 2 of 4 (Block DAG Storage and Recovery)
+Plan: 0 of TBD (redesign — old Phase 2 code to be replaced)
+Status: Architecture revised — Phase 2 needs replanning for block DAG model
+Last activity: 2026-03-05 — DAG architecture decision; PROJECT.md, REQUIREMENTS.md, ROADMAP.md updated
 
-Progress: [████░░░░░░] 40%
+Progress: [██░░░░░░░░] 20% (Phase 1 complete, Phase 2 redesign pending)
+
+## Architecture Revision (2026-03-05)
+
+**What changed:** Storage model redesigned from flat linear event store to block DAG.
+
+**Why:** Reorgs should be handled transparently by the library, not pushed to client. State is tracked per block hash (like git commits). Each block has a parent hash. Canonical chain is the consensus-determined main branch. Reorg = canonical tip moves to a different branch — library re-derives state from fork point.
+
+**What's preserved:**
+- Phase 1: cursors, EventSource trait, StateMachine trait, ReducerCore (all unchanged)
+- Phase 1 tests: all passing, still valid
+
+**What's being replaced:**
+- Phase 2 storage schema (flat events → block DAG)
+- Phase 2 coordinator (linear pipeline → block-aware processing)
+- Phase 2 recovery (linear replay → canonical chain replay)
+- Phase 3 context (03-CONTEXT.md needs revision for DAG model)
+
+**Key design principle:** Structural sharing for state (e.g., im::HashMap) is the user's choice via `State: Clone`. Library doesn't mandate persistent data structures — it just calls Clone when forking state at a branch point.
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
+- Total plans completed: 4 (2 preserved from Phase 1, 2 from old Phase 2 being replaced)
 - Average duration: 16min
 - Total execution time: 1.1 hours
 
@@ -28,11 +46,7 @@ Progress: [████░░░░░░] 40%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-foundations | 2 | 26min | 13min |
-| 02-persistence-and-recovery | 2 | 41min | 20min |
-
-**Recent Trend:**
-- Last 5 plans: 11min, 15min, 6min, 35min
-- Trend: recovery pipeline required debugging snapshot cursor semantics
+| 02-persistence-and-recovery (old) | 2 | 41min | 20min |
 
 *Updated after each plan completion*
 
@@ -43,36 +57,32 @@ Progress: [████░░░░░░] 40%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- Pre-roadmap: Rust + alloy for EVM; rusqlite (WAL) for persistence; bincode v2 for snapshots; tokio for async
-- Pre-roadmap: Reorg detection notifies client only — no auto-rollback
+- Pre-roadmap: Rust + alloy for EVM; rusqlite (WAL) for persistence; tokio for async
 - Pre-roadmap: One SQLite file per app process; client owns chain connections via EventSource
-- 01-01: async-trait chosen over trait_variant for Phase 1 EventSource — simpler ergonomics; migration to trait_variant deferred to Phase 3 hot path optimization
+- 01-01: async-trait chosen over trait_variant for Phase 1 EventSource — simpler ergonomics; keep for now
 - 01-01: CexCursor Ord implemented manually (not derived) to make seq_id-only ordering invariant explicit and refactor-proof
 - 01-01: Event<C, E> with C first — more constrained type first matches alloy convention and improves inference
-- 01-01: bincode is DEAD (tombstone release Dec 2025); Phase 2 snapshots must use postcard instead
-- 01-02: apply() borrows event (streaming); apply_and_accumulate() owns event (history) — no Clone bound on E needed in either case
-- 01-02: watch::send() error on no-receivers is intentionally ignored — ReducerCore can outlive subscribers [SUPERSEDED by 02-02 decision]
-- 01-02: events_in_range() is O(n) linear scan in Phase 1; Phase 2 replaces with SQLite B-tree index
-- 02-01: rusqlite_migration upgraded from 1.3 to 2.0 — version conflict with rusqlite 0.34 (both link sqlite3); API identical
-- 02-01: Mutex<Connection> for SqliteStorage Sync — rusqlite Connection is not Sync; Mutex is standard pattern with no hot-path overhead
-- 02-01: Storage trait is fully sync; async callers bridge via tokio::task::spawn_blocking per locked decision
-- [Phase 02-02]: Snapshot cursor = (last_applied_major + 1, 0): replay is inclusive from snapshot cursor, so cursor must point PAST the last captured event to avoid double-application
-- [Phase 02-02]: send_modify and send_replace over watch::send(): send() silently discards value when no receivers; send_modify/send_replace always update internal state, required for engine.state() to work without subscriber
-- [Phase 02-02]: fetch_gap coverage: explicitly call add_coverage(gap_start, live_tip_end) after loop exits, to mark full range as fetched even when source has no events near live_tip
+- 01-01: bincode is DEAD (tombstone release Dec 2025); use postcard for any internal serialization
+- 01-02: apply() borrows event (streaming); apply_and_accumulate() owns event (history)
+- 01-02: watch::send() → use send_modify/send_replace instead (always updates internal state even with no receivers)
+- **2026-03-05: Block DAG architecture** — state tracked per block hash, reorgs are branch switches, library handles transparently
+- **2026-03-05: Structural sharing is user-side** — State: Clone; user picks im::HashMap for cheap forks or HashMap if reorgs are rare
+- **2026-03-05: No reorg callback** — supersedes old "notify client" decision. Library re-derives state on branch switch. Client sees transparent state update via Current().
 
 ### Pending Todos
 
-None.
+- Remove old Phase 2 storage/coordinator code (src/storage/, src/coordinator/) before new Phase 2 implementation
+- Revise 03-CONTEXT.md for DAG model (old context assumed linear storage + reorg callbacks)
 
 ### Blockers/Concerns
 
-- Phase 2: postcard 1.1.3 added for snapshot serialization (bincode dead; resolved in 02-01)
-- Phase 2: Snapshot schema evolution strategy deferred — using raw bytes (postcard) with no versioning header for Phase 2; Phase 3 may add a version byte prefix if needed
-- Phase 4: CEX adapter (Phase v2 scope) needs per-exchange API research before implementation; Phase 4 PoC is EVM only
+- Phase 2 redesign: need to decide whether Event<C,E> gains parent_hash or whether a new Block<C,E> type wraps events with block metadata
+- Phase 4: CEX adapter (Phase v2 scope) needs per-exchange API research; Phase 4 PoC is EVM only
+- CEX sources have no blocks/reorgs — DAG model degenerates to linear chain for non-block sources
 
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Phase 3 context gathered — ready for planning
-Resume file: .planning/phases/03-live-subscriptions-and-reorg-safety/03-CONTEXT.md
-Resume command: /gsd:plan-phase 3
+Stopped at: Architecture revised for block DAG model — Phase 2 needs replanning
+Resume file: .planning/ROADMAP.md
+Resume command: /gsd:discuss-phase 2

@@ -2,7 +2,9 @@
 
 ## Overview
 
-Chainfold is built in four phases that follow the hard dependency order dictated by the architecture: type foundations first, then persistence and crash recovery, then live subscriptions and reorg safety, then the public query API and ERC20 proof of concept. Each phase delivers a coherent, independently testable capability. Nothing in a later phase can be implemented correctly without the earlier phases being solid.
+Chainfold is built in four phases that follow the hard dependency order dictated by the architecture: type foundations first, then block DAG persistence and crash recovery, then live subscriptions and reorg safety, then the public query API and ERC20 proof of concept. Each phase delivers a coherent, independently testable capability. Nothing in a later phase can be implemented correctly without the earlier phases being solid.
+
+**Architecture note (2026-03-05):** Phase 2 is being redesigned from a flat linear event store to a block DAG model. State is tracked per block hash (like git commits). Reorgs are branch switches — the canonical tip moves to a different branch, and the library re-derives state from the fork point transparently. Phase 1 (cursors, traits, ReducerCore) is preserved; Phase 2 storage and coordinator are rebuilt.
 
 ## Phases
 
@@ -13,9 +15,9 @@ Chainfold is built in four phases that follow the hard dependency order dictated
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundations** - Cursor types, EventSource/StateMachine traits, in-memory reducer — the type system everything else builds on
-- [x] **Phase 2: Persistence and Recovery** - SQLite schema, coverage tracking, crash recovery pipeline, historical backfill, gap stitching (completed 2026-03-04)
-- [ ] **Phase 3: Live Subscriptions and Reorg Safety** - Live event delivery hot path, WebSocket reconnection, reorg detection and notification
-- [ ] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo
+- [ ] **Phase 2: Block DAG Storage and Recovery** - Block DAG schema in SQLite, canonical chain tracking, state snapshots per block, crash recovery along canonical chain, gap fetching
+- [ ] **Phase 3: Live Subscriptions and Reorg Safety** - Live event loop, block-aware event processing, transparent reorg via DAG branch switching, reconnection with backoff
+- [ ] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo with reorg handling
 
 ## Phase Details
 
@@ -33,29 +35,28 @@ Decimal phases appear between their surrounding integers in numeric order.
   - [x] 01-01-PLAN.md — Project scaffold, cursor types, Event envelope, EventSource trait
   - [x] 01-02-PLAN.md — StateMachine trait, ReducerCore, integration tests
 
-### Phase 2: Persistence and Recovery
-**Goal**: The library survives process restarts — it persists events and snapshots to SQLite, tracks which cursor ranges are cached, and executes the full cold-start recovery pipeline without issuing redundant RPC calls
+### Phase 2: Block DAG Storage and Recovery
+**Goal**: The library persists blocks and events in a DAG structure (like git) — each block has a parent hash, events belong to blocks, state snapshots are stored per block hash. The library tracks which branch is canonical, recovers from crash by replaying the canonical chain from the nearest snapshot, and fetches gaps without redundant RPC calls.
 **Depends on**: Phase 1
 **Requirements**: INGEST-02, INGEST-03, INGEST-04, PERSIST-01, PERSIST-02, PERSIST-03, PERSIST-04, PERSIST-05
 **Success Criteria** (what must be TRUE):
-  1. After a simulated crash and restart, the library loads the last snapshot, replays only the cached events not already in the snapshot, fetches only the gap between cached coverage and live tip, and arrives at the correct state without a full re-fetch
-  2. Overlapping events from a historical backfill and a subsequent fetch do not produce duplicate state — deduplication by `(source, cursor)` is enforced at the storage boundary
-  3. The coverage table accurately reflects which cursor ranges are fully cached; a query for a range fully within cached coverage issues zero RPC calls
-  4. Named anchor positions persist across restarts and are updated atomically with the event writes they track
-  5. Historical backfill over a large range completes in chunked pages without loading all events into memory at once
-**Plans**: 2 plans
-  - [x] 02-01-PLAN.md — Storage trait, types, SQLite schema, SqliteStorage and InMemoryStorage implementations
-  - [ ] 02-02-PLAN.md — Engine coordinator, batch event processing, snapshot triggering, recovery pipeline
+  1. Blocks are stored with parent hash references forming a DAG. Given two blocks on different forks, the library can find their common ancestor by walking parent pointers.
+  2. The library tracks which block hash is the canonical tip per source. Canonical chain is the path from tip to genesis following parent pointers.
+  3. After a simulated crash and restart, the library finds the canonical tip, loads the nearest state snapshot on the canonical chain, replays forward along the canonical chain to the tip, and arrives at the correct state.
+  4. State snapshots are associated with block hashes (not linear cursors). Loading a snapshot restores state as of that specific block, regardless of which branch it's on.
+  5. Events are deduplicated by (block_hash, cursor) — inserting the same event twice (e.g., from overlapping backfill) has no effect.
+  6. Historical backfill over a large range fetches blocks in chunked pages without loading all events into memory at once.
+**Plans**: TBD
 
 ### Phase 3: Live Subscriptions and Reorg Safety
-**Goal**: The library tracks the chain tip in real time — events flow from a live WebSocket subscription through Apply to callbacks on the hot path, the library reconnects transparently after disconnection, and clients are notified of reorgs so they can decide how to respond
+**Goal**: The library tracks the chain tip in real time — events flow from a live subscription through block-aware processing into state, the library reconnects transparently after disconnection, and reorgs are handled as DAG branch switches where the library re-derives state from the fork point without client intervention
 **Depends on**: Phase 2
 **Requirements**: INGEST-01, INGEST-05, SAFETY-01, SAFETY-02, SAFETY-03
 **Success Criteria** (what must be TRUE):
-  1. A new event arriving on the live WebSocket subscription reaches the client callback without crossing a process boundary or serialization step
-  2. After a WebSocket disconnection, the library reconnects with exponential backoff, fetches any events missed during the outage using the same gap-recovery code path as cold start, and resumes delivering events without duplicates or gaps
-  3. When a chain reorganization occurs, the library detects it by comparing stored block hashes against the canonical chain and calls the client-provided reorg callback with the affected cursor range and reorg depth
-  4. The client reorg callback receives enough information (old tip, new tip, common ancestor, depth) to decide its own rollback strategy without requiring library internals
+  1. A new event arriving on the live subscription reaches the state (and any OnChange callback) without crossing a process boundary or serialization step
+  2. After a WebSocket disconnection, the library reconnects with exponential backoff, fetches any blocks missed during the outage, and resumes delivering events without duplicates or gaps
+  3. When a chain reorganization occurs (canonical tip changes to a different branch), the library detects it via block hash / parent hash comparison, identifies the fork point, and re-derives state from the fork point on the new canonical chain — all transparently
+  4. A client watching Current() sees the state silently update to reflect the new canonical chain. If the client was watching closely, they see a state not derived from the previous one (reorg visible). If they were watching infrequently, the reorg is invisible.
 **Plans**: TBD
 
 ### Phase 4: Query API and ERC20 PoC
@@ -63,11 +64,11 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Phase 3
 **Requirements**: QUERY-01, QUERY-02, QUERY-03, QUERY-04, PERSIST-06, POC-01
 **Success Criteria** (what must be TRUE):
-  1. `Current()` returns the live-tracked state at chain tip; a caller observing a series of Transfer events sees the correct balance without writing any subscription management code
-  2. `At(cursor)` returns historical state and selects the cheapest reconstruction path automatically: pure cache replay when the range is fully cached, a partial gap fetch when partially cached, or a direct FetchState call when no cache exists
+  1. `Current()` returns the live-tracked state at canonical chain tip; a caller observing a series of Transfer events sees the correct balance without writing any subscription management code
+  2. `At(cursor)` returns historical state and selects the cheapest reconstruction path automatically: cached-only replay (0 RPC), partial gap fetch (1 RPC), or direct FetchState (1 RPC)
   3. `Range(from, to)` iterates over materialized state across a cursor range using a lazy cursor-based iterator that does not buffer the entire result set in memory
   4. `OnChange(callback)` delivers live state change notifications to the registered callback on each event application
-  5. The ERC20 balance tracker starts cold, reconstructs balance from Transfer event history, survives a simulated process restart with correct balance restored from cache, and triggers the reorg callback when the test harness reorgs the chain
+  5. The ERC20 balance tracker starts cold, reconstructs balance from Transfer event history, survives a simulated process restart with correct balance restored from cache, and handles reorgs transparently (balance updates to reflect new canonical chain)
 **Plans**: TBD
 
 ## Progress
@@ -78,6 +79,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
-| 2. Persistence and Recovery | 2/2 | Complete   | 2026-03-04 |
+| 2. Block DAG Storage and Recovery | 0/TBD | Redesign (was linear, now DAG) | - |
 | 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |

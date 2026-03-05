@@ -1,6 +1,7 @@
 # Requirements: Chainfold
 
 **Defined:** 2026-03-03
+**Revised:** 2026-03-05 (DAG architecture)
 **Core Value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
 
 ## v1 Requirements
@@ -18,36 +19,36 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Event Ingestion
 
 - [ ] **INGEST-01**: Library consumes live events from an EventSource subscription and applies them to state in real-time
-- [x] **INGEST-02**: Library fetches historical events via EventSource in chunked range queries respecting RPC provider limits
-- [x] **INGEST-03**: Library stitches the gap between historical backfill endpoint and live subscription start without missing or duplicating events
-- [x] **INGEST-04**: Library deduplicates events by (source, cursor) so overlapping backfill and subscription windows don't corrupt state
+- [ ] **INGEST-02**: Library fetches historical events via EventSource in chunked range queries respecting RPC provider limits
+- [ ] **INGEST-03**: Library stitches the gap between cached blocks and live subscription start without missing or duplicating events
+- [ ] **INGEST-04**: Library deduplicates events by (block_hash, cursor) so overlapping backfill and subscription windows don't corrupt state
 - [ ] **INGEST-05**: Hot path is in-process: events flow from source through Apply to callbacks without IPC or serialization on the critical path
 
 ### Persistence & Recovery
 
-- [x] **PERSIST-01**: Library persists events, snapshots, anchors, and coverage ranges in SQLite with WAL mode
-- [x] **PERSIST-02**: Library tracks which cursor ranges are fully cached per source (coverage table)
-- [x] **PERSIST-03**: Library recovers from crash: load last snapshot, replay cached events, catch up via FetchEvents, switch to live
-- [x] **PERSIST-04**: Library creates periodic state snapshots (client-owned serialization) to bound replay cost
-- [x] **PERSIST-05**: Library maintains named anchor positions (persistent cursors) updated atomically with event processing
+- [ ] **PERSIST-01**: Library persists blocks (with parent hash), events (per block), and state snapshots (per block hash) in SQLite with WAL mode
+- [ ] **PERSIST-02**: Library tracks the block DAG — which blocks exist, their parent relationships, and which branch is canonical
+- [ ] **PERSIST-03**: Library recovers from crash: find canonical tip, load nearest snapshot on canonical chain, replay forward along canonical chain, catch up via FetchEvents, switch to live
+- [ ] **PERSIST-04**: Library creates periodic state snapshots (client-owned serialization) at block boundaries to bound replay cost
+- [ ] **PERSIST-05**: Library maintains named anchor positions (persistent cursors) updated atomically with block processing
 - [ ] **PERSIST-06**: Library selects cheapest reconstruction path for historical queries: cached-only replay (0 RPC), partial gap fetch (1 RPC), or direct FetchState (1 RPC)
 
 ### Chain Safety
 
-- [ ] **SAFETY-01**: Library detects chain reorganizations by comparing stored block hashes against canonical chain
-- [ ] **SAFETY-02**: Library notifies client of reorg with depth and affected cursor range; client decides rollback strategy
+- [ ] **SAFETY-01**: Library maintains a block DAG and tracks which block is the canonical tip as reported by EventSource
+- [ ] **SAFETY-02**: When the canonical tip changes to a different branch (reorg), the library transparently re-derives state from the fork point on the new canonical chain — client's Current() always reflects canonical state without special reorg handling
 - [ ] **SAFETY-03**: Library handles WebSocket disconnection with exponential backoff, re-subscribe from last anchor, and gap refetch
 
 ### Query API
 
-- [ ] **QUERY-01**: Library exposes `Current() → S` returning live-tracked state at chain tip
+- [ ] **QUERY-01**: Library exposes `Current() → S` returning live-tracked state at canonical chain tip
 - [ ] **QUERY-02**: Library exposes `At(cursor) → S` returning historical state via cheapest reconstruction path
 - [ ] **QUERY-03**: Library exposes `Range(from, to) → Iterator<S>` for materialized state across a cursor range with lightweight cursor-based iteration
 - [ ] **QUERY-04**: Library exposes `OnChange(callback)` for live state change notifications
 
 ### Proof of Concept
 
-- [ ] **POC-01**: ERC20 balance tracker demonstrates end-to-end: subscribe to Transfer events, reconstruct balance, survive restarts, handle reorgs
+- [ ] **POC-01**: ERC20 balance tracker demonstrates end-to-end: subscribe to Transfer events, reconstruct balance, survive restarts, handle reorgs transparently
 
 ## v2 Requirements
 
@@ -84,7 +85,7 @@ Explicitly excluded. Documented to prevent scope creep.
 | Library-managed chain connections | Client owns connections via EventSource; library can't know about custom auth, co-located nodes |
 | Backward replay / generic Unapply | Impossible without domain knowledge; use snapshot + forward replay instead |
 | Multi-process shared SQLite | Writer coordination too complex; each app owns its cache file |
-| Reorg auto-rollback | Different workloads need different strategies; library detects and notifies only |
+| Library-enforced persistent data structures | Structural sharing (im crate) is user's choice via State: Clone, not library-mandated |
 | The Graph / Substreams as backend | 50-200ms latency overhead disqualifies them from hot path |
 
 ## Traceability
@@ -99,15 +100,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CORE-04 | Phase 1 | Complete (01-02) |
 | CORE-05 | Phase 1 | Complete (01-02) |
 | INGEST-01 | Phase 3 | Pending |
-| INGEST-02 | Phase 2 | Complete |
-| INGEST-03 | Phase 2 | Complete |
-| INGEST-04 | Phase 2 | Complete (02-01) |
+| INGEST-02 | Phase 2 | Pending (redesign) |
+| INGEST-03 | Phase 2 | Pending (redesign) |
+| INGEST-04 | Phase 2 | Pending (redesign) |
 | INGEST-05 | Phase 3 | Pending |
-| PERSIST-01 | Phase 2 | Complete (02-01) |
-| PERSIST-02 | Phase 2 | Complete (02-01) |
-| PERSIST-03 | Phase 2 | Complete |
-| PERSIST-04 | Phase 2 | Complete |
-| PERSIST-05 | Phase 2 | Complete (02-01) |
+| PERSIST-01 | Phase 2 | Pending (redesign) |
+| PERSIST-02 | Phase 2 | Pending (redesign) |
+| PERSIST-03 | Phase 2 | Pending (redesign) |
+| PERSIST-04 | Phase 2 | Pending (redesign) |
+| PERSIST-05 | Phase 2 | Pending (redesign) |
 | PERSIST-06 | Phase 4 | Pending |
 | SAFETY-01 | Phase 3 | Pending |
 | SAFETY-02 | Phase 3 | Pending |
@@ -125,4 +126,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-03-03*
-*Last updated: 2026-03-03 after 01-02 execution (CORE-02, CORE-04, CORE-05 completed — all Phase 1 CORE requirements done)*
+*Last updated: 2026-03-05 — DAG architecture revision: PERSIST/INGEST requirements reworded for block DAG model, SAFETY-01/02 rewritten for transparent reorg handling, Phase 2 PERSIST/INGEST marked as pending redesign*

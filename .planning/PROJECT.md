@@ -18,14 +18,14 @@ Live state reconstruction from ordered events must be correct, gap-free, and sur
 
 - [ ] Define and track state as a function of: initial snapshot + ordered events applied forward
 - [ ] Client provides three primitives: FetchState, FetchEvents, Apply (pure reducer)
-- [ ] Library provides Current() — live-tracked state at chain tip
+- [ ] Library provides Current() — live-tracked state at canonical chain tip
 - [ ] Library provides At(cursor) — historical state via cheapest reconstruction path
 - [ ] Library provides OnChange(callback) — live notifications
 - [ ] Hot path is in-process: events flow directly to Apply without IPC or serialization
-- [ ] SQLite cache (WAL mode) for events, snapshots, anchors, coverage ranges
-- [ ] On restart: load snapshot → replay cached events → catch up → switch to live
+- [ ] Block DAG storage in SQLite (WAL mode) — blocks with parent hashes, events per block, state snapshots per block
+- [ ] On restart: find canonical tip → load nearest snapshot → replay canonical chain forward → catch up → switch to live
 - [ ] Gap recovery between state fetch and subscription handled automatically
-- [ ] Reorg detection with client notification (client decides handling)
+- [ ] Reorg handled transparently via block DAG — canonical tip moves to a different branch, library re-derives state from fork point
 - [ ] Source-agnostic EventSource trait supporting EVM, Bitcoin, and CEX ordering schemes
 - [ ] ERC20 balance tracking as the first proof-of-concept workload
 
@@ -37,6 +37,7 @@ Live state reconstruction from ordered events must be correct, gap-free, and sur
 - Backward replay / generic Unapply — forward-only, use snapshot + replay for historical
 - SQL query interface / analytics layer — this is event sourcing, not Dune
 - The Graph / Substreams integration — wrong abstraction for operational tracking
+- Library-enforced persistent data structures — structural sharing (im crate) is user's choice via State type, not a library requirement
 
 ## Context
 
@@ -66,7 +67,9 @@ Existing solutions (The Graph, Substreams) evaluated and rejected for the hot pa
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Rust instead of Go | Clean FFI (no GC), future WASM compatibility, strong blockchain ecosystem (alloy) | — Pending |
-| Reorg: notify client, don't auto-rollback | Different workloads need different reorg strategies; library shouldn't assume | — Pending |
+| Block DAG model for state | State is tracked per block hash in a DAG (like git). Reorgs are branch switches, not errors. Library re-derives state from fork point transparently. | — Active |
+| Structural sharing is user-side | `StateMachine::State: Clone` — user picks `im::HashMap` for cheap fork-safe clones, or `HashMap` if reorgs are rare. Library doesn't enforce. | — Active |
+| Reorg handled by library, not client | Library maintains DAG, tracks canonical tip, re-derives state on branch switch. Client sees transparent state updates via Current(). No reorg callback needed. | — Active (supersedes old "notify client" decision) |
 | One SQLite file per app process | Avoids writer coordination complexity; each app caches independently | — Pending |
 | WASM is future door, not v1 | Keep the option open (avoid closing it) but don't design around it now | — Pending |
 | Generics for state type in Rust | Natural fit; WASM boundary serialization is a future-self problem | — Pending |
