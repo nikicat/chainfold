@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-05)
 ## Current Position
 
 Phase: 2 of 4 (Block DAG Storage and Recovery)
-Plan: 2 of 4 (02-02 complete — InMemoryStorage done)
-Status: Active — Plan 02-02 complete, Plan 02-03 (SqliteStorage) next
-Last activity: 2026-03-05 — 02-02 executed: InMemoryStorage with 16 block DAG storage unit tests
+Plan: 3 of 4 (02-03 complete — SqliteStorage + Engine coordinator done)
+Status: Active — Plan 02-03 complete, Plan 02-04 (recovery pipeline) next
+Last activity: 2026-03-05 — 02-03 executed: SqliteStorage + Engine coordinator with 33 tests
 
-Progress: [████░░░░░░] 37% (Phase 1 complete, Phase 2 plans 1-2 complete)
+Progress: [█████░░░░░] 50% (Phase 1 complete, Phase 2 plans 1-3 complete)
 
 ## Architecture Revision (2026-03-05)
 
@@ -47,7 +47,7 @@ Progress: [████░░░░░░] 37% (Phase 1 complete, Phase 2 plans 
 |-------|-------|-------|----------|
 | 01-foundations | 2 | 26min | 13min |
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
-| 02-persistence-and-recovery (new) | 2 | 6min | 3min |
+| 02-persistence-and-recovery (new) | 3 | 10min | 3min |
 
 *Updated after each plan completion*
 
@@ -75,6 +75,9 @@ Recent decisions affecting current work:
 - **02-02: All-zeros genesis sentinel** — [0u8; 32] marks "no parent"; find_nearest_snapshot and collect_canonical_chain halt on it
 - **02-02: Block storage source-agnostic** — blocks HashMap keyed by block_hash only; canonical_tips and snapshots keyed by source_id
 - **02-02: Backward walk + reverse** — collect_canonical_chain walks backward then reverses; O(n) allocation, simpler than prepend
+- **02-03: unchecked_transaction for write_block** — all three writes (block + events + canonical_tip) atomic; mutex held for duration so no deadlock risk
+- **02-03: EXISTS check before TX** — avoids opening transaction for duplicate blocks; consistent with InMemoryStorage early return
+- **02-03: Engine snapshot counter** — resets to 0 after each trigger; rolls forward counting N new blocks until next snapshot
 
 ### Pending Todos
 
@@ -88,6 +91,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Completed 02-02-PLAN.md (InMemoryStorage: block DAG storage with 16 unit tests)
-Resume file: .planning/phases/02-persistence-and-recovery/02-03-PLAN.md
+Stopped at: Completed 02-03-PLAN.md (SqliteStorage + Engine coordinator: 65 tests passing)
+Resume file: .planning/phases/02-persistence-and-recovery/02-04-PLAN.md
 Resume command: /gsd:execute-phase 02-persistence-and-recovery

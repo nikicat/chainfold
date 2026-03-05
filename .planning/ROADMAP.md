@@ -83,6 +83,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
-| 2. Block DAG Storage and Recovery | 2/4 | In progress | - |
+| 2. Block DAG Storage and Recovery | 3/4 | In Progress|  |
 | 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |
