@@ -63,7 +63,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A client watching Current() sees the state silently update to reflect the new canonical chain. If the client was watching closely, they see a state not derived from the previous one (reorg visible). If they were watching infrequently, the reorg is invisible.
 **Plans**: 3 plans (03-01 through 03-03)
   - [x] 03-01-PLAN.md — Storage contracts (get_parent_hash, set_canonical_tip), new engine types (EngineError, ReorgEvent, EngineStatus), updated EngineConfig
-  - [ ] 03-02-PLAN.md — Reorg detection and canonical tip switching
+  - [x] 03-02-PLAN.md — Reorg detection: process_or_reorg, find_common_ancestor, handle_reorg, initial_state field, 10 integration tests
   - [ ] 03-03-PLAN.md — Live event loop with reconnection and backoff
 
 ### Phase 4: Query API and ERC20 PoC
@@ -87,5 +87,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
 | 2. Block DAG Storage and Recovery | 4/4 | Complete   | 2026-03-05 |
-| 3. Live Subscriptions and Reorg Safety | 1/3 | In progress | - |
+| 3. Live Subscriptions and Reorg Safety | 2/3 | In progress | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |

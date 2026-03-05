@@ -35,8 +35,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Chain Safety
 
-- [ ] **SAFETY-01**: Library maintains a block DAG and tracks which block is the canonical tip as reported by EventSource
-- [ ] **SAFETY-02**: When the canonical tip changes to a different branch (reorg), the library transparently re-derives state from the fork point on the new canonical chain — client's Current() always reflects canonical state without special reorg handling
+- [x] **SAFETY-01**: Library maintains a block DAG and tracks which block is the canonical tip as reported by EventSource
+- [x] **SAFETY-02**: When the canonical tip changes to a different branch (reorg), the library transparently re-derives state from the fork point on the new canonical chain — client's Current() always reflects canonical state without special reorg handling
 - [ ] **SAFETY-03**: Library handles WebSocket disconnection with exponential backoff, re-subscribe from last anchor, and gap refetch
 
 ### Query API
@@ -110,8 +110,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERSIST-04 | Phase 2 | Pending (redesign) |
 | PERSIST-05 | Phase 2 | Pending (redesign) |
 | PERSIST-06 | Phase 4 | Pending |
-| SAFETY-01 | Phase 3 | In progress (03-01 storage contracts laid, 03-02 reorg detection pending) |
-| SAFETY-02 | Phase 3 | Pending |
+| SAFETY-01 | Phase 3 | Complete (03-02: process_or_reorg, canonical tip tracking, find_common_ancestor) |
+| SAFETY-02 | Phase 3 | Complete (03-02: handle_reorg, snapshot+replay re-derivation, initial_state for no-snapshot) |
 | SAFETY-03 | Phase 3 | Pending |
 | QUERY-01 | Phase 4 | Pending |
 | QUERY-02 | Phase 4 | Pending |
@@ -126,4 +126,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-03-03*
-*Last updated: 2026-03-05 — 03-01 complete: SAFETY-01 and INGEST-05 marked in progress (contracts laid, implementation continues in 03-02/03-03)*
+*Last updated: 2026-03-05 — 03-02 complete: SAFETY-01 and SAFETY-02 marked complete (reorg detection and transparent state re-derivation implemented and tested)*

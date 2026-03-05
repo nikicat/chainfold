@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-05)
 ## Current Position
 
 Phase: 3 of 4 (Live Subscriptions and Reorg Safety) — IN PROGRESS
-Plan: 1 of 3 (03-01 complete — Storage contracts and type foundations)
-Status: Phase 3 in progress. Plan 03-01 complete.
-Last activity: 2026-03-05 — 03-01 executed: Storage trait extended, new engine types defined, 89 tests passing
+Plan: 2 of 3 (03-02 complete — Reorg detection and state re-derivation)
+Status: Phase 3 in progress. Plans 03-01 and 03-02 complete.
+Last activity: 2026-03-05 — 03-02 executed: process_or_reorg, find_common_ancestor, handle_reorg implemented; 99 tests passing
 
-Progress: [████████░░] 70% (Phase 1 complete, Phase 2 complete, Phase 3 started)
+Progress: [█████████░] 75% (Phase 1 complete, Phase 2 complete, Phase 3 two-thirds done)
 
 ## Architecture Revision (2026-03-05)
 
@@ -84,6 +84,10 @@ Recent decisions affecting current work:
 - **03-01: canonical_tip FK removed in schema v3** — set_canonical_tip must work before any blocks exist (reorg rollback case); FK was over-constraining; semantic integrity enforced by engine
 - **03-01: tokio-util 0.7 has no "sync" feature** — CancellationToken included by default; plan's feature spec was wrong
 - **03-01: EngineConfig::new() + pub fields** — constructor for ergonomic defaults, pub fields for explicit control; both modes valid
+- **03-02: initial_state in Engine** — captured at Engine::new() via core.subscribe().borrow().clone(); zero API change; used for no-snapshot reorg recovery from genesis
+- **03-02: find_common_ancestor algorithm** — HashSet of old chain hashes + backward walk of new chain; O(depth_old + depth_new); returns ReorgWithoutAncestor at genesis sentinel
+- **03-02: on_reorg fires before state mutation** — client callback sees pre-reorg state context; state reflects new branch only after process_or_reorg returns
+- **03-02: fetch_gap_blocks pub(crate)** — exposed for Engine::run() in Plan 03 gap-fill phase
 
 ### Pending Todos
 
@@ -97,6 +101,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Completed 03-01-PLAN.md (Storage contracts: get_parent_hash, set_canonical_tip, EngineError, ReorgEvent, EngineStatus, 89 tests passing)
-Resume file: .planning/phases/03-live-subscriptions-and-reorg-safety/03-02-PLAN.md
+Stopped at: Completed 03-02-PLAN.md (Reorg detection: process_or_reorg, find_common_ancestor, handle_reorg, initial_state field, 10 new tests, 99 total passing)
+Resume file: .planning/phases/03-live-subscriptions-and-reorg-safety/03-03-PLAN.md
 Resume command: /gsd:execute-phase 03-live-subscriptions-and-reorg-safety
