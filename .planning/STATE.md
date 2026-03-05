@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-05)
 ## Current Position
 
 Phase: 2 of 4 (Block DAG Storage and Recovery)
-Plan: 0 of TBD (redesign — old Phase 2 code to be replaced)
-Status: Architecture revised — Phase 2 needs replanning for block DAG model
-Last activity: 2026-03-05 — DAG architecture decision; PROJECT.md, REQUIREMENTS.md, ROADMAP.md updated
+Plan: 1 of 4 (02-01 complete — type foundations done)
+Status: Active — Plan 02-01 complete, Plan 02-02 (InMemoryStorage) next
+Last activity: 2026-03-05 — 02-01 executed: Block<C,E>, Storage trait, Codec trait, schema v2
 
-Progress: [██░░░░░░░░] 20% (Phase 1 complete, Phase 2 redesign pending)
+Progress: [███░░░░░░░] 25% (Phase 1 complete, Phase 2 plan 1 complete)
 
 ## Architecture Revision (2026-03-05)
 
@@ -47,6 +47,7 @@ Progress: [██░░░░░░░░] 20% (Phase 1 complete, Phase 2 redesi
 |-------|-------|-------|----------|
 | 01-foundations | 2 | 26min | 13min |
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
+| 02-persistence-and-recovery (new) | 1 | 4min | 4min |
 
 *Updated after each plan completion*
 
@@ -68,21 +69,22 @@ Recent decisions affecting current work:
 - **2026-03-05: Block DAG architecture** — state tracked per block hash, reorgs are branch switches, library handles transparently
 - **2026-03-05: Structural sharing is user-side** — State: Clone; user picks im::HashMap for cheap forks or HashMap if reorgs are rare
 - **2026-03-05: No reorg callback** — supersedes old "notify client" decision. Library re-derives state on branch switch. Client sees transparent state update via Current().
+- **02-01: Block<C,E> wraps Vec<Event<C,E>>** — block is storage unit, event is block-scoped; block_hash removed from Event
+- **02-01: Codec encodes payload only** — Codec::encode_event/decode_event operate on Self::Event (payload), not full Event<C,E>; cursor bytes managed internally via postcard
+- **02-01: Schema v2 drops coverage/anchors** — block DAG recovery walks parent pointers; coverage intervals not needed
 
 ### Pending Todos
 
-- Remove old Phase 2 storage/coordinator code (src/storage/, src/coordinator/) before new Phase 2 implementation
 - Revise 03-CONTEXT.md for DAG model (old context assumed linear storage + reorg callbacks)
 
 ### Blockers/Concerns
 
-- Phase 2 redesign: need to decide whether Event<C,E> gains parent_hash or whether a new Block<C,E> type wraps events with block metadata
 - Phase 4: CEX adapter (Phase v2 scope) needs per-exchange API research; Phase 4 PoC is EVM only
 - CEX sources have no blocks/reorgs — DAG model degenerates to linear chain for non-block sources
 
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Phase 2 context revised for block DAG architecture
-Resume file: .planning/phases/02-persistence-and-recovery/02-CONTEXT.md
-Resume command: /gsd:plan-phase 2
+Stopped at: Completed 02-01-PLAN.md (type foundations: Block, Event, EventSource, Storage, Codec, schema)
+Resume file: .planning/phases/02-persistence-and-recovery/02-02-PLAN.md
+Resume command: /gsd:execute-phase 02-persistence-and-recovery

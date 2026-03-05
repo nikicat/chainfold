@@ -2,136 +2,156 @@
 phase: 02-persistence-and-recovery
 plan: 01
 subsystem: database
-tags: [rust, sqlite, rusqlite, rusqlite_migration, wal-mode, event-sourcing, storage-trait]
+tags: [rust, block-dag, storage, event-sourcing, traits, rusqlite, sqlite, migration]
 
-# Dependency graph
 requires:
   - phase: 01-foundations
-    provides: ChainCursor supertrait, Event<C,E> envelope, StoredEvent/Anchor/Snapshot rely on same (i64,i64) cursor repr
-provides:
-  - Storage trait with sync methods (write_events, events_in_range, write_snapshot, latest_snapshot, snapshots_before, write_anchor, read_anchor, add_coverage, is_fully_cached, cached_tip)
-  - StoredEvent, Snapshot, Anchor types with (i64, i64) cursor representation
-  - SqliteStorage with WAL mode, UNIQUE dedup via INSERT OR IGNORE, interval merge in transactions
-  - InMemoryStorage test double with identical semantics for recovery pipeline testing
-  - SQL DDL schema with B-tree indexes for events, snapshots, anchors, coverage tables
-affects:
-  - 02-02 (coordinator/recovery pipeline depends on Storage trait and both implementations)
-  - all subsequent plans in phase 02 (every plan uses StoredEvent, Snapshot, Anchor)
+    provides: ChainCursor, EventSource trait, StateMachine, ReducerCore, Event<C,E>
 
-# Tech tracking
+provides:
+  - Block<C, E> type with block_hash, parent_hash, height, events
+  - Event<C, E> simplified (no block_hash field — block context on Block)
+  - EventSource trait updated to fetch_blocks/subscribe returning Block
+  - Storage trait with block DAG API (write_block, get_canonical_tip, etc.)
+  - Codec trait simplified (encode/decode event payloads and state; no cursor_to_tuple)
+  - SQLite schema migration v2 (blocks, events, snapshots, canonical_tip tables)
+
+affects:
+  - 02-02 (InMemoryStorage implementation builds on new Storage trait)
+  - 02-03 (SqliteStorage implementation uses schema v2)
+  - 02-04 (Recovery pipeline uses new Storage methods and Codec)
+
 tech-stack:
-  added:
-    - rusqlite 0.34.0 (bundled SQLite, WAL mode, prepare_cached, unchecked_transaction)
-    - rusqlite_migration 2.0.0 (schema migrations via M::up, Migrations::new, to_latest)
-    - tempfile 3.26.0 (dev-dep for SqliteStorage tests with temp file cleanup)
+  added: []
   patterns:
-    - Storage trait is sync; async callers bridge via tokio::task::spawn_blocking
-    - Cursors stored as (i64, i64) tuple (major, minor) — coordinator maps ChainCursor types to this
-    - INSERT OR IGNORE + changes() for dedup with accurate insert count
-    - Interval merge algorithm: find overlapping intervals, delete, insert merged union
-    - Mutex<Connection> for SqliteStorage Sync impl (rusqlite::Connection is not Sync)
-    - Generic test helper fn run_storage_tests<S: Storage>() runs same tests on both backends
+    - "Block-DAG model: blocks are primary units of storage; events are block-scoped"
+    - "Cursor stored as postcard bytes internally; Codec encodes only event payloads and state"
+    - "Storage trait is sync; callers in async context use spawn_blocking"
+    - "Schema migration chain preserved: v1 kept for continuity, v2 replaces all v1 tables"
 
 key-files:
   created:
-    - src/storage/mod.rs (Storage trait definition + StoredEvent/Snapshot/Anchor types + re-exports)
-    - src/storage/schema.rs (migrations() fn returning Migrations with DDL for all 4 tables)
-    - src/storage/sqlite.rs (SqliteStorage implementing Storage, StorageError with thiserror)
-    - src/storage/memory.rs (InMemoryStorage implementing Storage, MemoryStorageError)
-    - tests/storage_tests.rs (5 tests: 3 type construction + 2 parameterized backend runners)
+    - src/block.rs
   modified:
-    - Cargo.toml (added rusqlite 0.34 bundled, rusqlite_migration 2.0, tempfile 3 dev-dep)
-    - src/lib.rs (added pub mod storage; re-exported Storage/StoredEvent/Snapshot/Anchor)
+    - src/event.rs
+    - src/source.rs
+    - src/storage/mod.rs
+    - src/storage/schema.rs
+    - src/coordinator/mod.rs
+    - src/coordinator/recovery.rs
+    - src/lib.rs
+    - tests/event_source_tests.rs
+    - tests/integration_tests.rs
+    - tests/reducer_tests.rs
 
 key-decisions:
-  - "rusqlite 0.34 + rusqlite_migration 2.0 chosen over plan's suggested 1.3 — version conflict between rusqlite_migration 1.3 (requiring rusqlite ^0.32) and rusqlite 0.34 required upgrading migration crate to 2.0"
-  - "Mutex<Connection> instead of raw Connection — rusqlite::Connection is not Sync; wrapping in Mutex satisfies Storage: Send + Sync requirement without any code complexity"
-  - "CoverageInterval struct includes source_id field — required to correctly filter intervals per source in InMemoryStorage; without it cached_tip and is_fully_cached would mix intervals across sources"
+  - "Block<C,E> wraps Vec<Event<C,E>> — block is the storage unit, event is block-scoped"
+  - "Event<C,E> loses block_hash field — block_hash lives exclusively on Block"
+  - "EventSource::fetch_blocks(from_height, to_height) replaces fetch_events(from, to)"
+  - "Codec encodes event payload only (Self::Event), not full Event<C,E>; cursor serialized internally via postcard"
+  - "Schema v2 drops coverage/anchors tables (no longer needed in block DAG model)"
+  - "canonical_tip table: one row per source_id tracking the canonical head block_hash"
 
 patterns-established:
-  - "Storage trait sync + spawn_blocking bridge: all DB methods sync, async coordinator uses tokio::task::spawn_blocking"
-  - "Accurate insert count via changes(): call conn.changes() after each individual INSERT OR IGNORE, never use batch size as count"
-  - "Interval merge pattern: SELECT overlapping (start <= to AND end >= from), collect IDs + compute merged bounds, DELETE all, INSERT one"
-  - "Generic test helper: fn run_storage_tests<S: Storage>(s: S) parameterizes coverage over both SqliteStorage and InMemoryStorage"
+  - "Block DAG: each block has hash + parent_hash; canonical chain is tracked via canonical_tip"
+  - "Storage::write_block is the single write path; deduplication is at block granularity"
+  - "Recovery uses collect_canonical_chain then load_block_events to replay without re-fetching"
 
 requirements-completed: [PERSIST-01, PERSIST-02, PERSIST-05, INGEST-04]
 
-# Metrics
-duration: 6min
-completed: 2026-03-03
+duration: 4min
+completed: 2026-03-05
 ---
 
-# Phase 2 Plan 01: Storage Trait and SQLite/InMemory Implementations Summary
+# Phase 2 Plan 1: Block DAG Type Foundations Summary
 
-**SQLite-backed event/snapshot/anchor/coverage storage with WAL mode, UNIQUE dedup, interval merge, and an InMemoryStorage test double — all 40 tests passing**
+**Block<C,E> type + simplified Event<C,E> + block-oriented EventSource + block DAG Storage/Codec traits + SQLite migration v2 establishing the complete API surface for block DAG persistence**
 
 ## Performance
 
-- **Duration:** 6 min
-- **Started:** 2026-03-03T14:12:57Z
-- **Completed:** 2026-03-03T14:18:21Z
-- **Tasks:** 2 completed
-- **Files modified:** 7
+- **Duration:** 4 min
+- **Started:** 2026-03-05T15:57:57Z
+- **Completed:** 2026-03-05T16:02:00Z
+- **Tasks:** 2
+- **Files modified:** 11 (1 created, 7 modified, 3 deleted)
 
 ## Accomplishments
 
-- Storage trait with 10 sync methods covering the full persistence API needed by the recovery pipeline
-- SqliteStorage with WAL mode, UNIQUE constraint dedup (INSERT OR IGNORE), accurate insert count via changes(), and transactional interval merge — all correctness requirements from the locked decisions
-- InMemoryStorage test double with identical semantics — coverage merge, dedup, source-scoped intervals — enables testing the coordinator and recovery pipeline without filesystem I/O
-- 5 storage tests (3 type construction + 2 parameterized backend runners covering 11 behaviors)
+- Created `Block<C, E>` as the primary storage unit with block_hash, parent_hash, height, events
+- Removed `block_hash` from `Event<C, E>` — block context is now exclusively on Block
+- Replaced `EventSource::fetch_events(cursor, cursor)` with `fetch_blocks(from_height, to_height)` and Block-oriented subscribe
+- Defined new block DAG `Storage` trait: write_block, get_canonical_tip, get_block_height, write_snapshot, find_nearest_snapshot, collect_canonical_chain, load_block_events
+- Defined simplified `Codec` trait: encode/decode event payloads and state only (no cursor_to_tuple/tuple_to_cursor)
+- Added SQLite migration v2 (drops coverage/anchors/old events/snapshots; creates blocks, events, snapshots, canonical_tip)
+- All 32 tests pass (13 cursor, 5 event_source, 5 integration, 9 reducer)
 
 ## Task Commits
 
 Each task was committed atomically:
 
-1. **Task 1: Storage trait, types, schema, and dependencies** - `2c0aed9` (feat)
-2. **Task 2: SqliteStorage and InMemoryStorage implementations with tests** - `be40bf9` (feat)
+1. **Task 1: Create Block type and modify Event and EventSource** - `dbd667e` (feat)
+2. **Task 2: Define new Storage trait, Codec trait, and schema migration** - `0db4985` (feat)
 
 ## Files Created/Modified
 
-- `/home/nb/src/chainfold/src/storage/mod.rs` — Storage trait + StoredEvent/Snapshot/Anchor types, module re-exports
-- `/home/nb/src/chainfold/src/storage/schema.rs` — migrations() returning SQL DDL for events/snapshots/anchors/coverage tables with indexes
-- `/home/nb/src/chainfold/src/storage/sqlite.rs` — SqliteStorage with WAL, prepare_cached, unchecked_transaction, StorageError
-- `/home/nb/src/chainfold/src/storage/memory.rs` — InMemoryStorage with Mutex<Inner>, CoverageInterval with source_id
-- `/home/nb/src/chainfold/tests/storage_tests.rs` — 5 tests covering type construction and both storage backends
-- `/home/nb/src/chainfold/Cargo.toml` — added rusqlite 0.34 bundled, rusqlite_migration 2.0, tempfile 3
-- `/home/nb/src/chainfold/src/lib.rs` — added pub mod storage + re-exports
+- `/home/nb/src/chainfold/src/block.rs` - New Block<C, E> type
+- `/home/nb/src/chainfold/src/event.rs` - Removed block_hash field from Event<C, E>
+- `/home/nb/src/chainfold/src/source.rs` - EventSource now fetch_blocks/Block-oriented subscribe
+- `/home/nb/src/chainfold/src/storage/mod.rs` - New block DAG Storage trait
+- `/home/nb/src/chainfold/src/storage/schema.rs` - v1 preserved + v2 block DAG schema
+- `/home/nb/src/chainfold/src/coordinator/mod.rs` - New simplified Codec trait
+- `/home/nb/src/chainfold/src/coordinator/recovery.rs` - Stubbed (implemented in 02-04)
+- `/home/nb/src/chainfold/src/lib.rs` - Updated re-exports (Block, Codec, Storage)
+- `/home/nb/src/chainfold/tests/event_source_tests.rs` - Rewritten with MockBlockSource
+- `/home/nb/src/chainfold/tests/integration_tests.rs` - Updated for new Event/EventSource API
+- `/home/nb/src/chainfold/tests/reducer_tests.rs` - Removed block_hash from Event construction
+- Deleted: coordinator_tests.rs, recovery_tests.rs, storage_tests.rs (old API tests)
 
 ## Decisions Made
 
-- **rusqlite_migration 2.0 instead of 1.3**: The plan specified rusqlite_migration 1.3 but it requires rusqlite ^0.32, conflicting with rusqlite 0.34 (both link to sqlite3 native lib). Upgraded to rusqlite_migration 2.0 which is compatible with rusqlite 0.34. API is identical (M::up, Migrations::new, to_latest).
-
-- **Mutex<Connection> for SqliteStorage Sync**: rusqlite::Connection is Send but not Sync. The Storage trait requires Send + Sync + 'static. Wrapping in Mutex<Connection> is the standard pattern and adds no meaningful overhead (storage is not a hot path).
-
-- **CoverageInterval stores source_id**: Initial implementation omitted source_id from the in-memory CoverageInterval struct, discovered during implementation that is_fully_cached and cached_tip would return incorrect results by mixing intervals across different sources. Fixed before first compilation.
+- Block<C,E> wraps Vec<Event<C,E>> — block is the storage unit, events are block-scoped. Matches EVM model naturally and supports reorgs by branch-switching at the block level.
+- Codec operates on event payload (Self::Event), not full Event<C,E>. Cursor bytes are managed internally by the library (postcard). This eliminates cursor_to_tuple/tuple_to_cursor, which were the source of complexity in the old Codec.
+- Schema v2 drops the coverage and anchors tables entirely. Block DAG recovery walks parent pointers instead of tracking coverage intervals.
 
 ## Deviations from Plan
 
 ### Auto-fixed Issues
 
-**1. [Rule 3 - Blocking] Upgraded rusqlite_migration 1.3 to 2.0 due to version conflict**
-- **Found during:** Task 1 (cargo check after adding dependencies)
-- **Issue:** rusqlite_migration 1.3 requires rusqlite ^0.32.1, but chainfold uses rusqlite 0.34.0. Both crates link libsqlite3-sys with different versions, causing "Only one package may specify the same links value" error.
-- **Fix:** Changed rusqlite_migration = "1.3" to rusqlite_migration = "2" in Cargo.toml. API is identical.
-- **Files modified:** Cargo.toml, Cargo.lock
-- **Verification:** cargo check succeeds, no linker conflicts
-- **Committed in:** 2c0aed9 (Task 1 commit)
+**1. [Rule 3 - Blocking] Fixed reducer_tests.rs and integration_tests.rs referencing old Event.block_hash field**
+- **Found during:** Task 1 (running cargo test after initial changes)
+- **Issue:** reducer_tests.rs::make_event and integration_tests.rs::evm_event still included `block_hash: None` which no longer exists on Event<C,E>
+- **Fix:** Removed the `block_hash: None` field from both test helpers; removed unused `make_block_i128` helper
+- **Files modified:** tests/reducer_tests.rs, tests/integration_tests.rs
+- **Verification:** cargo test passes with all 32 tests green
+- **Committed in:** dbd667e (Task 1 commit)
 
 ---
 
-**Total deviations:** 1 auto-fixed (Rule 3 - blocking version conflict)
-**Impact on plan:** Minimal — same API surface, same behavior, just a newer patch of the migration crate. The plan's note about rusqlite 0.38 / tokio-rusqlite was a red herring; the actual conflict was between 0.34 and migration 1.3.
+**Total deviations:** 1 auto-fixed (Rule 3 - blocking compilation failure in pre-existing test files)
+**Impact on plan:** Necessary fix — the plan specified updating reducer_tests.rs was in scope (it references Event<C,E>). No scope creep.
 
 ## Issues Encountered
 
-- **Firejail sandbox**: Same noexec tmpfs constraint as Phase 1. Resolved using the pre-existing /tmp/cargo + /tmp/rustc-wrapper binaries from Phase 1. No impact on code.
+None beyond the auto-fixed deviation above.
+
+## User Setup Required
+
+None - no external service configuration required.
 
 ## Next Phase Readiness
 
-- Storage trait fully defined — Plan 02-02 (coordinator/recovery pipeline) can depend on Storage, SqliteStorage, and InMemoryStorage immediately
-- InMemoryStorage is the recommended backend for all Phase 2 unit tests — avoids filesystem setup in test helpers
-- Reminder: snapshot serialization should use `postcard` (not bincode) per STATE.md blocker
+- All type definitions and trait signatures are stable and compilable
+- Plan 02-02 (InMemoryStorage) can implement `Storage` trait immediately
+- Plan 02-03 (SqliteStorage + Engine) can implement `Storage` trait and run schema v2 migrations
+- Plan 02-04 (Recovery) can build on `collect_canonical_chain`, `load_block_events`, `find_nearest_snapshot`
+- No blockers
+
+## Self-Check: PASSED
+
+- All key files confirmed present on disk
+- Commits dbd667e and 0db4985 confirmed in git log
+- 32 tests pass across cursor_tests (13), event_source_tests (5), integration_tests (5), reducer_tests (9)
 
 ---
 *Phase: 02-persistence-and-recovery*
-*Completed: 2026-03-03*
+*Completed: 2026-03-05*

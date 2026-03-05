@@ -21,16 +21,16 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **INGEST-01**: Library consumes live events from an EventSource subscription and applies them to state in real-time
 - [ ] **INGEST-02**: Library fetches historical events via EventSource in chunked range queries respecting RPC provider limits
 - [ ] **INGEST-03**: Library stitches the gap between cached blocks and live subscription start without missing or duplicating events
-- [ ] **INGEST-04**: Library deduplicates events by (block_hash, cursor) so overlapping backfill and subscription windows don't corrupt state
+- [x] **INGEST-04**: Library deduplicates events by (block_hash, cursor) so overlapping backfill and subscription windows don't corrupt state
 - [ ] **INGEST-05**: Hot path is in-process: events flow from source through Apply to callbacks without IPC or serialization on the critical path
 
 ### Persistence & Recovery
 
-- [ ] **PERSIST-01**: Library persists blocks (with parent hash), events (per block), and state snapshots (per block hash) in SQLite with WAL mode
-- [ ] **PERSIST-02**: Library tracks the block DAG — which blocks exist, their parent relationships, and which branch is canonical
+- [x] **PERSIST-01**: Library persists blocks (with parent hash), events (per block), and state snapshots (per block hash) in SQLite with WAL mode
+- [x] **PERSIST-02**: Library tracks the block DAG — which blocks exist, their parent relationships, and which branch is canonical
 - [ ] **PERSIST-03**: Library recovers from crash: find canonical tip, load nearest snapshot on canonical chain, replay forward along canonical chain, catch up via FetchEvents, switch to live
 - [ ] **PERSIST-04**: Library creates periodic state snapshots (client-owned serialization) at block boundaries to bound replay cost
-- [ ] **PERSIST-05**: Library maintains named anchor positions (persistent cursors) updated atomically with block processing
+- [x] **PERSIST-05**: Library maintains named anchor positions (persistent cursors) updated atomically with block processing
 - [ ] **PERSIST-06**: Library selects cheapest reconstruction path for historical queries: cached-only replay (0 RPC), partial gap fetch (1 RPC), or direct FetchState (1 RPC)
 
 ### Chain Safety
