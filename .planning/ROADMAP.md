@@ -15,7 +15,7 @@ Chainfold is built in four phases that follow the hard dependency order dictated
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundations** - Cursor types, EventSource/StateMachine traits, in-memory reducer — the type system everything else builds on
-- [ ] **Phase 2: Block DAG Storage and Recovery** - Block DAG schema in SQLite, canonical chain tracking, state snapshots per block, crash recovery along canonical chain, gap fetching
+- [x] **Phase 2: Block DAG Storage and Recovery** - Block DAG schema in SQLite, canonical chain tracking, state snapshots per block, crash recovery along canonical chain, gap fetching (completed 2026-03-05)
 - [ ] **Phase 3: Live Subscriptions and Reorg Safety** - Live event loop, block-aware event processing, transparent reorg via DAG branch switching, reconnection with backoff
 - [ ] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo with reorg handling
 
@@ -83,6 +83,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
-| 2. Block DAG Storage and Recovery | 3/4 | In Progress|  |
+| 2. Block DAG Storage and Recovery | 4/4 | Complete   | 2026-03-05 |
 | 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |

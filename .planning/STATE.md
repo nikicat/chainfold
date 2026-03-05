@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 2 — Block DAG Storage and Recovery (redesign)
+**Current focus:** Phase 3 — Live Subscription (next phase)
 
 ## Current Position
 
-Phase: 2 of 4 (Block DAG Storage and Recovery)
-Plan: 3 of 4 (02-03 complete — SqliteStorage + Engine coordinator done)
-Status: Active — Plan 02-03 complete, Plan 02-04 (recovery pipeline) next
-Last activity: 2026-03-05 — 02-03 executed: SqliteStorage + Engine coordinator with 33 tests
+Phase: 2 of 4 (Block DAG Storage and Recovery) — COMPLETE
+Plan: 4 of 4 (02-04 complete — Recovery pipeline done)
+Status: Phase 2 complete. Ready for Phase 3 planning.
+Last activity: 2026-03-05 — 02-04 executed: Recovery pipeline with 8 tests (73 total passing)
 
-Progress: [█████░░░░░] 50% (Phase 1 complete, Phase 2 plans 1-3 complete)
+Progress: [███████░░░] 62% (Phase 1 complete, Phase 2 complete)
 
 ## Architecture Revision (2026-03-05)
 
@@ -47,7 +47,7 @@ Progress: [█████░░░░░] 50% (Phase 1 complete, Phase 2 plans 
 |-------|-------|-------|----------|
 | 01-foundations | 2 | 26min | 13min |
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
-| 02-persistence-and-recovery (new) | 3 | 10min | 3min |
+| 02-persistence-and-recovery (new) | 4 | 30min | 7min |
 
 *Updated after each plan completion*
 
@@ -78,6 +78,9 @@ Recent decisions affecting current work:
 - **02-03: unchecked_transaction for write_block** — all three writes (block + events + canonical_tip) atomic; mutex held for duration so no deadlock risk
 - **02-03: EXISTS check before TX** — avoids opening transaction for duplicate blocks; consistent with InMemoryStorage early return
 - **02-03: Engine snapshot counter** — resets to 0 after each trigger; rolls forward counting N new blocks until next snapshot
+- **02-04: No fetch_state in recovery** — Engine created with initial state by caller; recovery uses that as genesis state; avoids needing a genesis_cursor concept
+- **02-04: Genesis sentinel [0u8;32] for full-chain replay** — collect_canonical_chain([0;32], tip) walks backward from tip, stops when parent==sentinel, genesis block IS included
+- **02-04: Gap advance by last_height+1** — fetch_gap_blocks advances by actual last block height+1, not block count; handles non-contiguous blocks correctly
 
 ### Pending Todos
 
@@ -91,6 +94,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Completed 02-03-PLAN.md (SqliteStorage + Engine coordinator: 65 tests passing)
-Resume file: .planning/phases/02-persistence-and-recovery/02-04-PLAN.md
-Resume command: /gsd:execute-phase 02-persistence-and-recovery
+Stopped at: Completed 02-04-PLAN.md (Recovery pipeline: 8 new tests, 73 total passing, Phase 2 complete)
+Resume file: .planning/phases/03-live-subscription/ (next phase)
+Resume command: /gsd:execute-phase 03-live-subscription
