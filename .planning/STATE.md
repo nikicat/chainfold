@@ -72,7 +72,7 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-04T08:40:47Z
-Stopped at: Completed 02-persistence-and-recovery/02-02-PLAN.md — Engine coordinator, recovery pipeline (snapshot fallback + gap fetch), 18 tests all passing
-Resume file: .planning/phases/02-persistence-and-recovery/02-03-PLAN.md (next plan)
-Resume command: /gsd:execute-phase 2
+Last session: 2026-03-05
+Stopped at: Phase 3 context gathered — ready for planning
+Resume file: .planning/phases/03-live-subscriptions-and-reorg-safety/03-CONTEXT.md
+Resume command: /gsd:plan-phase 3
