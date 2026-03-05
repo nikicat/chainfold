@@ -46,7 +46,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. State snapshots are associated with block hashes (not linear cursors). Loading a snapshot restores state as of that specific block, regardless of which branch it's on.
   5. Events are deduplicated by (block_hash, cursor) — inserting the same event twice (e.g., from overlapping backfill) has no effect.
   6. Historical backfill over a large range fetches blocks in chunked pages without loading all events into memory at once.
-**Plans**: TBD
+**Plans**: 4 plans (02-01 through 02-04)
+  - [x] 02-01-PLAN.md — Block<C,E>, Storage trait, Codec trait, schema v2 types
+  - [x] 02-02-PLAN.md — InMemoryStorage implementing Storage trait, 16 unit tests
+  - [ ] 02-03-PLAN.md — SqliteStorage implementing Storage trait
+  - [ ] 02-04-PLAN.md — Recovery pipeline: snapshot + canonical chain replay
 
 ### Phase 3: Live Subscriptions and Reorg Safety
 **Goal**: The library tracks the chain tip in real time — events flow from a live subscription through block-aware processing into state, the library reconnects transparently after disconnection, and reorgs are handled as DAG branch switches where the library re-derives state from the fork point without client intervention
@@ -79,6 +83,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
-| 2. Block DAG Storage and Recovery | 0/TBD | Redesign (was linear, now DAG) | - |
+| 2. Block DAG Storage and Recovery | 2/4 | In progress | - |
 | 3. Live Subscriptions and Reorg Safety | 0/TBD | Not started | - |
 | 4. Query API and ERC20 PoC | 0/TBD | Not started | - |

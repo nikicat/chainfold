@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-05)
 ## Current Position
 
 Phase: 2 of 4 (Block DAG Storage and Recovery)
-Plan: 1 of 4 (02-01 complete — type foundations done)
-Status: Active — Plan 02-01 complete, Plan 02-02 (InMemoryStorage) next
-Last activity: 2026-03-05 — 02-01 executed: Block<C,E>, Storage trait, Codec trait, schema v2
+Plan: 2 of 4 (02-02 complete — InMemoryStorage done)
+Status: Active — Plan 02-02 complete, Plan 02-03 (SqliteStorage) next
+Last activity: 2026-03-05 — 02-02 executed: InMemoryStorage with 16 block DAG storage unit tests
 
-Progress: [███░░░░░░░] 25% (Phase 1 complete, Phase 2 plan 1 complete)
+Progress: [████░░░░░░] 37% (Phase 1 complete, Phase 2 plans 1-2 complete)
 
 ## Architecture Revision (2026-03-05)
 
@@ -47,7 +47,7 @@ Progress: [███░░░░░░░] 25% (Phase 1 complete, Phase 2 plan 1
 |-------|-------|-------|----------|
 | 01-foundations | 2 | 26min | 13min |
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
-| 02-persistence-and-recovery (new) | 1 | 4min | 4min |
+| 02-persistence-and-recovery (new) | 2 | 6min | 3min |
 
 *Updated after each plan completion*
 
@@ -72,6 +72,9 @@ Recent decisions affecting current work:
 - **02-01: Block<C,E> wraps Vec<Event<C,E>>** — block is storage unit, event is block-scoped; block_hash removed from Event
 - **02-01: Codec encodes payload only** — Codec::encode_event/decode_event operate on Self::Event (payload), not full Event<C,E>; cursor bytes managed internally via postcard
 - **02-01: Schema v2 drops coverage/anchors** — block DAG recovery walks parent pointers; coverage intervals not needed
+- **02-02: All-zeros genesis sentinel** — [0u8; 32] marks "no parent"; find_nearest_snapshot and collect_canonical_chain halt on it
+- **02-02: Block storage source-agnostic** — blocks HashMap keyed by block_hash only; canonical_tips and snapshots keyed by source_id
+- **02-02: Backward walk + reverse** — collect_canonical_chain walks backward then reverses; O(n) allocation, simpler than prepend
 
 ### Pending Todos
 
@@ -85,6 +88,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Completed 02-01-PLAN.md (type foundations: Block, Event, EventSource, Storage, Codec, schema)
-Resume file: .planning/phases/02-persistence-and-recovery/02-02-PLAN.md
+Stopped at: Completed 02-02-PLAN.md (InMemoryStorage: block DAG storage with 16 unit tests)
+Resume file: .planning/phases/02-persistence-and-recovery/02-03-PLAN.md
 Resume command: /gsd:execute-phase 02-persistence-and-recovery
