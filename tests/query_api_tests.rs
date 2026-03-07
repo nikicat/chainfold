@@ -459,6 +459,152 @@ fn test_event_range_iterator_100_events_pages_of_32() {
 }
 
 // ============================================================
+// Additional reconstruct_at integration tests
+// ============================================================
+
+/// Reconstruct at height 0 (genesis block) with no snapshots.
+/// Should replay only genesis block events from initial state.
+#[tokio::test]
+async fn test_reconstruct_at_genesis_no_snapshot() {
+    let (mut engine, storage) = make_engine(1000); // no snapshots
+
+    let block_a = make_block(1, 0, 0, 42);
+    let block_b = make_block(2, 1, 1, 58);
+    engine.process_block(&block_a).unwrap();
+    engine.process_block(&block_b).unwrap();
+
+    let state = reconstruct_at(
+        storage.as_ref(),
+        &SumCodec,
+        &SumMachine,
+        &0u64,
+        "test-source",
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(state, 42u64, "reconstruct at genesis = initial(0) + genesis(42)");
+}
+
+/// Reconstruct at the current tip height should match engine.state().
+#[tokio::test]
+async fn test_reconstruct_at_tip_matches_current_state() {
+    let (mut engine, storage) = make_engine(3); // snapshot every 3
+
+    for i in 0u8..7 {
+        let b = make_block(i + 1, i, i as u64, (i as u64 + 1) * 10);
+        engine.process_block(&b).unwrap();
+    }
+
+    let current = engine.state();
+    let reconstructed = reconstruct_at(
+        storage.as_ref(),
+        &SumCodec,
+        &SumMachine,
+        &0u64,
+        "test-source",
+        6,
+    )
+    .unwrap();
+
+    assert_eq!(reconstructed, current, "reconstruct at tip should match current state");
+}
+
+/// Range iterator after reorg yields events from the new canonical chain only.
+#[test]
+fn test_event_range_iterator_after_reorg_yields_new_chain() {
+    let sm = Arc::new(SumMachine);
+    let (core, _rx) = ReducerCore::new(sm, 0u64);
+    let storage = Arc::new(InMemoryStorage::new());
+    let config = EngineConfig::new("test-source", 1000);
+    let mut engine = Engine::new(core, storage.clone(), SumCodec, config);
+
+    // Chain A -> B -> C (values: 10, 20, 30)
+    let block_a = make_block(1, 0, 0, 10);
+    let block_b = make_block(2, 1, 1, 20);
+    let block_c = make_block(3, 2, 2, 30);
+    engine.process_block(&block_a).unwrap();
+    engine.process_block(&block_b).unwrap();
+    engine.process_block(&block_c).unwrap();
+
+    // Reorg: D replaces C (parent=B, height=2, value=999)
+    let block_d = make_block(4, 2, 2, 999);
+    engine.process_or_reorg(&block_d, &mut |_: ReorgEvent| {}).unwrap();
+
+    // Range [0, 2] should yield events from A, B, D (not C).
+    let iter: EventRangeIterator<InMemoryStorage, SumCodec> = EventRangeIterator::new(
+        storage,
+        SumCodec,
+        "test-source".to_string(),
+        0,
+        2,
+        32,
+    );
+
+    let events: Vec<(TestCursor, u64)> = iter.collect();
+    assert_eq!(events.len(), 3, "should have 3 events from canonical chain");
+
+    let values: Vec<u64> = events.iter().map(|(_, v)| *v).collect();
+    assert_eq!(values, vec![10, 20, 999], "values should reflect new chain (D=999, not C=30)");
+}
+
+/// Multi-event blocks: EventRangeIterator correctly yields all events per block.
+#[test]
+fn test_event_range_iterator_multi_event_blocks() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    // Block at height 0 with 3 events.
+    let cursor_bytes_0a = postcard::to_allocvec(&TestCursor(0)).unwrap();
+    let cursor_bytes_0b = postcard::to_allocvec(&TestCursor(1)).unwrap();
+    let cursor_bytes_0c = postcard::to_allocvec(&TestCursor(2)).unwrap();
+    let payload_a = 100u64.to_le_bytes().to_vec();
+    let payload_b = 200u64.to_le_bytes().to_vec();
+    let payload_c = 300u64.to_le_bytes().to_vec();
+    storage
+        .write_block(
+            "test-source",
+            &make_hash(1),
+            &GENESIS_PARENT,
+            0,
+            &[
+                (&cursor_bytes_0a, &payload_a),
+                (&cursor_bytes_0b, &payload_b),
+                (&cursor_bytes_0c, &payload_c),
+            ],
+        )
+        .unwrap();
+
+    // Block at height 1 with 2 events.
+    let cursor_bytes_1a = postcard::to_allocvec(&TestCursor(10)).unwrap();
+    let cursor_bytes_1b = postcard::to_allocvec(&TestCursor(11)).unwrap();
+    let payload_d = 400u64.to_le_bytes().to_vec();
+    let payload_e = 500u64.to_le_bytes().to_vec();
+    storage
+        .write_block(
+            "test-source",
+            &make_hash(2),
+            &make_hash(1),
+            1,
+            &[(&cursor_bytes_1a, &payload_d), (&cursor_bytes_1b, &payload_e)],
+        )
+        .unwrap();
+
+    let iter: EventRangeIterator<InMemoryStorage, SumCodec> = EventRangeIterator::new(
+        storage,
+        SumCodec,
+        "test-source".to_string(),
+        0,
+        1,
+        2, // page_size=2 to test cross-block pagination
+    );
+
+    let events: Vec<(TestCursor, u64)> = iter.collect();
+    assert_eq!(events.len(), 5, "should yield all 5 events from 2 blocks");
+    let values: Vec<u64> = events.iter().map(|(_, v)| *v).collect();
+    assert_eq!(values, vec![100, 200, 300, 400, 500]);
+}
+
+// ============================================================
 // Reorg correctness for historical queries
 // ============================================================
 
