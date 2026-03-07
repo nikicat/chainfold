@@ -328,12 +328,77 @@ impl Storage for SqliteStorage {
 
     fn load_events_by_height_range(
         &self,
-        _source_id: &str,
-        _from_height: u64,
-        _to_height: u64,
-        _limit: usize,
-        _offset: usize,
+        source_id: &str,
+        from_height: u64,
+        to_height: u64,
+        limit: usize,
+        offset: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
-        todo!("load_events_by_height_range not yet implemented for SqliteStorage")
+        // Get canonical tip, then walk canonical chain to identify blocks in range.
+        let tip_hash = match self.get_canonical_tip(source_id)? {
+            Some(h) => h,
+            None => return Ok(vec![]),
+        };
+
+        // Collect canonical chain block hashes in the height range by walking backward.
+        let conn = self.conn.lock().unwrap();
+        let mut chain_blocks: Vec<([u8; 32], u64)> = Vec::new();
+        let mut current = tip_hash;
+
+        loop {
+            let row: Option<([u8; 32], u64)> = {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT parent_hash, height FROM blocks WHERE hash = ?1",
+                )?;
+                let mut rows = stmt.query_map(rusqlite::params![&current[..]], |row| {
+                    let parent_bytes: Vec<u8> = row.get(0)?;
+                    let height: i64 = row.get(1)?;
+                    let mut parent = [0u8; 32];
+                    parent.copy_from_slice(&parent_bytes);
+                    Ok((parent, height as u64))
+                })?;
+                rows.next().map(|r| r).transpose()?
+            };
+
+            match row {
+                Some((parent, height)) => {
+                    if height >= from_height && height <= to_height {
+                        chain_blocks.push((current, height));
+                    }
+                    if height == 0 || height < from_height || parent == ZERO_HASH {
+                        break;
+                    }
+                    current = parent;
+                }
+                None => break,
+            }
+        }
+
+        // Sort by height ascending.
+        chain_blocks.sort_by_key(|&(_, h)| h);
+
+        // Load events for each block, flatten, apply offset/limit.
+        let mut all_events: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for (block_hash, _) in &chain_blocks {
+            let mut stmt = conn.prepare_cached(
+                "SELECT cursor, payload FROM events WHERE block_hash = ?1 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![&block_hash[..]], |row| {
+                let cursor: Vec<u8> = row.get(0)?;
+                let payload: Vec<u8> = row.get(1)?;
+                Ok((cursor, payload))
+            })?;
+            for row in rows {
+                all_events.push(row?);
+            }
+        }
+
+        let result = all_events
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        Ok(result)
     }
 }

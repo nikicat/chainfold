@@ -233,12 +233,60 @@ impl Storage for InMemoryStorage {
 
     fn load_events_by_height_range(
         &self,
-        _source_id: &str,
-        _from_height: u64,
-        _to_height: u64,
-        _limit: usize,
-        _offset: usize,
+        source_id: &str,
+        from_height: u64,
+        to_height: u64,
+        limit: usize,
+        offset: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
-        todo!("load_events_by_height_range not yet implemented")
+        let inner = self.inner.lock().map_err(|_| MemoryStorageError::Poisoned)?;
+
+        // Get canonical tip for this source.
+        let tip_hash = match inner.canonical_tips.get(source_id) {
+            Some(h) => *h,
+            None => return Ok(vec![]),
+        };
+
+        // Walk canonical chain backward from tip, collect blocks in height range.
+        let mut chain_blocks: Vec<([u8; 32], u64)> = Vec::new();
+        let mut current = tip_hash;
+        loop {
+            if let Some(block) = inner.blocks.get(&current) {
+                if block.height >= from_height && block.height <= to_height {
+                    chain_blocks.push((current, block.height));
+                }
+                // Optimization: stop walking once we're below from_height.
+                if block.height == 0 || block.height < from_height {
+                    break;
+                }
+                let parent = block.parent_hash;
+                if parent == ZERO_HASH {
+                    break;
+                }
+                current = parent;
+            } else {
+                break;
+            }
+        }
+
+        // Sort by height ascending (walked backward, so reverse).
+        chain_blocks.sort_by_key(|&(_, h)| h);
+
+        // Flatten events from matching blocks.
+        let mut all_events: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for (block_hash, _) in &chain_blocks {
+            if let Some(block) = inner.blocks.get(block_hash) {
+                all_events.extend(block.events.iter().cloned());
+            }
+        }
+
+        // Apply offset/limit.
+        let result = all_events
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        Ok(result)
     }
 }

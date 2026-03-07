@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use chainfold::storage::{InMemoryStorage, Storage};
 use chainfold::{
-    Block, Codec, Engine, EngineConfig, EngineError, Event, ReducerCore, ReorgEvent, StateMachine,
+    Block, Codec, Engine, EngineConfig, Event, ReducerCore, ReorgEvent, StateMachine,
 };
 use chainfold::store::query::{reconstruct_at, EventRangeIterator};
 
