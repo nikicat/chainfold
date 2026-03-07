@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Foundations** - Cursor types, EventSource/StateMachine traits, in-memory reducer — the type system everything else builds on
 - [x] **Phase 2: Block DAG Storage and Recovery** - Block DAG schema in SQLite, canonical chain tracking, state snapshots per block, crash recovery along canonical chain, gap fetching (completed 2026-03-05)
 - [x] **Phase 3: Live Subscriptions and Reorg Safety** - Live event loop, block-aware event processing, transparent reorg via DAG branch switching, reconnection with backoff (completed 2026-03-05)
-- [ ] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo with reorg handling
+- [x] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo with reorg handling (completed 2026-03-07)
 
 ## Phase Details
 
@@ -77,9 +77,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. `OnChange(callback)` delivers live state change notifications to the registered callback on each event application
   5. The ERC20 balance tracker starts cold, reconstructs balance from Transfer event history, survives a simulated process restart with correct balance restored from cache, and handles reorgs transparently (balance updates to reflect new canonical chain)
 **Plans**: 3 plans
-  - [ ] 04-01-PLAN.md — Store trait, ReducedStore, Engine Arc<Storage> refactor (Current + OnChange)
-  - [ ] 04-02-PLAN.md — Historical queries: Storage height-range extension, reconstruction planner, EventRangeIterator (At + Range)
-  - [ ] 04-03-PLAN.md — ERC20 PoC: integration tests with mock source + example binary with real RPC
+  - [x] 04-01-PLAN.md — Store trait, ReducedStore, Engine Arc<Storage> refactor (Current + OnChange)
+  - [x] 04-02-PLAN.md — Historical queries: Storage height-range extension, reconstruction planner, EventRangeIterator (At + Range)
+  - [x] 04-03-PLAN.md — ERC20 PoC: integration tests with mock source + example binary with real RPC
 
 ## Progress
 
@@ -91,4 +91,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
 | 2. Block DAG Storage and Recovery | 4/4 | Complete   | 2026-03-05 |
 | 3. Live Subscriptions and Reorg Safety | 3/3 | Complete | 2026-03-05 |
-| 4. Query API and ERC20 PoC | 0/3 | Not started | - |
+| 4. Query API and ERC20 PoC | 3/3 | Complete | 2026-03-07 |

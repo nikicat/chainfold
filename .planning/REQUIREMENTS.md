@@ -48,7 +48,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Proof of Concept
 
-- [ ] **POC-01**: ERC20 balance tracker demonstrates end-to-end: subscribe to Transfer events, reconstruct balance, survive restarts, handle reorgs transparently
+- [x] **POC-01**: ERC20 balance tracker demonstrates end-to-end: subscribe to Transfer events, reconstruct balance, survive restarts, handle reorgs transparently
 
 ## v2 Requirements
 
@@ -117,7 +117,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | QUERY-02 | Phase 4 | Complete |
 | QUERY-03 | Phase 4 | Complete |
 | QUERY-04 | Phase 4 | Complete |
-| POC-01 | Phase 4 | Pending |
+| POC-01 | Phase 4, Plan 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 24 total

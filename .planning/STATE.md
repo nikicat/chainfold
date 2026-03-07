@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 4 — Query API and ERC20 PoC (Plan 2 of 3 complete)
+**Current focus:** Phase 4 — Query API and ERC20 PoC (All 3 plans complete)
 
 ## Current Position
 
 Phase: 4 of 4 (Query API and ERC20 PoC)
-Plan: 2 of 3 (04-02 complete — Historical query API: reconstruct_at + EventRangeIterator)
-Status: Plan 04-02 complete. reconstruct_at with 3-tier cost hierarchy, EventRangeIterator with lazy pagination, Storage::load_events_by_height_range on both impls.
-Last activity: 2026-03-07 — 04-02 executed: reconstruct_at, EventRangeIterator, load_events_by_height_range; 128 tests passing
+Plan: 3 of 3 (04-03 complete — ERC20 Balance Tracker PoC)
+Status: Plan 04-03 complete. ERC20 StateMachine with 6 integration tests + example binary with alloy provider. 134 tests passing. Phase 4 complete.
+Last activity: 2026-03-07 — 04-03 executed: ERC20 PoC with cold start, restart recovery, reorg, store composition, OnChange, At() tests; example binary
 
-Progress: [██████████] 96% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4: 2/3 plans done)
+Progress: [██████████] 100% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete)
 
 ## Architecture Revision (2026-03-05)
 
@@ -48,7 +48,7 @@ Progress: [██████████] 96% (Phase 1 complete, Phase 2 comple
 | 01-foundations | 2 | 26min | 13min |
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
 | 02-persistence-and-recovery (new) | 4 | 30min | 7min |
-| 04-query-api-and-erc20-poc | 2 | 11min | 5.5min |
+| 04-query-api-and-erc20-poc | 3 | 19min | 6min |
 
 *Updated after each plan completion*
 
@@ -101,6 +101,9 @@ Recent decisions affecting current work:
 - **04-02: reconstruct_at is sync** — covers tiers 1-3 (storage-only); async RPC tiers deferred as additive wrapper
 - **04-02: Canonical chain walk for height-range** — walks backward from tip, filters by height; correct without canonical flag column
 - **04-02: EventRangeIterator reversed-buffer pop** — O(1) per yield, no Clone bound, no unsafe
+- **04-03: ERC20 PoC in test file, not library** — StateMachine + Codec defined in tests/erc20_tests.rs; PoC demonstrates stack, not reusable library code
+- **04-03: serde_json for PoC Codec** — simplicity over performance; production users choose their own serialization
+- **04-03: alloy 1.x needs stable toolchain** — project default rustc 1.90, alloy 1.7+ needs 1.91; example builds with `rustup run stable`
 
 ### Pending Todos
 
@@ -114,6 +117,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-07
-Stopped at: Completed 04-02-PLAN.md (reconstruct_at, EventRangeIterator, load_events_by_height_range; 15 new tests, 128 total passing)
-Resume file: .planning/phases/04-query-api-and-erc20-poc/04-03-PLAN.md
-Resume command: /gsd:execute-phase 04-query-api-and-erc20-poc
+Stopped at: Completed 04-03-PLAN.md (ERC20 PoC — 6 integration tests, example binary; 134 total tests passing; Phase 4 complete)
+Resume file: N/A — all phases complete
+Resume command: N/A
