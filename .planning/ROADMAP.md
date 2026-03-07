@@ -67,7 +67,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   - [x] 03-03-PLAN.md — Engine::run() live event loop with biased select!, micro-batching, exponential backoff, inline gap fill, 8 integration tests
 
 ### Phase 4: Query API and ERC20 PoC
-**Goal**: The library exposes a complete, ergonomic public API and the ERC20 balance tracker demonstrates that the entire stack works correctly end-to-end under restarts and reorgs
+**Goal**: The library exposes a complete, ergonomic public API via reactive stores and the ERC20 balance tracker demonstrates that the entire stack works correctly end-to-end under restarts and reorgs
 **Depends on**: Phase 3
 **Requirements**: QUERY-01, QUERY-02, QUERY-03, QUERY-04, PERSIST-06, POC-01
 **Success Criteria** (what must be TRUE):
@@ -76,7 +76,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. `Range(from, to)` iterates over materialized state across a cursor range using a lazy cursor-based iterator that does not buffer the entire result set in memory
   4. `OnChange(callback)` delivers live state change notifications to the registered callback on each event application
   5. The ERC20 balance tracker starts cold, reconstructs balance from Transfer event history, survives a simulated process restart with correct balance restored from cache, and handles reorgs transparently (balance updates to reflect new canonical chain)
-**Plans**: TBD
+**Plans**: 3 plans
+  - [ ] 04-01-PLAN.md — Store trait, ReducedStore, Engine Arc<Storage> refactor (Current + OnChange)
+  - [ ] 04-02-PLAN.md — Historical queries: Storage height-range extension, reconstruction planner, EventRangeIterator (At + Range)
+  - [ ] 04-03-PLAN.md — ERC20 PoC: integration tests with mock source + example binary with real RPC
 
 ## Progress
 
@@ -88,4 +91,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Foundations | 2/2 | Complete | 2026-03-03 |
 | 2. Block DAG Storage and Recovery | 4/4 | Complete   | 2026-03-05 |
 | 3. Live Subscriptions and Reorg Safety | 3/3 | Complete | 2026-03-05 |
-| 4. Query API and ERC20 PoC | 0/TBD | Not started | - |
+| 4. Query API and ERC20 PoC | 0/3 | Not started | - |
