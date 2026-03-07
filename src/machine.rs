@@ -45,7 +45,7 @@ pub trait StateMachine: Send + Sync + 'static {
 /// The watch channel always holds the latest state — no historical state is kept.
 pub struct ReducerCore<SM: StateMachine> {
     sm: Arc<SM>,
-    sender: watch::Sender<SM::State>,
+    sender: Arc<watch::Sender<SM::State>>,
     /// Accumulated events in application order (cursor order if events are applied in order).
     /// Phase 1: in-memory Vec. Phase 2 will replace with SQLite-backed storage.
     events: Vec<Event<SM::Cursor, SM::Event>>,
@@ -59,10 +59,18 @@ impl<SM: StateMachine> ReducerCore<SM> {
         let (sender, receiver) = watch::channel(initial_state);
         let core = ReducerCore {
             sm,
-            sender,
+            sender: Arc::new(sender),
             events: Vec::new(),
         };
         (core, receiver)
+    }
+
+    /// Get a shared reference to the watch::Sender for creating stores.
+    ///
+    /// Returns `Arc<watch::Sender>` that can be passed to `ReducedStore::new()`.
+    /// The Arc is cloned (cheap reference count bump), not the sender itself.
+    pub fn sender(&self) -> Arc<watch::Sender<SM::State>> {
+        Arc::clone(&self.sender)
     }
 
     /// Replace the current state with the given value, broadcasting to all watch receivers.

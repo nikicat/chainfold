@@ -141,7 +141,7 @@ fn make_engine(
     config.initial_delay_ms = 0;
     config.max_delay_ms = 0;
     config.batch_size = 64;
-    Engine::new(core, storage, SumCodec, config)
+    Engine::new(core, Arc::new(storage), SumCodec, config)
 }
 
 // ============================================================

@@ -2,6 +2,8 @@ pub mod memory;
 pub mod schema;
 pub mod sqlite;
 
+use std::sync::Arc;
+
 pub use memory::InMemoryStorage;
 pub use sqlite::SqliteStorage;
 
@@ -83,4 +85,72 @@ pub trait Storage: Send + Sync + 'static {
     /// the entry if no tip has been set yet. Used during reorg handling to update
     /// the canonical tip without writing a new block.
     fn set_canonical_tip(&self, source_id: &str, block_hash: &[u8; 32]) -> Result<(), Self::Error>;
+}
+
+/// Blanket implementation: `Arc<S>` implements `Storage` by delegating to `S`.
+///
+/// This enables `Arc<InMemoryStorage>` or `Arc<SqliteStorage>` to be used
+/// directly where `S: Storage` is required, supporting concurrent access
+/// patterns (e.g., sharing storage between Engine and external readers).
+impl<S: Storage> Storage for Arc<S> {
+    type Error = S::Error;
+
+    fn write_block(
+        &self,
+        source_id: &str,
+        block_hash: &[u8; 32],
+        parent_hash: &[u8; 32],
+        height: u64,
+        events: &[(&[u8], &[u8])],
+    ) -> Result<bool, Self::Error> {
+        (**self).write_block(source_id, block_hash, parent_hash, height, events)
+    }
+
+    fn get_canonical_tip(&self, source_id: &str) -> Result<Option<[u8; 32]>, Self::Error> {
+        (**self).get_canonical_tip(source_id)
+    }
+
+    fn get_block_height(&self, block_hash: &[u8; 32]) -> Result<Option<u64>, Self::Error> {
+        (**self).get_block_height(block_hash)
+    }
+
+    fn write_snapshot(
+        &self,
+        source_id: &str,
+        block_hash: &[u8; 32],
+        payload: &[u8],
+    ) -> Result<(), Self::Error> {
+        (**self).write_snapshot(source_id, block_hash, payload)
+    }
+
+    fn find_nearest_snapshot(
+        &self,
+        source_id: &str,
+        tip_hash: &[u8; 32],
+    ) -> Result<Option<([u8; 32], Vec<u8>)>, Self::Error> {
+        (**self).find_nearest_snapshot(source_id, tip_hash)
+    }
+
+    fn collect_canonical_chain(
+        &self,
+        from_hash: &[u8; 32],
+        to_hash: &[u8; 32],
+    ) -> Result<Vec<[u8; 32]>, Self::Error> {
+        (**self).collect_canonical_chain(from_hash, to_hash)
+    }
+
+    fn load_block_events(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        (**self).load_block_events(block_hash)
+    }
+
+    fn get_parent_hash(&self, block_hash: &[u8; 32]) -> Result<Option<[u8; 32]>, Self::Error> {
+        (**self).get_parent_hash(block_hash)
+    }
+
+    fn set_canonical_tip(&self, source_id: &str, block_hash: &[u8; 32]) -> Result<(), Self::Error> {
+        (**self).set_canonical_tip(source_id, block_hash)
+    }
 }

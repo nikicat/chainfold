@@ -1,5 +1,7 @@
 pub mod recovery;
 
+use std::sync::Arc;
+
 use crate::block::Block;
 use crate::cursor::ChainCursor;
 use crate::event::Event;
@@ -130,7 +132,7 @@ where
     C: Codec<Cursor = SM::Cursor, Event = SM::Event, State = SM::State>,
 {
     core: ReducerCore<SM>,
-    storage: S,
+    storage: Arc<S>,
     codec: C,
     config: EngineConfig,
     /// Count of new (non-duplicate) block inserts since the last snapshot.
@@ -148,7 +150,10 @@ where
     C: Codec<Cursor = SM::Cursor, Event = SM::Event, State = SM::State>,
 {
     /// Create a new Engine with the given components and configuration.
-    pub fn new(core: ReducerCore<SM>, storage: S, codec: C, config: EngineConfig) -> Self {
+    ///
+    /// Storage is wrapped in `Arc` to enable concurrent access from stores
+    /// and other consumers while the engine runs the live loop.
+    pub fn new(core: ReducerCore<SM>, storage: Arc<S>, codec: C, config: EngineConfig) -> Self {
         // Capture the initial state from the watch channel at construction time.
         // This is used during reorg recovery when no snapshot exists on the canonical
         // chain — the engine needs to replay from genesis using the same starting state.
@@ -161,6 +166,15 @@ where
             blocks_since_snapshot: 0,
             initial_state,
         }
+    }
+
+    /// Create a `ReducedStore` that provides read-only access to the engine's state.
+    ///
+    /// The returned store is decoupled from the engine — callers can use `get()`
+    /// and `subscribe()` concurrently with the live loop without holding a
+    /// reference to Engine.
+    pub fn reduced_store(&self) -> crate::store::ReducedStore<SM::State> {
+        crate::store::ReducedStore::new(self.core.sender())
     }
 
     /// Process a block through the write-first pipeline.
@@ -239,7 +253,7 @@ where
 
     /// Get a reference to the underlying storage (for test inspection and recovery).
     pub fn storage(&self) -> &S {
-        &self.storage
+        &*self.storage
     }
 
     /// Get the configured source_id.
@@ -529,6 +543,13 @@ where
         let mut attempt: u32 = 0;
 
         loop {
+            // Check cancellation before each subscribe attempt.
+            // This handles the case where the token was cancelled while the previous
+            // stream ended and we're about to try reconnecting.
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+
             // Attempt to subscribe.
             let stream = match source.subscribe(self.subscribe_from_height()?).await {
                 Ok(s) => {
@@ -539,6 +560,12 @@ where
                     s
                 }
                 Err(e) => {
+                    // Check cancellation before deciding whether to retry or error.
+                    // The cancel token may have been triggered while subscribe() was
+                    // awaiting (e.g., during the async subscribe mock).
+                    if cancel.is_cancelled() {
+                        return Ok(());
+                    }
                     if attempt >= self.config.max_retries {
                         return Err(EngineError::ReconnectExhausted(
                             attempt,

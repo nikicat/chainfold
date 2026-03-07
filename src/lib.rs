@@ -6,6 +6,7 @@ pub mod event;
 pub mod machine;
 pub mod source;
 pub mod storage;
+pub mod store;
 
 // Re-export key public types at the crate root for ergonomic use.
 pub use block::Block;
@@ -16,3 +17,4 @@ pub use event::Event;
 pub use machine::{ReducerCore, StateMachine};
 pub use source::EventSource;
 pub use storage::Storage;
+pub use store::{Store, ReducedStore};

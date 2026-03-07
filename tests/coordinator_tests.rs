@@ -104,7 +104,7 @@ fn make_engine(snapshot_every_n: usize) -> Engine<CounterMachine, InMemoryStorag
     let (core, _rx) = ReducerCore::new(sm, 0u64);
     let storage = InMemoryStorage::new();
     let config = EngineConfig::new("test-source", snapshot_every_n);
-    Engine::new(core, storage, TestCodec, config)
+    Engine::new(core, Arc::new(storage), TestCodec, config)
 }
 
 // ============================================================
@@ -252,7 +252,7 @@ fn test_engine_state_and_subscribe() {
     let (core, _rx) = ReducerCore::new(sm, 0u64);
     let storage = InMemoryStorage::new();
     let config = EngineConfig::new("test-source", 100);
-    let mut engine = Engine::new(core, storage, TestCodec, config);
+    let mut engine = Engine::new(core, Arc::new(storage), TestCodec, config);
 
     // Subscribe before processing blocks.
     let rx = engine.subscribe();
@@ -404,6 +404,6 @@ fn test_engine_config_new_used_in_engine() {
     let storage = InMemoryStorage::new();
     let config = EngineConfig::new("test-source", 100);
     let _engine: Engine<CounterMachine, InMemoryStorage, TestCodec> =
-        Engine::new(core, storage, TestCodec, config);
+        Engine::new(core, Arc::new(storage), TestCodec, config);
     // If this compiles and runs, the constructor works.
 }

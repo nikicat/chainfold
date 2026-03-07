@@ -199,7 +199,7 @@ fn make_engine(
     let sm = Arc::new(SumMachine);
     let (core, _rx) = ReducerCore::new(sm, 0u64);
     let config = EngineConfig::new("test-source", snapshot_every_n);
-    Engine::new(core, storage, SumCodec, config)
+    Engine::new(core, Arc::new(storage), SumCodec, config)
 }
 
 // ============================================================
