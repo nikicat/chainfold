@@ -20,3 +20,6 @@ postcard = { version = "1", features = ["alloc"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 futures-util = "0.3"
 tempfile = "3"
+alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
