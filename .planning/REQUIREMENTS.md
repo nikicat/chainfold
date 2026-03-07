@@ -31,7 +31,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **PERSIST-03**: Library recovers from crash: find canonical tip, load nearest snapshot on canonical chain, replay forward along canonical chain, catch up via FetchEvents, switch to live
 - [x] **PERSIST-04**: Library creates periodic state snapshots (client-owned serialization) at block boundaries to bound replay cost
 - [x] **PERSIST-05**: Library maintains named anchor positions (persistent cursors) updated atomically with block processing
-- [ ] **PERSIST-06**: Library selects cheapest reconstruction path for historical queries: cached-only replay (0 RPC), partial gap fetch (1 RPC), or direct FetchState (1 RPC)
+- [x] **PERSIST-06**: Library selects cheapest reconstruction path for historical queries: cached-only replay (0 RPC), partial gap fetch (1 RPC), or direct FetchState (1 RPC)
 
 ### Chain Safety
 
@@ -42,8 +42,8 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Query API
 
 - [x] **QUERY-01**: Library exposes `Current() → S` returning live-tracked state at canonical chain tip
-- [ ] **QUERY-02**: Library exposes `At(cursor) → S` returning historical state via cheapest reconstruction path
-- [ ] **QUERY-03**: Library exposes `Range(from, to) → Iterator<S>` for materialized state across a cursor range with lightweight cursor-based iteration
+- [x] **QUERY-02**: Library exposes `At(cursor) → S` returning historical state via cheapest reconstruction path
+- [x] **QUERY-03**: Library exposes `Range(from, to) → Iterator<S>` for materialized state across a cursor range with lightweight cursor-based iteration
 - [x] **QUERY-04**: Library exposes `OnChange(callback)` for live state change notifications
 
 ### Proof of Concept
@@ -109,13 +109,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERSIST-03 | Phase 2 | Pending (redesign) |
 | PERSIST-04 | Phase 2 | Pending (redesign) |
 | PERSIST-05 | Phase 2 | Pending (redesign) |
-| PERSIST-06 | Phase 4 | Pending |
+| PERSIST-06 | Phase 4 | Complete |
 | SAFETY-01 | Phase 3 | Complete (03-02: process_or_reorg, canonical tip tracking, find_common_ancestor) |
 | SAFETY-02 | Phase 3 | Complete (03-02: handle_reorg, snapshot+replay re-derivation, initial_state for no-snapshot) |
 | SAFETY-03 | Phase 3 | Complete |
 | QUERY-01 | Phase 4 | Complete |
-| QUERY-02 | Phase 4 | Pending |
-| QUERY-03 | Phase 4 | Pending |
+| QUERY-02 | Phase 4 | Complete |
+| QUERY-03 | Phase 4 | Complete |
 | QUERY-04 | Phase 4 | Complete |
 | POC-01 | Phase 4 | Pending |
 

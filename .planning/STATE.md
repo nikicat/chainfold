@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 4 — Query API and ERC20 PoC (Plan 1 of 3 complete)
+**Current focus:** Phase 4 — Query API and ERC20 PoC (Plan 2 of 3 complete)
 
 ## Current Position
 
 Phase: 4 of 4 (Query API and ERC20 PoC)
-Plan: 1 of 3 (04-01 complete — Store trait + ReducedStore + Engine Arc refactor)
-Status: Plan 04-01 complete. Store trait defined, ReducedStore implemented, Engine uses Arc<Storage>.
-Last activity: 2026-03-07 — 04-01 executed: Store trait, ReducedStore with Arc<watch::Sender>, Engine Arc<S> refactor; 113 tests passing
+Plan: 2 of 3 (04-02 complete — Historical query API: reconstruct_at + EventRangeIterator)
+Status: Plan 04-02 complete. reconstruct_at with 3-tier cost hierarchy, EventRangeIterator with lazy pagination, Storage::load_events_by_height_range on both impls.
+Last activity: 2026-03-07 — 04-02 executed: reconstruct_at, EventRangeIterator, load_events_by_height_range; 128 tests passing
 
-Progress: [██████████] 92% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4: 1/3 plans done)
+Progress: [██████████] 96% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4: 2/3 plans done)
 
 ## Architecture Revision (2026-03-05)
 
@@ -48,7 +48,7 @@ Progress: [██████████] 92% (Phase 1 complete, Phase 2 comple
 | 01-foundations | 2 | 26min | 13min |
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
 | 02-persistence-and-recovery (new) | 4 | 30min | 7min |
-| 04-query-api-and-erc20-poc | 1 | 5min | 5min |
+| 04-query-api-and-erc20-poc | 2 | 11min | 5.5min |
 
 *Updated after each plan completion*
 
@@ -98,6 +98,9 @@ Recent decisions affecting current work:
 - **04-01: Engine::new() takes Arc<S>** — storage wrapped in Arc at construction; all method calls work via auto-deref; existing call sites updated
 - **04-01: Blanket impl Storage for Arc<S>** — delegates all methods to inner S; supports Arc<InMemoryStorage> and Arc<SqliteStorage> directly
 - **04-01: ReducedStore holds Arc<watch::Sender>** — only Sender can create new subscribers (Receiver cannot); store is read-only from caller perspective
+- **04-02: reconstruct_at is sync** — covers tiers 1-3 (storage-only); async RPC tiers deferred as additive wrapper
+- **04-02: Canonical chain walk for height-range** — walks backward from tip, filters by height; correct without canonical flag column
+- **04-02: EventRangeIterator reversed-buffer pop** — O(1) per yield, no Clone bound, no unsafe
 
 ### Pending Todos
 
@@ -111,6 +114,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-07
-Stopped at: Completed 04-01-PLAN.md (Store trait, ReducedStore, Engine Arc<S> refactor; 6 new tests, 113 total passing)
-Resume file: .planning/phases/04-query-api-and-erc20-poc/04-02-PLAN.md
+Stopped at: Completed 04-02-PLAN.md (reconstruct_at, EventRangeIterator, load_events_by_height_range; 15 new tests, 128 total passing)
+Resume file: .planning/phases/04-query-api-and-erc20-poc/04-03-PLAN.md
 Resume command: /gsd:execute-phase 04-query-api-and-erc20-poc
