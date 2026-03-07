@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 3 — Live Subscription (COMPLETE — all 3 plans done)
+**Current focus:** Phase 4 — Query API and ERC20 PoC (Plan 1 of 3 complete)
 
 ## Current Position
 
-Phase: 3 of 4 (Live Subscriptions and Reorg Safety) — COMPLETE
-Plan: 3 of 3 (03-03 complete — Engine::run() live event loop)
-Status: Phase 3 complete. All plans 03-01, 03-02, 03-03 complete.
-Last activity: 2026-03-05 — 03-03 executed: Engine::run() with biased select!, micro-batching, exponential backoff, inline gap fill; 107 tests passing
+Phase: 4 of 4 (Query API and ERC20 PoC)
+Plan: 1 of 3 (04-01 complete — Store trait + ReducedStore + Engine Arc refactor)
+Status: Plan 04-01 complete. Store trait defined, ReducedStore implemented, Engine uses Arc<Storage>.
+Last activity: 2026-03-07 — 04-01 executed: Store trait, ReducedStore with Arc<watch::Sender>, Engine Arc<S> refactor; 113 tests passing
 
-Progress: [██████████] 90% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 remaining)
+Progress: [██████████] 92% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4: 1/3 plans done)
 
 ## Architecture Revision (2026-03-05)
 
@@ -48,6 +48,7 @@ Progress: [██████████] 90% (Phase 1 complete, Phase 2 comple
 | 01-foundations | 2 | 26min | 13min |
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
 | 02-persistence-and-recovery (new) | 4 | 30min | 7min |
+| 04-query-api-and-erc20-poc | 1 | 5min | 5min |
 
 *Updated after each plan completion*
 
@@ -93,6 +94,10 @@ Recent decisions affecting current work:
 - **03-03: Inline gap fill per-block** — check block.height > tip+1 before each block in batch loop; calls fetch_gap_blocks for the range
 - **03-03: tokio macros in main deps** — tokio::select! used in lib code; requires macros + rt-multi-thread in [dependencies] not just [dev-dependencies]
 - **03-03: Test Pattern A preferred** — max_retries=0 causes run() to return Err(ReconnectExhausted) after finite stream; more reliable than watcher-based cancellation with sync mock subscribe()
+- **04-01: ReducerCore::sender Arc-wrapped** — Arc<watch::Sender> shared between ReducerCore and ReducedStore; enables store creation without Engine reference
+- **04-01: Engine::new() takes Arc<S>** — storage wrapped in Arc at construction; all method calls work via auto-deref; existing call sites updated
+- **04-01: Blanket impl Storage for Arc<S>** — delegates all methods to inner S; supports Arc<InMemoryStorage> and Arc<SqliteStorage> directly
+- **04-01: ReducedStore holds Arc<watch::Sender>** — only Sender can create new subscribers (Receiver cannot); store is read-only from caller perspective
 
 ### Pending Todos
 
@@ -105,7 +110,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-03-05
-Stopped at: Completed 03-03-PLAN.md (Engine::run(): live event loop with biased select!, exponential backoff, inline gap fill; 8 new tests, 107 total passing; Phase 3 complete)
-Resume file: .planning/phases/04-evm-adapter/04-01-PLAN.md (next phase)
-Resume command: /gsd:execute-phase 04-evm-adapter
+Last session: 2026-03-07
+Stopped at: Completed 04-01-PLAN.md (Store trait, ReducedStore, Engine Arc<S> refactor; 6 new tests, 113 total passing)
+Resume file: .planning/phases/04-query-api-and-erc20-poc/04-02-PLAN.md
+Resume command: /gsd:execute-phase 04-query-api-and-erc20-poc

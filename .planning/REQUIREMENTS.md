@@ -41,10 +41,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Query API
 
-- [ ] **QUERY-01**: Library exposes `Current() → S` returning live-tracked state at canonical chain tip
+- [x] **QUERY-01**: Library exposes `Current() → S` returning live-tracked state at canonical chain tip
 - [ ] **QUERY-02**: Library exposes `At(cursor) → S` returning historical state via cheapest reconstruction path
 - [ ] **QUERY-03**: Library exposes `Range(from, to) → Iterator<S>` for materialized state across a cursor range with lightweight cursor-based iteration
-- [ ] **QUERY-04**: Library exposes `OnChange(callback)` for live state change notifications
+- [x] **QUERY-04**: Library exposes `OnChange(callback)` for live state change notifications
 
 ### Proof of Concept
 
@@ -113,10 +113,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SAFETY-01 | Phase 3 | Complete (03-02: process_or_reorg, canonical tip tracking, find_common_ancestor) |
 | SAFETY-02 | Phase 3 | Complete (03-02: handle_reorg, snapshot+replay re-derivation, initial_state for no-snapshot) |
 | SAFETY-03 | Phase 3 | Complete |
-| QUERY-01 | Phase 4 | Pending |
+| QUERY-01 | Phase 4 | Complete |
 | QUERY-02 | Phase 4 | Pending |
 | QUERY-03 | Phase 4 | Pending |
-| QUERY-04 | Phase 4 | Pending |
+| QUERY-04 | Phase 4 | Complete |
 | POC-01 | Phase 4 | Pending |
 
 **Coverage:**
