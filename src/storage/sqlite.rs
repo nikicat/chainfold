@@ -325,4 +325,15 @@ impl Storage for SqliteStorage {
         )?;
         Ok(())
     }
+
+    fn load_events_by_height_range(
+        &self,
+        _source_id: &str,
+        _from_height: u64,
+        _to_height: u64,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        todo!("load_events_by_height_range not yet implemented for SqliteStorage")
+    }
 }

@@ -1,3 +1,5 @@
+pub mod query;
+
 use std::sync::Arc;
 use tokio::sync::watch;
 

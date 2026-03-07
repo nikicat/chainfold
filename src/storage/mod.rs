@@ -85,6 +85,24 @@ pub trait Storage: Send + Sync + 'static {
     /// the entry if no tip has been set yet. Used during reorg handling to update
     /// the canonical tip without writing a new block.
     fn set_canonical_tip(&self, source_id: &str, block_hash: &[u8; 32]) -> Result<(), Self::Error>;
+
+    /// Load events from blocks on the canonical chain within a height range.
+    ///
+    /// Returns `(cursor_bytes, payload_bytes)` pairs in height-ascending,
+    /// insertion order. Uses limit/offset for pagination. Caller must provide
+    /// `source_id` because the canonical chain is per-source.
+    ///
+    /// Walks the canonical chain from the tip backward, filters to blocks in
+    /// `[from_height, to_height]`, then loads events with offset/limit applied
+    /// across the flattened result.
+    fn load_events_by_height_range(
+        &self,
+        source_id: &str,
+        from_height: u64,
+        to_height: u64,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error>;
 }
 
 /// Blanket implementation: `Arc<S>` implements `Storage` by delegating to `S`.
@@ -152,5 +170,16 @@ impl<S: Storage> Storage for Arc<S> {
 
     fn set_canonical_tip(&self, source_id: &str, block_hash: &[u8; 32]) -> Result<(), Self::Error> {
         (**self).set_canonical_tip(source_id, block_hash)
+    }
+
+    fn load_events_by_height_range(
+        &self,
+        source_id: &str,
+        from_height: u64,
+        to_height: u64,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        (**self).load_events_by_height_range(source_id, from_height, to_height, limit, offset)
     }
 }
