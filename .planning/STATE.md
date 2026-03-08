@@ -118,6 +118,10 @@ Recent decisions affecting current work:
 - **04-03: serde_json for PoC Codec** — simplicity over performance; production users choose their own serialization
 - **04-03: alloy 1.x needs stable toolchain** — project default rustc 1.90, alloy 1.7+ needs 1.91; example builds with `rustup run stable`
 
+### Roadmap Evolution
+
+- Phase 5 added: EVM ERC20 module with filter pushdown
+
 ### Pending Todos
 
 - Revise 03-CONTEXT.md for DAG model (old context assumed linear storage + reorg callbacks)
