@@ -18,6 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Block DAG Storage and Recovery** - Block DAG schema in SQLite, canonical chain tracking, state snapshots per block, crash recovery along canonical chain, gap fetching (completed 2026-03-05)
 - [x] **Phase 3: Live Subscriptions and Reorg Safety** - Live event loop, block-aware event processing, transparent reorg via DAG branch switching, reconnection with backoff (completed 2026-03-05)
 - [x] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo with reorg handling (completed 2026-03-07)
+- [ ] **Phase 5: EVM ERC20 Module with Filter Pushdown** - Extract ERC20 PoC into reusable library module, add account-scoped eth_getLogs filter pushdown, feature-gated alloy dependency
 
 ## Phase Details
 
@@ -81,10 +82,24 @@ Decimal phases appear between their surrounding integers in numeric order.
   - [x] 04-02-PLAN.md — Historical queries: Storage height-range extension, reconstruction planner, EventRangeIterator (At + Range)
   - [x] 04-03-PLAN.md — ERC20 PoC: integration tests with mock source + example binary with real RPC
 
+### Phase 5: EVM ERC20 Module with Filter Pushdown
+**Goal**: The ERC20 PoC types and alloy-based EventSource are extracted into a reusable, feature-gated library module with account-scoped eth_getLogs filter pushdown — so users can track ERC20 balances for a single account without fetching all Transfer events
+**Depends on**: Phase 4
+**Requirements**: MOD-01, MOD-02, MOD-03, MOD-04, MOD-05
+**Success Criteria** (what must be TRUE):
+  1. `cargo check` (no features) compiles without pulling alloy — the evm feature is fully optional
+  2. `chainfold::modules::erc20` exports Transfer, Erc20Machine, Erc20Codec, Erc20Source, Erc20Filter, and alloy re-exports
+  3. `Erc20Source` with `Erc20Filter::Account(addr)` fires two scoped eth_getLogs queries per chunk and deduplicates results
+  4. Existing 6 ERC20 integration tests pass using imports from the library module
+  5. Example binary is CLI-only — all domain types imported from the library module
+**Plans**: 2 plans
+  - [ ] 05-01-PLAN.md — Feature flag, module scaffold, domain types, Erc20Source with filter pushdown
+  - [ ] 05-02-PLAN.md — Migrate tests and thin example binary to import from module
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -92,3 +107,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 2. Block DAG Storage and Recovery | 4/4 | Complete   | 2026-03-05 |
 | 3. Live Subscriptions and Reorg Safety | 3/3 | Complete | 2026-03-05 |
 | 4. Query API and ERC20 PoC | 3/3 | Complete | 2026-03-07 |
+| 5. EVM ERC20 Module with Filter Pushdown | 0/2 | In Progress | — |
