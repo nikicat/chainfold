@@ -47,6 +47,10 @@ struct Args {
     #[arg(long, default_value = "10")]
     num_blocks: u64,
 
+    /// Max block range per eth_getLogs RPC call (varies by provider)
+    #[arg(long, default_value = "1000")]
+    chunk_size: u64,
+
     /// SQLite cache file path
     #[arg(long, default_value = "./erc20_cache.db")]
     db: String,
@@ -167,6 +171,9 @@ impl From<String> for SourceErr {
 struct AlloyErc20Source {
     rpc_url: String,
     token: Address,
+    chunk_size: u64,
+    /// Earliest block this source cares about — skips anything below.
+    from_block: u64,
 }
 
 #[async_trait::async_trait]
@@ -184,16 +191,31 @@ impl EventSource for AlloyErc20Source {
         from_height: u64,
         to_height: u64,
     ) -> Result<Vec<Block<EvmCursor, Transfer>>, Self::Error> {
+        // Clamp to our configured floor — ignore blocks before from_block.
+        let from_height = from_height.max(self.from_block);
+        if from_height >= to_height {
+            return Ok(Vec::new());
+        }
+
         let url: alloy::transports::http::reqwest::Url = self.rpc_url.parse().map_err(|e| SourceErr(format!("{}", e)))?;
         let provider = ProviderBuilder::new().connect_http(url);
 
-        let filter = Filter::new()
-            .address(self.token)
-            .event_signature(TRANSFER_TOPIC)
-            .from_block(from_height)
-            .to_block(to_height.saturating_sub(1)); // half-open -> inclusive
-
-        let logs = provider.get_logs(&filter).await.map_err(|e| SourceErr(e.to_string()))?;
+        // Chunk into batches to stay within RPC provider limits.
+        let chunk = self.chunk_size;
+        let mut logs = Vec::new();
+        let mut cursor = from_height;
+        let end = to_height.saturating_sub(1); // half-open -> inclusive
+        while cursor <= end {
+            let chunk_end = end.min(cursor + chunk - 1);
+            let filter = Filter::new()
+                .address(self.token)
+                .event_signature(TRANSFER_TOPIC)
+                .from_block(cursor)
+                .to_block(chunk_end);
+            let chunk_logs = provider.get_logs(&filter).await.map_err(|e| SourceErr(e.to_string()))?;
+            logs.extend(chunk_logs);
+            cursor = chunk_end + 1;
+        }
 
         // Group logs by block number.
         let mut blocks_map: std::collections::BTreeMap<u64, Vec<Event<EvmCursor, Transfer>>> =
@@ -313,6 +335,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = AlloyErc20Source {
         rpc_url: args.rpc_url.clone(),
         token,
+        chunk_size: args.chunk_size,
+        from_block: args.from_block,
     };
 
     // Check if this is a warm or cold start.
