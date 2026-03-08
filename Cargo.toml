@@ -23,3 +23,5 @@ tempfile = "3"
 alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
