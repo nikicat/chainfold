@@ -18,16 +18,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** Phase 4 — Query API and ERC20 PoC (All 3 plans complete)
+**Current focus:** Phase 5 — EVM ERC20 Module with Filter Pushdown (Plan 1 of 2 complete)
 
 ## Current Position
 
-Phase: 4 of 4 (Query API and ERC20 PoC)
-Plan: 3 of 3 (04-03 complete — ERC20 Balance Tracker PoC)
-Status: Plan 04-03 complete. ERC20 StateMachine with 6 integration tests + example binary with alloy provider. 134 tests passing. Phase 4 complete.
-Last activity: 2026-03-07 — 04-03 executed: ERC20 PoC with cold start, restart recovery, reorg, store composition, OnChange, At() tests; example binary
+Phase: 5 of 5 (EVM ERC20 Module with Filter Pushdown)
+Plan: 1 of 2 (05-01 complete — ERC20 module scaffold + Erc20Source with filter pushdown)
+Status: Plan 05-01 complete. Feature-gated ERC20 module with domain types + Erc20Source<P: Provider> with account-scoped filter pushdown. 134 tests passing.
+Last activity: 2026-03-09 — 05-01 executed: ERC20 module with Transfer, Erc20Machine, Erc20Codec, Erc20Filter, Erc20Source; evm feature flag
 
-Progress: [██████████] 100% (Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete)
+Progress: [█████████░] 92% (Phase 1-4 complete, Phase 5: 1/2 plans)
 
 ## Architecture Revision (2026-03-05)
 
@@ -62,6 +62,7 @@ Progress: [██████████] 100% (Phase 1 complete, Phase 2 compl
 | 02-persistence-and-recovery (old) | 2 | 41min | 20min |
 | 02-persistence-and-recovery (new) | 4 | 30min | 7min |
 | 04-query-api-and-erc20-poc | 3 | 19min | 6min |
+| 05-evm-erc20-module (partial) | 1 | 11min | 11min |
 
 *Updated after each plan completion*
 
@@ -117,6 +118,9 @@ Recent decisions affecting current work:
 - **04-03: ERC20 PoC in test file, not library** — StateMachine + Codec defined in tests/erc20_tests.rs; PoC demonstrates stack, not reusable library code
 - **04-03: serde_json for PoC Codec** — simplicity over performance; production users choose their own serialization
 - **04-03: alloy 1.x needs stable toolchain** — project default rustc 1.90, alloy 1.7+ needs 1.91; example builds with `rustup run stable`
+- **05-01: Erc20SourceError uses String-based Rpc variant** — avoids coupling to specific alloy TransportError type which varies across versions
+- **05-01: cfg-gated module pattern** — evm feature flag enables pub mod modules in lib.rs; alloy and tracing are optional deps
+- **05-01: Filter pushdown via Erc20Filter enum** — AllTransfers = single query, Account = two parallel queries with BTreeMap dedup
 
 ### Roadmap Evolution
 
@@ -133,7 +137,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-03-07
-Stopped at: Completed 04-03-PLAN.md (ERC20 PoC — 6 integration tests, example binary; 134 total tests passing; Phase 4 complete)
-Resume file: N/A — all phases complete
-Resume command: N/A
+Last session: 2026-03-09
+Stopped at: Completed 05-01-PLAN.md (ERC20 module scaffold + Erc20Source with filter pushdown; 134 tests passing)
+Resume file: .planning/phases/05-evm-erc20-module-with-filter-pushdown/05-02-PLAN.md
+Resume command: /gsd:execute-phase 05
