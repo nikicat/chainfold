@@ -31,6 +31,10 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[[test]]
+name = "erc20_tests"
+required-features = ["evm"]
+
 [[example]]
 name = "erc20_tracker"
 required-features = ["evm"]

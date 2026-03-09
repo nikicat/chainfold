@@ -8,112 +8,15 @@
 /// - OnChange: subscribe receives balance transitions
 /// - Historical query: reconstruct_at returns balance at specific height
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use chainfold::coordinator::recovery::recover;
 use chainfold::cursor::EvmCursor;
+use chainfold::modules::erc20::{Balances, Erc20Codec, Erc20Machine, Transfer};
 use chainfold::storage::InMemoryStorage;
 use chainfold::store::query::reconstruct_at;
 use chainfold::store::Store;
-use chainfold::{
-    Block, Codec, Engine, EngineConfig, Event, ReducerCore, ReorgEvent, StateMachine,
-};
-
-// ============================================================
-// ERC20 domain types (PoC, not library code)
-// ============================================================
-
-/// ERC20 Transfer event.
-#[derive(Debug, Clone)]
-struct Transfer {
-    from: [u8; 20],
-    to: [u8; 20],
-    amount: u128,
-}
-
-/// Balance state: address -> balance.
-type Balances = HashMap<[u8; 20], u128>;
-
-/// State machine that reduces Transfer events into balances.
-struct Erc20Machine;
-
-impl StateMachine for Erc20Machine {
-    type State = Balances;
-    type Event = Transfer;
-    type Cursor = EvmCursor;
-
-    fn apply(&self, mut state: Balances, event: &Event<EvmCursor, Transfer>) -> Balances {
-        let transfer = &event.data;
-        // Debit sender (saturating to handle genesis mints where from=0x0)
-        if transfer.from != [0u8; 20] {
-            let bal = state.entry(transfer.from).or_insert(0);
-            *bal = bal.saturating_sub(transfer.amount);
-        }
-        // Credit receiver
-        *state.entry(transfer.to).or_insert(0) += transfer.amount;
-        state
-    }
-}
-
-/// Codec: serialize Transfer and Balances via serde_json (simple, PoC-grade).
-struct Erc20Codec;
-
-/// Serializable wrapper for Transfer (serde needs it since [u8; 20] doesn't impl Serialize by default in a convenient way).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct TransferSerde {
-    from: Vec<u8>,
-    to: Vec<u8>,
-    amount: u128,
-}
-
-/// Serializable wrapper for Balances.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct BalancesSerde(Vec<(Vec<u8>, u128)>);
-
-impl Codec for Erc20Codec {
-    type Cursor = EvmCursor;
-    type Event = Transfer;
-    type State = Balances;
-
-    fn encode_event(&self, event: &Transfer) -> Vec<u8> {
-        let s = TransferSerde {
-            from: event.from.to_vec(),
-            to: event.to.to_vec(),
-            amount: event.amount,
-        };
-        serde_json::to_vec(&s).unwrap()
-    }
-
-    fn decode_event(&self, payload: &[u8]) -> Option<Transfer> {
-        let s: TransferSerde = serde_json::from_slice(payload).ok()?;
-        let from: [u8; 20] = s.from.try_into().ok()?;
-        let to: [u8; 20] = s.to.try_into().ok()?;
-        Some(Transfer {
-            from,
-            to,
-            amount: s.amount,
-        })
-    }
-
-    fn encode_state(&self, state: &Balances) -> Vec<u8> {
-        let entries: Vec<(Vec<u8>, u128)> = state
-            .iter()
-            .map(|(k, v)| (k.to_vec(), *v))
-            .collect();
-        serde_json::to_vec(&BalancesSerde(entries)).unwrap()
-    }
-
-    fn decode_state(&self, bytes: &[u8]) -> Option<Balances> {
-        let s: BalancesSerde = serde_json::from_slice(bytes).ok()?;
-        let mut map = HashMap::new();
-        for (k, v) in s.0 {
-            let addr: [u8; 20] = k.try_into().ok()?;
-            map.insert(addr, v);
-        }
-        Some(map)
-    }
-}
+use chainfold::{Block, Engine, EngineConfig, Event, ReducerCore, ReorgEvent};
 
 // ============================================================
 // Mock source for ERC20 tests
