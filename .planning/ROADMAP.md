@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Block DAG Storage and Recovery** - Block DAG schema in SQLite, canonical chain tracking, state snapshots per block, crash recovery along canonical chain, gap fetching (completed 2026-03-05)
 - [x] **Phase 3: Live Subscriptions and Reorg Safety** - Live event loop, block-aware event processing, transparent reorg via DAG branch switching, reconnection with backoff (completed 2026-03-05)
 - [x] **Phase 4: Query API and ERC20 PoC** - Public Current/At/Range/OnChange API, cheapest reconstruction path selection, end-to-end ERC20 demo with reorg handling (completed 2026-03-07)
-- [ ] **Phase 5: EVM ERC20 Module with Filter Pushdown** - Extract ERC20 PoC into reusable library module, add account-scoped eth_getLogs filter pushdown, feature-gated alloy dependency
+- [x] **Phase 5: EVM ERC20 Module with Filter Pushdown** - Extract ERC20 PoC into reusable library module, add account-scoped eth_getLogs filter pushdown, feature-gated alloy dependency (completed 2026-03-09)
 
 ## Phase Details
 
@@ -50,8 +50,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 4 plans (02-01 through 02-04)
   - [x] 02-01-PLAN.md — Block<C,E>, Storage trait, Codec trait, schema v2 types
   - [x] 02-02-PLAN.md — InMemoryStorage implementing Storage trait, 16 unit tests
-  - [ ] 02-03-PLAN.md — SqliteStorage implementing Storage trait
-  - [ ] 02-04-PLAN.md — Recovery pipeline: snapshot + canonical chain replay
+  - [x] 02-03-PLAN.md — SqliteStorage implementing Storage trait
+  - [x] 02-04-PLAN.md — Recovery pipeline: snapshot + canonical chain replay
 
 ### Phase 3: Live Subscriptions and Reorg Safety
 **Goal**: The library tracks the chain tip in real time — events flow from a live subscription through block-aware processing into state, the library reconnects transparently after disconnection, and reorgs are handled as DAG branch switches where the library re-derives state from the fork point without client intervention
@@ -93,8 +93,8 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. Existing 6 ERC20 integration tests pass using imports from the library module
   5. Example binary is CLI-only — all domain types imported from the library module
 **Plans**: 2 plans
-  - [ ] 05-01-PLAN.md — Feature flag, module scaffold, domain types, Erc20Source with filter pushdown
-  - [ ] 05-02-PLAN.md — Migrate tests and thin example binary to import from module
+  - [x] 05-01-PLAN.md — Feature flag, module scaffold, domain types, Erc20Source with filter pushdown
+  - [x] 05-02-PLAN.md — Migrate tests and thin example binary to import from module
 
 ## Progress
 
@@ -107,4 +107,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Block DAG Storage and Recovery | 4/4 | Complete   | 2026-03-05 |
 | 3. Live Subscriptions and Reorg Safety | 3/3 | Complete | 2026-03-05 |
 | 4. Query API and ERC20 PoC | 3/3 | Complete | 2026-03-07 |
-| 5. EVM ERC20 Module with Filter Pushdown | 0/2 | In Progress | — |
+| 5. EVM ERC20 Module with Filter Pushdown | 2/2 | Complete | 2026-03-09 |

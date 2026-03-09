@@ -50,6 +50,14 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **POC-01**: ERC20 balance tracker demonstrates end-to-end: subscribe to Transfer events, reconstruct balance, survive restarts, handle reorgs transparently
 
+### EVM Module
+
+- [x] **MOD-01**: EVM feature flag is fully optional — `cargo check` (no features) compiles without pulling alloy
+- [x] **MOD-02**: `chainfold::modules::erc20` exports Transfer, Erc20Machine, Erc20Codec, Erc20Source, Erc20Filter, and alloy re-exports
+- [x] **MOD-03**: `Erc20Source` with `Erc20Filter::Account(addr)` fires two scoped eth_getLogs queries per chunk and deduplicates results
+- [x] **MOD-04**: Existing ERC20 integration tests pass using imports from the library module
+- [x] **MOD-05**: Example binary is CLI-only — all domain types imported from the library module
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -100,15 +108,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CORE-04 | Phase 1 | Complete (01-02) |
 | CORE-05 | Phase 1 | Complete (01-02) |
 | INGEST-01 | Phase 3 | Complete |
-| INGEST-02 | Phase 2 | Pending (redesign) |
-| INGEST-03 | Phase 2 | Pending (redesign) |
-| INGEST-04 | Phase 2 | Pending (redesign) |
-| INGEST-05 | Phase 3 | In progress (03-01 storage contracts laid, 03-02/03-03 pending) |
-| PERSIST-01 | Phase 2 | Pending (redesign) |
-| PERSIST-02 | Phase 2 | Pending (redesign) |
-| PERSIST-03 | Phase 2 | Pending (redesign) |
-| PERSIST-04 | Phase 2 | Pending (redesign) |
-| PERSIST-05 | Phase 2 | Pending (redesign) |
+| INGEST-02 | Phase 2 | Complete (02-04) |
+| INGEST-03 | Phase 2 | Complete (02-04) |
+| INGEST-04 | Phase 2 | Complete (02-01, 02-02, 02-03) |
+| INGEST-05 | Phase 3 | Complete (03-01, 03-03) |
+| PERSIST-01 | Phase 2 | Complete (02-01, 02-02, 02-03) |
+| PERSIST-02 | Phase 2 | Complete (02-01, 02-02, 02-03) |
+| PERSIST-03 | Phase 2 | Complete (02-04) |
+| PERSIST-04 | Phase 2 | Complete (02-03) |
+| PERSIST-05 | Phase 2 | Complete (02-01, 02-02, 02-03) |
 | PERSIST-06 | Phase 4 | Complete |
 | SAFETY-01 | Phase 3 | Complete (03-02: process_or_reorg, canonical tip tracking, find_common_ancestor) |
 | SAFETY-02 | Phase 3 | Complete (03-02: handle_reorg, snapshot+replay re-derivation, initial_state for no-snapshot) |
@@ -118,12 +126,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | QUERY-03 | Phase 4 | Complete |
 | QUERY-04 | Phase 4 | Complete |
 | POC-01 | Phase 4, Plan 3 | Complete |
+| MOD-01 | Phase 5 | Complete (05-01) |
+| MOD-02 | Phase 5 | Complete (05-01) |
+| MOD-03 | Phase 5 | Complete (05-01) |
+| MOD-04 | Phase 5 | Complete (05-01) |
+| MOD-05 | Phase 5 | Complete (05-02) |
 
 **Coverage:**
-- v1 requirements: 24 total
-- Mapped to phases: 24
+- v1 requirements: 29 total
+- Mapped to phases: 29
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-03*
-*Last updated: 2026-03-05 — 03-02 complete: SAFETY-01 and SAFETY-02 marked complete (reorg detection and transparent state re-derivation implemented and tested)*
+*Last updated: 2026-03-09 — tech debt cleanup: stale Phase 2/3 statuses updated to Complete, MOD-01 through MOD-05 added to traceability table*
