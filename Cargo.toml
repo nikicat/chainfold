@@ -3,6 +3,9 @@ name = "chainfold"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+evm = ["dep:alloy", "dep:tracing"]
+
 [dependencies]
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
@@ -15,6 +18,8 @@ tokio-util = "0.7"    # CancellationToken (included by default, no "sync" featur
 rusqlite = { version = "0.34", features = ["bundled"] }
 rusqlite_migration = "2"
 postcard = { version = "1", features = ["alloc"] }
+alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types"], optional = true }
+tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
@@ -25,3 +30,7 @@ clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "erc20_tracker"
+required-features = ["evm"]

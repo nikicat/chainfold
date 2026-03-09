@@ -18,3 +18,6 @@ pub use machine::{ReducerCore, StateMachine};
 pub use source::EventSource;
 pub use storage::Storage;
 pub use store::{Store, ReducedStore};
+
+#[cfg(feature = "evm")]
+pub mod modules;
