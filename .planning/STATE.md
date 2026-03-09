@@ -126,6 +126,7 @@ Recent decisions affecting current work:
 ### Roadmap Evolution
 
 - Phase 5 added: EVM ERC20 module with filter pushdown
+- Phase 6 added: EVM log cache with range tracking — raw eth_getLogs result caching keyed by RPC parameters, scanned range tracking (including empty ranges), range merging, reducer-independent event reuse
 
 ### Pending Todos
 
