@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: unknown
-last_updated: "2026-03-09T09:26:14.697Z"
+status: in-progress
+last_updated: "2026-03-10T00:21:24Z"
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 5
-  total_plans: 14
-  completed_plans: 14
+  total_plans: 16
+  completed_plans: 15
 ---
 
 # Project State
@@ -18,16 +18,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-05)
 
 **Core value:** Live state reconstruction from ordered events must be correct, gap-free, and survive restarts — without the client managing caching, subscriptions, or history stitching.
-**Current focus:** All phases complete
+**Current focus:** Phase 6 - EVM log cache with range tracking
 
 ## Current Position
 
-Phase: 5 of 5 (EVM ERC20 Module with Filter Pushdown) -- COMPLETE
-Plan: 2 of 2 (05-02 complete — Tests and example migrated to library module imports)
-Status: Phase 5 complete. All domain types in library module; tests and example import from chainfold::modules::erc20. 134 tests passing.
-Last activity: 2026-03-09 — 05-02 executed: Migrated tests and example to import from library module; removed all duplicate domain types
+Phase: 6 of 6 (EVM Log Cache with Range Tracking)
+Plan: 1 of 2 (06-01 complete -- LogCache storage layer with schema v4, range tracking, gap computation)
+Status: Plan 01 complete. LogCache stores/retrieves logs and block headers, tracks scanned ranges with eager merge, computes gaps. 158 tests passing.
+Last activity: 2026-03-10 -- 06-01 executed: LogCache storage layer with BLAKE3 hashing, range merging, alloy Log round-trip
 
-Progress: [██████████] 100% (All phases complete)
+Progress: [█████████░] 94% (15/16 plans complete)
 
 ## Architecture Revision (2026-03-05)
 
@@ -63,6 +63,7 @@ Progress: [██████████] 100% (All phases complete)
 | 02-persistence-and-recovery (new) | 4 | 30min | 7min |
 | 04-query-api-and-erc20-poc | 3 | 19min | 6min |
 | 05-evm-erc20-module | 2 | 14min | 7min |
+| 06-evm-log-cache-with-range-tracking | 1/2 | 4min | 4min |
 
 *Updated after each plan completion*
 
@@ -122,6 +123,10 @@ Recent decisions affecting current work:
 - **05-01: cfg-gated module pattern** — evm feature flag enables pub mod modules in lib.rs; alloy and tracing are optional deps
 - **05-01: Filter pushdown via Erc20Filter enum** — AllTransfers = single query, Account = two parallel queries with BTreeMap dedup
 - **05-02: [[test]] required-features for feature-gated tests** — erc20_tests requires evm feature; Cargo.toml [[test]] section enforces this
+- **06-01: LogCache opens own Connection** — same DB file, separate Mutex<Connection>; WAL mode supports concurrent connections
+- **06-01: BLAKE3 for filter key hashing** — 0xFF sentinel for null topics; faster than SHA-256, 32-byte output
+- **06-01: Eager merge-on-write for scanned ranges** — query merge candidates, compute merged bounds, delete+insert in single TX
+- **06-01: configure_connection pub(crate)** — LogCache reuses pragma setup from sqlite.rs
 
 ### Roadmap Evolution
 
@@ -139,7 +144,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-03-09
-Stopped at: Completed 05-02-PLAN.md (Tests and example migrated to library module; all phases complete; 134 tests passing)
-Resume file: N/A (all plans complete)
-Resume command: N/A
+Last session: 2026-03-10
+Stopped at: Completed 06-01-PLAN.md (LogCache storage layer with schema v4, range tracking, gap computation)
+Resume file: .planning/phases/06-evm-log-cache-with-range-tracking/06-02-PLAN.md
+Resume command: /gsd:execute-phase 06
