@@ -63,8 +63,8 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **CACHE-01**: Library caches raw eth_getLogs results keyed by (contract address, topic0, topic1, topic2, topic3) — matching RPC parameters, not application-level filter abstractions
 - [x] **CACHE-02**: Library tracks scanned block ranges per topic set — a range that returned zero logs is recorded as "scanned, empty" so subsequent queries skip RPC
 - [x] **CACHE-03**: Adjacent and overlapping scanned ranges merge automatically (e.g., [100,200] + [201,300] → [100,300]) — no fragmentation in the range index
-- [ ] **CACHE-04**: When a requested range partially overlaps cached ranges, the library computes and fetches only the uncovered sub-ranges from RPC
-- [ ] **CACHE-05**: Cached logs are reusable across reducers — two different state machines consuming the same (contract, topics) logs share the cache without re-fetching
+- [x] **CACHE-04**: When a requested range partially overlaps cached ranges, the library computes and fetches only the uncovered sub-ranges from RPC
+- [x] **CACHE-05**: Cached logs are reusable across reducers — two different state machines consuming the same (contract, topics) logs share the cache without re-fetching
 
 ## v2 Requirements
 
@@ -142,8 +142,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CACHE-01 | Phase 6 | Complete |
 | CACHE-02 | Phase 6 | Complete |
 | CACHE-03 | Phase 6 | Complete |
-| CACHE-04 | Phase 6 | Pending |
-| CACHE-05 | Phase 6 | Pending |
+| CACHE-04 | Phase 6 | Complete |
+| CACHE-05 | Phase 6 | Complete |
 
 **Coverage:**
 - v1 requirements: 34 total

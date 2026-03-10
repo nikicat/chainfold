@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: in-progress
-last_updated: "2026-03-10T00:21:24Z"
+status: complete
+last_updated: "2026-03-10T00:29:11Z"
 progress:
   total_phases: 6
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 16
-  completed_plans: 15
+  completed_plans: 16
 ---
 
 # Project State
@@ -22,12 +22,12 @@ See: .planning/PROJECT.md (updated 2026-03-05)
 
 ## Current Position
 
-Phase: 6 of 6 (EVM Log Cache with Range Tracking)
-Plan: 1 of 2 (06-01 complete -- LogCache storage layer with schema v4, range tracking, gap computation)
-Status: Plan 01 complete. LogCache stores/retrieves logs and block headers, tracks scanned ranges with eager merge, computes gaps. 158 tests passing.
-Last activity: 2026-03-10 -- 06-01 executed: LogCache storage layer with BLAKE3 hashing, range merging, alloy Log round-trip
+Phase: 6 of 6 (EVM Log Cache with Range Tracking) -- COMPLETE
+Plan: 2 of 2 (06-02 complete -- CachingProvider integration with Erc20Source)
+Status: Phase 6 complete. CachingProvider intercepts get_logs for finalized ranges, BlockHeaderCache caches block headers, Erc20Source wired transparently. 168 tests passing.
+Last activity: 2026-03-10 -- 06-02 executed: CachingProvider, FinalityConfig, BlockHeaderCache, Erc20Source integration
 
-Progress: [█████████░] 94% (15/16 plans complete)
+Progress: [██████████] 100% (16/16 plans complete)
 
 ## Architecture Revision (2026-03-05)
 
@@ -63,7 +63,7 @@ Progress: [█████████░] 94% (15/16 plans complete)
 | 02-persistence-and-recovery (new) | 4 | 30min | 7min |
 | 04-query-api-and-erc20-poc | 3 | 19min | 6min |
 | 05-evm-erc20-module | 2 | 14min | 7min |
-| 06-evm-log-cache-with-range-tracking | 1/2 | 4min | 4min |
+| 06-evm-log-cache-with-range-tracking | 2/2 | 9min | 4min |
 
 *Updated after each plan completion*
 
@@ -127,6 +127,9 @@ Recent decisions affecting current work:
 - **06-01: BLAKE3 for filter key hashing** — 0xFF sentinel for null topics; faster than SHA-256, 32-byte output
 - **06-01: Eager merge-on-write for scanned ranges** — query merge candidates, compute merged bounds, delete+insert in single TX
 - **06-01: configure_connection pub(crate)** — LogCache reuses pragma setup from sqlite.rs
+- **06-02: No blanket BlockHeaderCache impl** — specialization unstable; only CachingProvider implements trait
+- **06-02: CachingProvider manual Clone** — inner.clone() + Arc::clone(cache) + Copy finality
+- **06-02: Filter extraction bails for complex cases** — multi-address/multi-topic-per-slot delegate to inner provider
 
 ### Roadmap Evolution
 
@@ -145,6 +148,6 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-03-10
-Stopped at: Completed 06-01-PLAN.md (LogCache storage layer with schema v4, range tracking, gap computation)
-Resume file: .planning/phases/06-evm-log-cache-with-range-tracking/06-02-PLAN.md
-Resume command: /gsd:execute-phase 06
+Stopped at: Completed 06-02-PLAN.md (CachingProvider integration, all phases complete)
+Resume file: N/A -- all plans complete
+Resume command: N/A -- milestone v1.0 complete
