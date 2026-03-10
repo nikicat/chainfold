@@ -99,7 +99,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -108,3 +108,18 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 3. Live Subscriptions and Reorg Safety | 3/3 | Complete | 2026-03-05 |
 | 4. Query API and ERC20 PoC | 3/3 | Complete | 2026-03-07 |
 | 5. EVM ERC20 Module with Filter Pushdown | 2/2 | Complete | 2026-03-09 |
+| 6. EVM Log Cache with Range Tracking | 0/2 | Planning | |
+
+### Phase 6: EVM Log Cache with Range Tracking
+**Goal**: eth_getLogs results are cached as a raw event layer keyed by RPC-level parameters (contract address, topic sets, block range). Scanned ranges are tracked even when empty — so a second run over the same range hits zero RPC calls. The block DAG layer consumes from this cache instead of directly from RPC. Events are reusable across reducers: same cached logs, different state machines.
+**Depends on**: Phase 5
+**Requirements**: CACHE-01, CACHE-02, CACHE-03, CACHE-04, CACHE-05
+**Success Criteria** (what must be TRUE):
+  1. After scanning a block range for a given (contract, topics[]) filter, a second scan of the same range makes zero RPC calls
+  2. Scanning adjacent ranges merges into a single scanned range entry — no fragmentation
+  3. Scanning a partially-cached range only fetches the uncovered sub-ranges from RPC
+  4. Two different reducers (e.g., ERC20 balance tracker and a transfer counter) can be built from the same cached logs without re-fetching
+  5. Filters are stored as (address, topic0, topic1, topic2, topic3) — matching eth_getLogs parameters, not application-level abstractions
+**Plans**: 2 plans
+  - [ ] 06-01-PLAN.md — Schema v4 migration, LogCache struct with range tracking, gap computation, log/header caching
+  - [ ] 06-02-PLAN.md — CachingProvider<P> with finality-aware get_logs, BlockHeaderCache trait, Erc20Source wiring, example update
