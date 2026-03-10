@@ -22,6 +22,7 @@ use chainfold::modules::erc20::{
     Address, Balances, Erc20Codec, Erc20Filter, Erc20Machine, Erc20Source, Provider,
     ProviderBuilder,
 };
+use chainfold::modules::evm_cache::{CachingProvider, FinalityConfig, LogCache};
 use chainfold::storage::SqliteStorage;
 use chainfold::store::query::EventRangeIterator;
 use chainfold::store::Store;
@@ -115,7 +116,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token: Address = args.token.parse()?;
     let token_bytes: [u8; 20] = token.0 .0;
     let url: alloy::transports::http::reqwest::Url = args.rpc_url.parse()?;
-    let provider = ProviderBuilder::new().connect_http(url);
+    let raw_provider = ProviderBuilder::new().connect_http(url);
+
+    // Wrap in CachingProvider for transparent log + block header caching.
+    let log_cache = Arc::new(LogCache::open(&args.db)?);
+    let provider = CachingProvider::new(raw_provider, log_cache, FinalityConfig::EthereumMainnet);
 
     // Resolve block range: --from-block/--num-blocks, --days, or default (1 day).
     let (from_block, target) = match (args.from_block, args.num_blocks, args.days) {
@@ -166,14 +171,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = EngineConfig::new("erc20-mainnet", 10);
     let mut engine = Engine::new(core, storage.clone(), Erc20Codec, config);
 
-    // Source — uses library Erc20Source with filter pushdown
-    let source = Erc20Source::new(
-        provider,
-        token_bytes,
-        Erc20Filter::AllTransfers,
-        args.chunk_size,
-        from_block,
-    );
+    // Source — use account-scoped filter pushdown when --account is given.
+    let filter = match &args.account {
+        Some(account_str) => {
+            let bytes: [u8; 20] =
+                hex::decode(account_str.strip_prefix("0x").unwrap_or(account_str))?
+                    .try_into()
+                    .map_err(|_| "account address must be 20 bytes")?;
+            Erc20Filter::Account(bytes)
+        }
+        None => Erc20Filter::AllTransfers,
+    };
+    let source = Erc20Source::new(provider, token_bytes, filter, args.chunk_size, from_block);
 
     // Check if this is a warm or cold start.
     let cached_tip = engine.storage().get_canonical_tip("erc20-mainnet")?;
@@ -207,10 +216,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .try_into()
                     .map_err(|_| "account address must be 20 bytes")?;
 
-            let chain_tip = engine
-                .storage()
-                .get_canonical_tip("erc20-mainnet")?
-                .ok_or("no canonical tip")?;
+            let chain_tip = match engine.storage().get_canonical_tip("erc20-mainnet")? {
+                Some(tip) => tip,
+                None => {
+                    println!("\nNo transfers found for 0x{} in this range.", hex::encode(account));
+                    return Ok(());
+                }
+            };
             let tip_height = engine.storage().get_block_height(&chain_tip)?.unwrap_or(0);
 
             // Collect per-block balance changes.

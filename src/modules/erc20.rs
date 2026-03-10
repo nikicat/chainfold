@@ -18,6 +18,7 @@ use crate::coordinator::Codec;
 use crate::cursor::EvmCursor;
 use crate::event::Event;
 use crate::machine::StateMachine;
+use crate::modules::evm_cache::BlockHeaderCache;
 use crate::source::EventSource;
 
 // ============================================================
@@ -235,6 +236,7 @@ impl<P: Provider + Clone> Erc20Source<P> {
     ) -> Result<Vec<Log>, Erc20SourceError> {
         let token_addr = Address::from_slice(&self.token);
 
+        let t0 = std::time::Instant::now();
         match &self.filter {
             Erc20Filter::AllTransfers => {
                 let filter = Filter::new()
@@ -242,10 +244,19 @@ impl<P: Provider + Clone> Erc20Source<P> {
                     .event_signature(TRANSFER_TOPIC)
                     .from_block(from)
                     .to_block(to);
-                self.provider
+                let logs = self
+                    .provider
                     .get_logs(&filter)
                     .await
-                    .map_err(|e| Erc20SourceError::Rpc(e.to_string()))
+                    .map_err(|e| Erc20SourceError::Rpc(e.to_string()))?;
+                tracing::debug!(
+                    from,
+                    to,
+                    logs = logs.len(),
+                    ms = t0.elapsed().as_millis() as u64,
+                    "eth_getLogs(AllTransfers)"
+                );
+                Ok(logs)
             }
             Erc20Filter::Account(addr) => {
                 let addr_topic = address_to_topic(addr);
@@ -283,6 +294,13 @@ impl<P: Provider + Clone> Erc20Source<P> {
                     deduped.entry((bn, li)).or_insert(log);
                 }
 
+                tracing::debug!(
+                    from,
+                    to,
+                    logs = deduped.len(),
+                    ms = t0.elapsed().as_millis() as u64,
+                    "eth_getLogs(Account) [2 queries, deduped]"
+                );
                 Ok(deduped.into_values().collect())
             }
         }
@@ -290,7 +308,7 @@ impl<P: Provider + Clone> Erc20Source<P> {
 }
 
 #[async_trait::async_trait]
-impl<P: Provider + Clone> EventSource for Erc20Source<P> {
+impl<P: Provider + Clone + BlockHeaderCache> EventSource for Erc20Source<P> {
     type Cursor = EvmCursor;
     type Event = Transfer;
     type Error = Erc20SourceError;
@@ -315,18 +333,20 @@ impl<P: Provider + Clone> EventSource for Erc20Source<P> {
         let end = to_height.saturating_sub(1);
         let mut all_logs = Vec::new();
         let mut cursor = from_height;
+        let num_chunks = ((end - from_height) / self.chunk_size) + 1;
+        let mut chunk_idx = 0u64;
         while cursor <= end {
+            chunk_idx += 1;
             let chunk_end = end.min(cursor + self.chunk_size - 1);
             let chunk_logs = self.fetch_logs_in_range(cursor, chunk_end).await?;
-            #[cfg(feature = "evm")]
-            {
-                tracing::debug!(
-                    from = cursor,
-                    to = chunk_end,
-                    events = chunk_logs.len(),
-                    "eth_getLogs"
-                );
-            }
+            tracing::info!(
+                chunk = chunk_idx,
+                total_chunks = num_chunks,
+                from = cursor,
+                to = chunk_end,
+                logs = chunk_logs.len(),
+                "fetch_blocks: eth_getLogs chunk"
+            );
             all_logs.extend(chunk_logs);
             cursor = chunk_end + 1;
         }
@@ -346,20 +366,27 @@ impl<P: Provider + Clone> EventSource for Erc20Source<P> {
         }
 
         // Build Block vec with real block hashes from RPC.
+        let num_blocks = blocks_map.len();
+        tracing::info!(
+            total_logs = all_logs.len(),
+            blocks = num_blocks,
+            "fetch_blocks: fetching block headers"
+        );
         let mut result = Vec::new();
         for (height, events) in blocks_map {
-            let block = self
+            let t0 = std::time::Instant::now();
+            let header = self
                 .provider
-                .get_block_by_number(height.into())
-                .await
-                .map_err(|e| Erc20SourceError::Rpc(e.to_string()))?;
+                .get_or_fetch_block_header(height)
+                .await?;
+            tracing::debug!(
+                height,
+                ms = t0.elapsed().as_millis() as u64,
+                "get_or_fetch_block_header"
+            );
 
-            let (block_hash, parent_hash) = match block {
-                Some(b) => {
-                    let bh: [u8; 32] = b.header.hash.0.into();
-                    let ph: [u8; 32] = b.header.parent_hash.0.into();
-                    (bh, ph)
-                }
+            let (block_hash, parent_hash) = match header {
+                Some((bh, ph, _timestamp)) => (bh, ph),
                 None => {
                     // Fallback: synthetic hashes from height (should not happen with a real RPC).
                     let mut bh = [0u8; 32];

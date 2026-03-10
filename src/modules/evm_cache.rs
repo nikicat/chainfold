@@ -415,6 +415,16 @@ pub struct CachingProvider<P: Provider> {
     finality: FinalityConfig,
 }
 
+impl<P: Provider + Clone> Clone for CachingProvider<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            cache: self.cache.clone(),
+            finality: self.finality,
+        }
+    }
+}
+
 impl<P: Provider> CachingProvider<P> {
     /// Create a new caching provider wrapping the inner provider.
     pub fn new(inner: P, cache: Arc<LogCache>, finality: FinalityConfig) -> Self {
