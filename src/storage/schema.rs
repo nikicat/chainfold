@@ -117,5 +117,45 @@ pub fn migrations() -> Migrations<'static> {
         ALTER TABLE canonical_tip_new RENAME TO canonical_tip;
         ",
         ),
+        // v4 — log cache tables (cached_logs, scanned_ranges, cached_block_headers)
+        M::up(
+            "
+        CREATE TABLE cached_logs (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            filter_hash       BLOB    NOT NULL,
+            block_number      INTEGER NOT NULL,
+            log_index         INTEGER NOT NULL,
+            address           BLOB    NOT NULL,
+            topic0            BLOB,
+            topic1            BLOB,
+            topic2            BLOB,
+            topic3            BLOB,
+            data              BLOB    NOT NULL,
+            block_hash        BLOB    NOT NULL,
+            transaction_hash  BLOB    NOT NULL,
+            transaction_index INTEGER NOT NULL,
+            removed           INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(filter_hash, block_number, log_index)
+        );
+        CREATE INDEX idx_cached_logs_filter_block
+            ON cached_logs(filter_hash, block_number);
+
+        CREATE TABLE scanned_ranges (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            filter_hash  BLOB    NOT NULL,
+            start_block  INTEGER NOT NULL,
+            end_block    INTEGER NOT NULL
+        );
+        CREATE INDEX idx_scanned_ranges_filter
+            ON scanned_ranges(filter_hash, start_block, end_block);
+
+        CREATE TABLE cached_block_headers (
+            height       INTEGER PRIMARY KEY,
+            hash         BLOB    NOT NULL,
+            parent_hash  BLOB    NOT NULL,
+            timestamp    INTEGER NOT NULL
+        );
+        ",
+        ),
     ])
 }

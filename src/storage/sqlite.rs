@@ -62,7 +62,7 @@ impl SqliteStorage {
 }
 
 /// Configure pragma settings on a new connection.
-fn configure_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
+pub(crate) fn configure_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
