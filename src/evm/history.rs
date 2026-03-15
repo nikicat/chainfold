@@ -64,8 +64,10 @@ pub struct EvmLogHistory<P> {
     best_tx: tokio::sync::watch::Sender<EvmPosition>,
     safe_tx: tokio::sync::watch::Sender<EvmPosition>,
 
-    // For at(time) estimation
-    genesis_timestamp: u64,
+    // For at(time) estimation — uses a recent anchor block instead of genesis
+    // because some chains (e.g. Ethereum mainnet) have genesis timestamp 0.
+    anchor_block: u64,
+    anchor_timestamp: u64,
     block_time: u64,
 
     // Self-reference so Cursors can hold Arc<dyn HistoryBackend>
@@ -97,10 +99,12 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     ) -> Result<Arc<Self>, HistoryError> {
         let filter_hash = crate::evm::log_cache::compute_filter_hash(&address, &topics);
 
-        // Fetch chain_id and genesis timestamp for at() estimation.
+        // Fetch chain_id and a recent anchor block for at() estimation.
         let chain_id = provider.get_chain_id().await
             .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
-        let genesis_timestamp = Self::fetch_block_timestamp(&provider, &cache, 0).await?;
+        let anchor_block = provider.get_block_number().await
+            .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))?;
+        let anchor_timestamp = Self::fetch_block_timestamp(&provider, &cache, anchor_block).await?;
 
         let (latest_tx, latest_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
         let (best_tx, best_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
@@ -120,7 +124,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             latest_tx,
             best_tx,
             safe_tx,
-            genesis_timestamp,
+            anchor_block,
+            anchor_timestamp,
             block_time,
             self_ref: OnceLock::new(),
         });
@@ -454,10 +459,14 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     fn estimate_block_from_time(&self, time: Timestamp) -> u64 {
-        if time <= self.genesis_timestamp {
-            return 0;
+        if time >= self.anchor_timestamp {
+            let delta_secs = time - self.anchor_timestamp;
+            self.anchor_block + delta_secs / self.block_time
+        } else {
+            let delta_secs = self.anchor_timestamp - time;
+            let delta_blocks = delta_secs / self.block_time;
+            self.anchor_block.saturating_sub(delta_blocks)
         }
-        (time - self.genesis_timestamp) / self.block_time
     }
 
     fn pos_before(a: &EvmPosition, b: &EvmPosition) -> bool {
@@ -489,6 +498,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         &self,
         position: &EvmPosition,
         start_block: u64,
+        end_block: u64,
         is_first_chunk: bool,
     ) -> Result<Option<alloy::rpc::types::Log>, HistoryError> {
         let log = if is_first_chunk {
@@ -503,7 +513,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             self.cache
                 .first_log_at_or_after(&self.filter_hash, start_block, 0)
         };
-        log.map_err(|e| HistoryError::internal(e.to_string()))
+        // Discard results beyond the current cached chunk — the range
+        // (end_block+1..) may not have been fetched yet.
+        let log = log.map_err(|e| HistoryError::internal(e.to_string()))?;
+        Ok(log.filter(|l| l.block_number.unwrap_or(0) <= end_block))
     }
 
     // --------------------------------------------------------
@@ -555,7 +568,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
                 self.ensure_cached(chunk_start, chunk_end).await?;
 
                 let is_first = chunk_start == start_block;
-                if let Some(log) = self.search_cache_forward(position, chunk_start, is_first)? {
+                if let Some(log) = self.search_cache_forward(position, chunk_start, chunk_end, is_first)? {
                     let (lb, li) = (
                         log.block_number.unwrap_or(0),
                         log.log_index.unwrap_or(0) as u32,
@@ -655,6 +668,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
                     .last_log_at_or_before(&self.filter_hash, search_end, u32::MAX)
                     .map_err(|e| HistoryError::internal(e.to_string()))?
             };
+            // Discard results before the current cached chunk.
+            let log = log.filter(|l| l.block_number.unwrap_or(0) >= search_start);
 
             if let Some(log) = log {
                 let (lb, li) = (
@@ -888,8 +903,10 @@ mod tests {
         cache: Arc<LogCache>,
     ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + Send + Sync + 'static>> {
         let asserter = Asserter::new();
-        // get_chain_id() is called by the constructor
+        // Constructor calls: get_chain_id(), get_block_number() (anchor)
         asserter.push_success(&alloy::primitives::U64::from(TEST_CHAIN));
+        asserter.push_success(&alloy::primitives::U64::from(200u64));
+        // fetch_block_timestamp(200) hits cache (warm_cache has block 200 header)
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
         EvmLogHistory::with_options(provider, cache, ADDR, TOPICS, 100, 12)
             .await
@@ -1091,10 +1108,14 @@ mod tests {
         let (cache, _) = warm_cache();
         let h = make_history(cache).await;
 
-        // genesis_timestamp = 1_600_000_000, block_time = 12
-        // time = genesis + 1200 → block 100
+        // anchor = block 200 @ GENESIS_TS + 2400, block_time = 12
+        // GENESIS_TS + 1200 is 1200s before anchor → 100 blocks before → block 100
         let pos = h.at(GENESIS_TS + 1200);
         assert_eq!(pos.block_number, 100);
+
+        // GENESIS_TS + 3600 is 1200s after anchor → 100 blocks after → block 300
+        let pos = h.at(GENESIS_TS + 3600);
+        assert_eq!(pos.block_number, 300);
     }
 
     // -- Marshal round-trip --
@@ -1125,12 +1146,14 @@ mod tests {
         cache.insert_logs(&fh, &[make_log(300, 0, bh_300)]).unwrap();
         cache.record_scanned_range(&fh, 201, 300, &bh_300).unwrap();
 
-        // Build history with a mock that returns chain_id then block 200
+        // Build history with a mock that returns chain_id, anchor block, then block 200 for after()
         let asserter = Asserter::new();
-        // get_chain_id() is called by the constructor
+        // Constructor calls: get_chain_id(), get_block_number() (anchor)
         asserter.push_success(&alloy::primitives::U64::from(TEST_CHAIN));
+        asserter.push_success(&alloy::primitives::U64::from(200u64));
+        // fetch_block_timestamp(200) hits cache (warm_cache has block 200 header)
         // after() without cutoff calls get_block_number() — push response
-        asserter.push_success(&alloy::primitives::U64::from(200));
+        asserter.push_success(&alloy::primitives::U64::from(200u64));
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
         let h = EvmLogHistory::with_options(provider, cache, ADDR, TOPICS, 100, 12)
             .await
@@ -1178,6 +1201,103 @@ mod tests {
         let cursor = result.unwrap().unwrap();
         assert_eq!(cursor.value().block_number, 300);
         assert_eq!(cursor.value().log_index, 0);
+    }
+
+    // -- Stale cache does not skip uncached ranges --
+
+    #[tokio::test]
+    async fn stale_cached_log_beyond_chunk_not_returned() {
+        // Regression: search_cache_forward was unbounded — a log cached by a
+        // previous session far beyond chunk_end was returned as Found, causing
+        // the search to skip uncached intermediate blocks and miss events.
+        //
+        // Setup: blocks 0-200 fully scanned (no RPC needed), NO logs in that
+        // range. A stale log at block 500 from a previous session. Search
+        // from 0 with cutoff at 200.
+        //
+        // Before the fix: chunk [0,99] unbounded query finds 500. Since
+        // 500 > cutoff 200, the search reports "past cutoff" and returns
+        // None — without ever scanning chunks [100,199].
+        //
+        // After the fix: chunk [0,99] bounded query finds nothing (500 > 99).
+        // The search continues through [100,199], finds nothing, and
+        // correctly returns None.
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let fh = compute_filter_hash(&ADDR, &TOPICS);
+
+        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
+        cache.insert_block_header(200, &BH_200, &BH_0, GENESIS_TS + 2400).unwrap();
+        let bh_500: [u8; 32] = [0x55; 32];
+        cache.insert_block_header(500, &bh_500, &BH_200, GENESIS_TS + 6000).unwrap();
+
+        // Fully scanned 0-200 with no logs.
+        cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();
+
+        // Stale log at 500 from a previous session.
+        cache.insert_logs(&fh, &[make_log(500, 0, bh_500)]).unwrap();
+        cache.record_scanned_range(&fh, 500, 500, &bh_500).unwrap();
+
+        let h = make_history(cache).await;
+        let history = h.history();
+
+        let cutoff = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 200, log_index: u32::MAX,
+            block_hash: [0; 32], timestamp: 0, side: Side::After,
+        };
+
+        // Collect all Scanned events from the search stream to verify the
+        // search actually walks through all chunks instead of short-circuiting.
+        let mut scanned_blocks = vec![];
+        let mut stream = history.search_after(
+            &EvmPosition::earliest(TEST_CHAIN), Some(&cutoff),
+        );
+        use futures_util::StreamExt;
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                SearchEvent::Scanned(pos) => scanned_blocks.push(pos.block_number),
+                SearchEvent::Found(_) => panic!("should not find stale log at 500"),
+            }
+        }
+
+        // With chunk_size=100 and range 0-200, we expect chunks [0,99], [100,199],
+        // and [200,200] (the cutoff block itself).
+        assert_eq!(scanned_blocks, vec![99, 199, 200],
+            "search must scan all chunks, not short-circuit on stale log at 500");
+    }
+
+    #[tokio::test]
+    async fn stale_cached_log_before_chunk_not_returned_in_reverse() {
+        // Same bug in reverse: last_log_at_or_before was unbounded and could
+        // find a stale log from far before the current chunk's lower bound.
+        //
+        // Setup: blocks 0-200 fully scanned. Log at 150. Stale log at block
+        // 10 from a different scanned range. Search backward from 200.
+        //
+        // First backward chunk is [101,200]. The log at 150 is within it.
+        // Before the fix, the unbounded backward query from search_end=200
+        // could return 10 (if 150 didn't exist) skipping uncached ranges.
+        // We test the simpler case: log at 150 should be found, not 10.
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let fh = compute_filter_hash(&ADDR, &TOPICS);
+
+        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
+        let bh_10: [u8; 32] = [0x10; 32];
+        cache.insert_block_header(10, &bh_10, &BH_0, GENESIS_TS + 120).unwrap();
+        let bh_150: [u8; 32] = [0x15; 32];
+        cache.insert_block_header(150, &bh_150, &bh_10, GENESIS_TS + 1800).unwrap();
+        cache.insert_block_header(200, &BH_200, &bh_150, GENESIS_TS + 2400).unwrap();
+
+        // Fully scanned 0-200.
+        cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();
+        cache.insert_logs(&fh, &[make_log(150, 0, bh_150)]).unwrap();
+
+        let h = make_history(cache).await;
+        let history = h.history();
+
+        let cursor = history.before(&EvmPosition::never(TEST_CHAIN), None)
+            .await.unwrap().unwrap();
+        assert_eq!(cursor.value().block_number, 150,
+            "should find log at 150, not jump to stale cached log at 10");
     }
 
     // -- Empty history --

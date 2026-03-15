@@ -6,12 +6,18 @@
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --topic0 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef \
 //!     --from-block 22000000 --num-blocks 10
+//!
+//!   # or with dates:
+//!   cargo run --features evm --example history_explorer -- \
+//!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+//!     --from 2025-01-15 --to 2025-01-16
 
 use std::sync::Arc;
 
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::{Cursor, Side};
+use chainfold::arch::{Cursor, History, Side};
 use chainfold::evm::{EvmLogHistory, LogCache};
+use chrono::NaiveDate;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -29,13 +35,21 @@ struct Args {
     #[arg(long)]
     topic0: Option<String>,
 
-    /// Starting block
-    #[arg(long, default_value = "22000000")]
-    from_block: u64,
+    /// Starting block (use --from/--to for date-based ranges instead)
+    #[arg(long)]
+    from_block: Option<u64>,
 
-    /// Number of blocks to scan
+    /// Number of blocks to scan (used with --from-block)
     #[arg(long, default_value = "100")]
     num_blocks: u64,
+
+    /// Start date, UTC (e.g. 2025-01-15 or 2025-01-15T12:00:00)
+    #[arg(long, value_name = "DATE")]
+    from: Option<String>,
+
+    /// End date, UTC (e.g. 2025-01-16 or 2025-01-16T12:00:00)
+    #[arg(long, value_name = "DATE")]
+    to: Option<String>,
 
     /// Max logs to print
     #[arg(long, default_value = "20")]
@@ -64,6 +78,16 @@ fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
     bytes.try_into().map_err(|_| "address must be 20 bytes".into())
 }
 
+fn parse_datetime(s: &str) -> Result<u64, String> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+        })
+        .map(|dt| dt.and_utc().timestamp() as u64)
+        .map_err(|e| format!("invalid date: {e}"))
+}
+
 fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
@@ -86,6 +110,59 @@ fn print_event(cursor: &Cursor<EvmEvent, EvmPosition>, index: usize) {
         &topic0_hex[..topic0_hex.len().min(10)],
         &topic0_hex[topic0_hex.len().saturating_sub(6)..],
     );
+}
+
+fn resolve_range(
+    args: &Args,
+    history: &History<EvmEvent, EvmPosition>,
+    chain_id: u64,
+) -> Result<(EvmPosition, EvmPosition), String> {
+    match (&args.from, &args.to, args.from_block) {
+        (Some(from_str), Some(to_str), None) => {
+            let from_ts = parse_datetime(from_str)?;
+            let to_ts = parse_datetime(to_str)?;
+            let start = history.at(from_ts);
+            let end = history.at(to_ts);
+            println!("  Date range: {} → {}", from_str, to_str);
+            println!("  Estimated blocks: {} → {}", start.block_number, end.block_number);
+            let cutoff = EvmPosition {
+                chain_id, block_number: end.block_number, log_index: u32::MAX,
+                block_hash: [0; 32], timestamp: to_ts, side: Side::After,
+            };
+            let start = EvmPosition {
+                chain_id, block_number: start.block_number, log_index: 0,
+                block_hash: [0; 32], timestamp: from_ts, side: Side::Before,
+            };
+            Ok((start, cutoff))
+        }
+        (None, None, Some(from_block)) => {
+            let to_block = from_block + args.num_blocks - 1;
+            let cutoff = EvmPosition {
+                chain_id, block_number: to_block, log_index: u32::MAX,
+                block_hash: [0; 32], timestamp: 0, side: Side::After,
+            };
+            let start = EvmPosition {
+                chain_id, block_number: from_block, log_index: 0,
+                block_hash: [0; 32], timestamp: 0, side: Side::Before,
+            };
+            Ok((start, cutoff))
+        }
+        (None, None, None) => {
+            // Default: block 22000000 + num_blocks
+            let from_block = 22000000u64;
+            let to_block = from_block + args.num_blocks - 1;
+            let cutoff = EvmPosition {
+                chain_id, block_number: to_block, log_index: u32::MAX,
+                block_hash: [0; 32], timestamp: 0, side: Side::After,
+            };
+            let start = EvmPosition {
+                chain_id, block_number: from_block, log_index: 0,
+                block_hash: [0; 32], timestamp: 0, side: Side::Before,
+            };
+            Ok((start, cutoff))
+        }
+        _ => Err("provide either --from + --to (dates) or --from-block (with optional --num-blocks), not both".into()),
+    }
 }
 
 #[tokio::main]
@@ -121,21 +198,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let chain_id = history.source_id();
 
+    // Resolve range: either --from/--to (dates) or --from-block/--num-blocks
+    let (start, cutoff) = resolve_range(&args, &history, chain_id)?;
+
     println!("  Chain:    {}", chain_id);
-    println!("  Range:    {} .. {} ({} blocks)",
-        args.from_block, args.from_block + args.num_blocks - 1, args.num_blocks);
+    println!("  Range:    block {} .. {}",
+        start.block_number, cutoff.block_number);
     println!("  DB:       {}", db_path);
     println!();
-
-    let to_block = args.from_block + args.num_blocks - 1;
-    let cutoff = EvmPosition {
-        chain_id, block_number: to_block, log_index: u32::MAX,
-        block_hash: [0; 32], timestamp: 0, side: Side::After,
-    };
-    let start = EvmPosition {
-        chain_id, block_number: args.from_block, log_index: 0,
-        block_hash: [0; 32], timestamp: 0, side: Side::Before,
-    };
 
     if args.follow {
         println!("Following new events (Ctrl+C to stop)...\n");
@@ -151,12 +221,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("\nHistory closed ({count} events).");
     } else if args.reverse {
-        println!("Navigating backwards from block {}:\n", to_block);
-        let end = EvmPosition {
-            chain_id, block_number: to_block, log_index: u32::MAX,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-        let mut maybe_cursor = history.before(&end, Some(&start)).await?;
+        println!("Navigating backwards from block {}:\n", cutoff.block_number);
+        let mut maybe_cursor = history.before(&cutoff, Some(&start)).await?;
         let mut count = 0;
         while let Some(cursor) = maybe_cursor {
             if count >= args.limit {
@@ -170,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if count == 0 { println!("No events found."); }
         else { println!("\n{count} events shown."); }
     } else {
-        println!("Navigating forward from block {}:\n", args.from_block);
+        println!("Navigating forward from block {}:\n", start.block_number);
         let mut maybe_cursor = history.after(&start, Some(&cutoff)).await?;
         let mut count = 0;
         while let Some(cursor) = maybe_cursor {
