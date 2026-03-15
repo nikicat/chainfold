@@ -11,11 +11,13 @@
 //!
 //! Requires the `evm` feature flag.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, Bytes, LogData, B256};
 use alloy::providers::{Provider, RootProvider};
+use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::{Filter, Log};
 use alloy::transports::TransportResult;
 use rusqlite::Connection;
@@ -371,35 +373,6 @@ impl LogCache {
 }
 
 // ============================================================
-// FinalityConfig
-// ============================================================
-
-/// Chain-specific finality depth configuration.
-///
-/// Only blocks below `chain_tip - depth()` are considered finalized and cacheable.
-/// Blocks within the finality window always go to RPC.
-#[derive(Debug, Clone, Copy)]
-pub enum FinalityConfig {
-    /// Ethereum mainnet: 64 blocks.
-    EthereumMainnet,
-    /// Arbitrum: instant finality (0 blocks).
-    Arbitrum,
-    /// Custom finality depth.
-    Custom(u64),
-}
-
-impl FinalityConfig {
-    /// Returns the finality depth in blocks.
-    pub fn depth(&self) -> u64 {
-        match self {
-            Self::EthereumMainnet => 64,
-            Self::Arbitrum => 0,
-            Self::Custom(d) => *d,
-        }
-    }
-}
-
-// ============================================================
 // CachingProvider
 // ============================================================
 
@@ -409,10 +382,16 @@ impl FinalityConfig {
 /// `Provider` trait, intercepting `get_logs` to serve cached results for
 /// finalized ranges. Non-cacheable filters (multi-address, multi-topic-per-slot,
 /// tag-based block ranges) delegate directly to the inner provider.
+///
+/// The finality boundary is determined by fetching `eth_getBlockByNumber("safe")`
+/// once on first use, then cached for the lifetime of this provider instance.
+/// This avoids per-call `eth_blockNumber` overhead and works across chains
+/// (Ethereum, Arbitrum, etc.) without hardcoded finality depths.
 pub struct CachingProvider<P: Provider> {
     inner: P,
     cache: Arc<LogCache>,
-    finality: FinalityConfig,
+    /// Cached safe block number. 0 = not yet fetched.
+    safe_block: Arc<AtomicU64>,
 }
 
 impl<P: Provider + Clone> Clone for CachingProvider<P> {
@@ -420,18 +399,21 @@ impl<P: Provider + Clone> Clone for CachingProvider<P> {
         Self {
             inner: self.inner.clone(),
             cache: self.cache.clone(),
-            finality: self.finality,
+            safe_block: self.safe_block.clone(),
         }
     }
 }
 
 impl<P: Provider> CachingProvider<P> {
     /// Create a new caching provider wrapping the inner provider.
-    pub fn new(inner: P, cache: Arc<LogCache>, finality: FinalityConfig) -> Self {
+    ///
+    /// The finality boundary is resolved lazily on first `get_logs` call
+    /// by fetching `eth_getBlockByNumber("safe")` from the inner provider.
+    pub fn new(inner: P, cache: Arc<LogCache>) -> Self {
         Self {
             inner,
             cache,
-            finality,
+            safe_block: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -506,9 +488,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync> Provider for CachingProvider<P
         let addr_bytes: [u8; 20] = address.0 .0;
         let filter_hash = compute_filter_hash(&addr_bytes, &topics);
 
-        // Get chain tip for finality computation
-        let chain_tip = self.inner.get_block_number().await?;
-        let finality_boundary = chain_tip.saturating_sub(self.finality.depth());
+        // Get safe block number (cached for session duration).
+        // Fetched once via eth_getBlockByNumber("safe"), then reused.
+        let mut finality_boundary = self.safe_block.load(Ordering::Relaxed);
+        if finality_boundary == 0 {
+            let block = self
+                .inner
+                .get_block_by_number(BlockNumberOrTag::Safe)
+                .await?
+                .ok_or_else(|| {
+                    alloy::transports::TransportError::local_usage_str(
+                        "safe block not available from RPC",
+                    )
+                })?;
+            finality_boundary = block.header.number;
+            self.safe_block.store(finality_boundary, Ordering::Relaxed);
+            tracing::debug!(safe_block = finality_boundary, "CachingProvider: fetched safe block");
+        }
 
         // Clamp cacheable range
         let safe_to = to_block.min(finality_boundary);
@@ -542,10 +538,36 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync> Provider for CachingProvider<P
             // Compute gaps
             let gaps = compute_gaps((from_block, safe_to), &scanned);
 
+            if gaps.is_empty() {
+                tracing::debug!(
+                    from = from_block,
+                    to = safe_to,
+                    "CachingProvider: cache hit (fully covered)"
+                );
+            } else {
+                let gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
+                let total_blocks = safe_to - from_block + 1;
+                tracing::debug!(
+                    from = from_block,
+                    to = safe_to,
+                    gaps = gaps.len(),
+                    gap_blocks,
+                    cached_blocks = total_blocks - gap_blocks,
+                    "CachingProvider: partial cache hit, fetching gaps"
+                );
+            }
+
             // Fetch each gap from inner provider
-            for (gap_from, gap_to) in gaps {
-                let sub_filter = build_sub_filter(filter, gap_from, gap_to);
+            for (gap_from, gap_to) in &gaps {
+                let sub_filter = build_sub_filter(filter, *gap_from, *gap_to);
                 let gap_logs = self.inner.get_logs(&sub_filter).await?;
+
+                tracing::debug!(
+                    from = gap_from,
+                    to = gap_to,
+                    logs = gap_logs.len(),
+                    "CachingProvider: fetched gap from RPC"
+                );
 
                 // Insert fetched logs into cache
                 let c = cache.clone();
@@ -569,8 +591,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync> Provider for CachingProvider<P
                 // Record scanned range
                 let c = cache.clone();
                 let fh = filter_hash;
+                let gf = *gap_from;
+                let gt = *gap_to;
                 tokio::task::spawn_blocking(move || {
-                    c.record_scanned_range(&fh, gap_from, gap_to)
+                    c.record_scanned_range(&fh, gf, gt)
                 })
                 .await
                 .map_err(|e| {
@@ -618,6 +642,12 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync> Provider for CachingProvider<P
             };
             let sub_filter = build_sub_filter(filter, unfin_from, to_block);
             let unfin_logs = self.inner.get_logs(&sub_filter).await?;
+            tracing::debug!(
+                from = unfin_from,
+                to = to_block,
+                logs = unfin_logs.len(),
+                "CachingProvider: fetched unfinalized range from RPC"
+            );
             all_logs.extend(unfin_logs);
         }
 
@@ -989,24 +1019,6 @@ mod tests {
 
         assert_eq!(cache.get_scanned_ranges(&fh1).unwrap(), vec![(100, 200)]);
         assert_eq!(cache.get_scanned_ranges(&fh2).unwrap(), vec![(300, 400)]);
-    }
-
-    // -- FinalityConfig tests --
-
-    #[test]
-    fn finality_config_ethereum_mainnet() {
-        assert_eq!(FinalityConfig::EthereumMainnet.depth(), 64);
-    }
-
-    #[test]
-    fn finality_config_arbitrum() {
-        assert_eq!(FinalityConfig::Arbitrum.depth(), 0);
-    }
-
-    #[test]
-    fn finality_config_custom() {
-        assert_eq!(FinalityConfig::Custom(128).depth(), 128);
-        assert_eq!(FinalityConfig::Custom(0).depth(), 0);
     }
 
     // -- extract_single_address / extract_topics tests --

@@ -37,5 +37,9 @@ name = "erc20_tests"
 required-features = ["evm"]
 
 [[example]]
-name = "erc20_tracker"
+name = "history_explorer"
+required-features = ["evm"]
+
+[[example]]
+name = "erc20_explorer"
 required-features = ["evm"]
