@@ -196,6 +196,12 @@ fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
     osc8_link(&url, &abbrev_tx_hash(hash))
 }
 
+fn format_timestamp(ts: u64) -> String {
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| "----------T--:--:--Z".into())
+}
+
 const AMOUNT_WHOLE_WIDTH: usize = 6;
 
 fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: usize) -> String {
@@ -241,9 +247,10 @@ fn print_transfer(
         let sym = format!("{:<width$}", meta.symbol, width = max_sym_width);
 
         println!(
-            "[{:>4}] block={:<10} {}  {:>3}  {} → {}  {} {}",
+            "[{:>4}] {:<10} {}  {}  {:>3}  {} → {}  {} {}",
             index,
             e.block_number,
+            format_timestamp(e.timestamp),
             linked_tx_hash(&e.tx_hash, base_url),
             direction,
             linked_addr(&t.from, base_url),
