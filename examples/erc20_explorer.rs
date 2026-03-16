@@ -243,18 +243,18 @@ fn print_transfer(
             None => return,
         };
         let direction = if &t.to == owner { " IN" } else { "OUT" };
+        let counterparty = if &t.to == owner { &t.from } else { &t.to };
         let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, max_decimals);
         let sym = format!("{:<width$}", meta.symbol, width = max_sym_width);
 
         println!(
-            "[{:>4}] {:<10} {}  {}  {:>3}  {} → {}  {} {}",
+            "[{:>4}] {:<10} {}  {}  {:>3}  {}  {} {}",
             index,
             e.block_number,
             format_timestamp(e.timestamp),
             linked_tx_hash(&e.tx_hash, base_url),
             direction,
-            linked_addr(&t.from, base_url),
-            linked_addr(&t.to, base_url),
+            linked_addr(counterparty, base_url),
             amount,
             sym,
         );
