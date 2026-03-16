@@ -147,30 +147,74 @@ fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
         .map_err(|_| "address must be 20 bytes".into())
 }
 
-fn format_amount(raw: U256, decimals: u8) -> String {
+fn explorer_base_url(chain_id: u64) -> &'static str {
+    match chain_id {
+        1 => "https://etherscan.io",
+        10 => "https://optimistic.etherscan.io",
+        56 => "https://bscscan.com",
+        100 => "https://gnosisscan.io",
+        137 => "https://polygonscan.com",
+        8453 => "https://basescan.org",
+        42161 => "https://arbiscan.io",
+        43114 => "https://snowscan.xyz",
+        534352 => "https://scrollscan.com",
+        _ => "https://etherscan.io",
+    }
+}
+
+fn osc8_link(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{url}\x07{text}\x1b]8;;\x07")
+}
+
+fn abbrev_addr(addr: &[u8; 20]) -> String {
+    format!(
+        "0x{}…{}",
+        hex::encode(&addr[..3]),
+        hex::encode(&addr[18..])
+    )
+}
+
+fn abbrev_tx_hash(hash: &[u8; 32]) -> String {
+    format!(
+        "0x{}…{}",
+        hex::encode(&hash[..4]),
+        hex::encode(&hash[30..])
+    )
+}
+
+fn linked_addr(addr: &[u8; 20], base_url: &str) -> String {
+    let url = format!("{}/address/0x{}", base_url, hex::encode(addr));
+    osc8_link(&url, &abbrev_addr(addr))
+}
+
+fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
+    let url = format!("{}/tx/0x{}", base_url, hex::encode(hash));
+    osc8_link(&url, &abbrev_tx_hash(hash))
+}
+
+const AMOUNT_WHOLE_WIDTH: usize = 6;
+
+fn format_amount(raw: U256, decimals: u8, whole_width: usize) -> String {
     let divisor = U256::from(10u64).pow(U256::from(decimals as u64));
     let whole = raw / divisor;
     let frac = raw % divisor;
 
+    let whole_str = format!("{:>width$}", whole, width = whole_width);
+
     if decimals == 0 {
-        return whole.to_string();
+        return whole_str;
     }
 
     let frac_str = format!("{:0>width$}", frac, width = decimals as usize);
     let trimmed = frac_str.trim_end_matches('0');
     if trimmed.is_empty() {
-        whole.to_string()
+        // No fractional part — pad with spaces where digits would be
+        format!("{}{}", whole_str, " ".repeat(decimals as usize + 1))
     } else {
-        format!("{}.{}", whole, trimmed)
+        // Show fractional, pad trimmed portion with trailing spaces
+        let trailing_pad = decimals as usize - trimmed.len();
+        format!("{}.{}{}", whole_str, trimmed, " ".repeat(trailing_pad))
     }
-}
-
-fn abbrev_addr(addr: &[u8; 20]) -> String {
-    format!(
-        "0x{}..{}",
-        hex::encode(&addr[..3]),
-        hex::encode(&addr[18..])
-    )
 }
 
 fn print_transfer(
@@ -179,19 +223,21 @@ fn print_transfer(
     owner: &[u8; 20],
     decimals: u8,
     symbol: &str,
+    base_url: &str,
 ) {
     let e = cursor.value();
     if let Some(t) = decode_transfer(e) {
         let direction = if &t.to == owner { " IN" } else { "OUT" };
-        let amount = format_amount(t.amount, decimals);
+        let amount = format_amount(t.amount, decimals, AMOUNT_WHOLE_WIDTH);
 
         println!(
-            "[{:>4}] block={:<10} {:>3}  {} → {}  {} {}",
+            "[{:>4}] block={:<10} {}  {:>3}  {} → {}  {} {}",
             index,
             e.block_number,
+            linked_tx_hash(&e.tx_hash, base_url),
             direction,
-            abbrev_addr(&t.from),
-            abbrev_addr(&t.to),
+            linked_addr(&t.from, base_url),
+            linked_addr(&t.to, base_url),
             amount,
             symbol,
         );
@@ -265,6 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _backends = vec![h_out, h_in];
 
     let chain_id = history.source_id();
+    let base_url = explorer_base_url(chain_id);
 
     println!("  Address:  0x{}", hex::encode(address));
     println!("  Owner:    0x{}", hex::encode(owner));
@@ -287,7 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut count = 0;
         let mut maybe_cursor = history.after(&start, None).await?;
         while let Some(cursor) = maybe_cursor {
-            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol);
+            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol, base_url);
             count += 1;
             maybe_cursor = history.after(cursor.after(), None).await?;
         }
@@ -301,7 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("... (limit reached, use --limit to show more)");
                 break;
             }
-            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol);
+            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol, base_url);
             count += 1;
             maybe_cursor = history.before(cursor.before(), Some(&start)).await?;
         }
@@ -319,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("... (limit reached, use --limit to show more)");
                 break;
             }
-            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol);
+            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol, base_url);
             count += 1;
             maybe_cursor = history.after(cursor.after(), Some(&cutoff)).await?;
         }
