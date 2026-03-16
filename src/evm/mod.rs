@@ -15,6 +15,6 @@ pub use log_cache::{compute_filter_hash, compute_gaps, versioned_path, CachedErc
 pub use history::EvmLogHistory;
 pub use retry::rpc_retry_layer;
 pub use erc20::{
-    decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20Metadata, TransferData,
-    TRANSFER_TOPIC,
+    decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20BalanceReducer, Erc20Metadata,
+    TransferData, TRANSFER_TOPIC,
 };

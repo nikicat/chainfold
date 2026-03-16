@@ -11,7 +11,7 @@
 
 /// Bump this when cache schema or semantics change.
 /// The version is appended to the DB filename so stale caches are bypassed.
-pub const CACHE_VERSION: u32 = 2;
+pub const CACHE_VERSION: u32 = 3;
 
 /// Inserts the cache version before the file extension.
 /// `"./foo.db"` → `"./foo.v2.db"`, `"./foo"` → `"./foo.v2"`
@@ -132,6 +132,21 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
             symbol     TEXT    NOT NULL,
             decimals   INTEGER NOT NULL,
             PRIMARY KEY (address, chain_id)
+        );
+        ",
+        ),
+        rusqlite_migration::M::up(
+            "
+        -- Point-in-time ERC20 balanceOf results cached from eth_call.
+        -- Each row is a self-contained snapshot: no range tracking.
+        -- balance is stored as big-endian 32 bytes (U256).
+        CREATE TABLE erc20_balances (
+            chain_id     INTEGER NOT NULL,
+            address      BLOB    NOT NULL,  -- token contract (20 bytes)
+            owner        BLOB    NOT NULL,  -- account (20 bytes)
+            block_number INTEGER NOT NULL,
+            balance      BLOB    NOT NULL,  -- U256 big-endian 32 bytes
+            PRIMARY KEY (chain_id, address, owner, block_number)
         );
         ",
         ),
@@ -708,6 +723,69 @@ impl LogCache {
     }
 
     // --------------------------------------------------------
+    // ERC20 balances
+    // --------------------------------------------------------
+
+    /// Get a cached ERC20 balance at a specific block.
+    pub fn get_erc20_balance(
+        &self,
+        chain_id: u64,
+        address: &[u8; 20],
+        owner: &[u8; 20],
+        block_number: u64,
+    ) -> Result<Option<[u8; 32]>, CacheError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT balance FROM erc20_balances
+             WHERE chain_id = ?1 AND address = ?2 AND owner = ?3 AND block_number = ?4",
+        )?;
+        let mut rows = stmt.query_map(
+            rusqlite::params![
+                chain_id as i64,
+                &address[..],
+                &owner[..],
+                block_number as i64
+            ],
+            |row| {
+                let bytes: Vec<u8> = row.get(0)?;
+                let mut balance = [0u8; 32];
+                if bytes.len() == 32 {
+                    balance.copy_from_slice(&bytes);
+                }
+                Ok(balance)
+            },
+        )?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Insert or replace a cached ERC20 balance at a specific block.
+    pub fn insert_erc20_balance(
+        &self,
+        chain_id: u64,
+        address: &[u8; 20],
+        owner: &[u8; 20],
+        block_number: u64,
+        balance: &[u8; 32],
+    ) -> Result<(), CacheError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO erc20_balances (chain_id, address, owner, block_number, balance)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                chain_id as i64,
+                &address[..],
+                &owner[..],
+                block_number as i64,
+                &balance[..]
+            ],
+        )?;
+        Ok(())
+    }
+
+    // --------------------------------------------------------
     // Internal
     // --------------------------------------------------------
 
@@ -1104,6 +1182,50 @@ mod tests {
         let meta = cache.get_erc20_metadata(&addr, 1).unwrap().unwrap();
         assert_eq!(meta.name, "New Name");
         assert_eq!(meta.symbol, "NEW");
+    }
+
+    // -- erc20 balances --
+
+    #[test]
+    fn erc20_balance_round_trip() {
+        let cache = LogCache::open_in_memory().unwrap();
+        let addr = [0x42u8; 20];
+        let owner = [0x01u8; 20];
+        let mut balance = [0u8; 32];
+        balance[31] = 100; // U256(100)
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, &balance).unwrap();
+        let got = cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap();
+        assert_eq!(got, balance);
+    }
+
+    #[test]
+    fn erc20_balance_different_blocks() {
+        let cache = LogCache::open_in_memory().unwrap();
+        let addr = [0x42u8; 20];
+        let owner = [0x01u8; 20];
+        let mut bal_a = [0u8; 32];
+        bal_a[31] = 100;
+        let mut bal_b = [0u8; 32];
+        bal_b[31] = 200;
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, &bal_a).unwrap();
+        cache.insert_erc20_balance(1, &addr, &owner, 2000, &bal_b).unwrap();
+        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap(), bal_a);
+        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 2000).unwrap().unwrap(), bal_b);
+        assert!(cache.get_erc20_balance(1, &addr, &owner, 1500).unwrap().is_none());
+    }
+
+    #[test]
+    fn erc20_balance_upsert() {
+        let cache = LogCache::open_in_memory().unwrap();
+        let addr = [0x42u8; 20];
+        let owner = [0x01u8; 20];
+        let mut bal_a = [0u8; 32];
+        bal_a[31] = 100;
+        let mut bal_b = [0u8; 32];
+        bal_b[31] = 200;
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, &bal_a).unwrap();
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, &bal_b).unwrap();
+        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap(), bal_b);
     }
 
     // -- cleanup --

@@ -1,7 +1,8 @@
-//! Dedicated ERC20 transfer explorer.
+//! Dedicated ERC20 transfer explorer with running balance.
 //!
 //! Auto-fetches token metadata (name, symbol, decimals) from the contract.
-//! Shows decoded transfers for a specific owner address. Supports multiple tokens.
+//! Shows decoded transfers for a specific owner address with a running balance
+//! column powered by ReducedHistory. Supports multiple tokens.
 //!
 //! Usage:
 //!   cargo run --features evm --example erc20_explorer -- \
@@ -23,11 +24,14 @@ use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{Cursor, History, Side};
 use chainfold::evm::{
-    decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogCache,
-    TRANSFER_TOPIC,
+    decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20BalanceReducer, Erc20Metadata,
+    EvmLogHistory, LogCache, TRANSFER_TOPIC,
 };
+use chainfold::reduce::{ReducedEvent, ReducedHistory};
 use chrono::NaiveDate;
 use clap::Parser;
+
+type BalanceEvent = ReducedEvent<EvmEvent, U256>;
 
 #[derive(Parser)]
 #[command(name = "erc20_explorer", about = "Explore ERC20 transfers for an owner")]
@@ -93,7 +97,7 @@ fn parse_datetime(s: &str) -> Result<u64, String> {
 
 fn resolve_range(
     args: &Args,
-    history: &History<EvmEvent, EvmPosition>,
+    history: &History<BalanceEvent, EvmPosition>,
     chain_id: u64,
 ) -> Result<(EvmPosition, EvmPosition), String> {
     match (&args.from, &args.to, args.from_block) {
@@ -203,6 +207,7 @@ fn format_timestamp(ts: u64) -> String {
 }
 
 const AMOUNT_WHOLE_WIDTH: usize = 6;
+const BALANCE_WHOLE_WIDTH: usize = 10;
 
 fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: usize) -> String {
     let divisor = U256::from(10u64).pow(U256::from(decimals as u64));
@@ -228,7 +233,7 @@ fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: usize)
 }
 
 fn print_transfer(
-    cursor: &Cursor<EvmEvent, EvmPosition>,
+    cursor: &Cursor<BalanceEvent, EvmPosition>,
     index: usize,
     owner: &[u8; 20],
     metadata: &HashMap<[u8; 20], Erc20Metadata>,
@@ -236,7 +241,8 @@ fn print_transfer(
     max_decimals: usize,
     base_url: &str,
 ) {
-    let e = cursor.value();
+    let reduced = cursor.value();
+    let e = &reduced.event;
     if let Some(t) = decode_transfer(e) {
         let meta = match metadata.get(&e.contract_address) {
             Some(m) => m,
@@ -245,10 +251,11 @@ fn print_transfer(
         let direction = if &t.to == owner { " IN" } else { "OUT" };
         let counterparty = if &t.to == owner { &t.from } else { &t.to };
         let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, max_decimals);
+        let balance = format_amount(reduced.state, meta.decimals, BALANCE_WHOLE_WIDTH, max_decimals);
         let sym = format!("{:<width$}", meta.symbol, width = max_sym_width);
 
         println!(
-            "[{:>4}] {:<10} {}  {}  {:>3}  {}  {} {}",
+            "[{:>4}] {:<10} {}  {}  {:>3}  {}  {} {} = {}",
             index,
             e.block_number,
             format_timestamp(e.timestamp),
@@ -257,6 +264,7 @@ fn print_transfer(
             linked_addr(counterparty, base_url),
             amount,
             sym,
+            balance,
         );
     }
 }
@@ -305,12 +313,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_decimals = metadata.values().map(|m| m.decimals as usize).max().unwrap_or(0);
     println!();
 
-    // Build merged history: outgoing + incoming transfers for owner, per token
+    // Build per-token reduced histories: merge(IN, OUT) → ReducedHistory(balance)
     let mut padded_owner = [0u8; 32];
     padded_owner[12..32].copy_from_slice(&owner);
 
-    let mut all_histories = Vec::new();
-    let mut all_backends = Vec::new();
+    let mut all_histories: Vec<History<BalanceEvent, EvmPosition>> = Vec::new();
+    // Keep backends alive for the duration
+    let mut _log_backends: Vec<Arc<EvmLogHistory<_>>> = Vec::new();
+    let mut _reduced_backends: Vec<Arc<ReducedHistory<Erc20BalanceReducer<_>, EvmPosition>>> = Vec::new();
 
     for &address in &addresses {
         // Outgoing: Transfer(from=owner, *, *)
@@ -339,12 +349,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-        all_histories.push(h_out.history());
-        all_histories.push(h_in.history());
-        all_backends.push(h_out);
-        all_backends.push(h_in);
+        // Merge IN + OUT per token
+        let per_token = History::merge(vec![h_out.history(), h_in.history()], evm_pos_cmp);
+
+        // Wrap with balance reducer
+        let reducer = Erc20BalanceReducer::new(
+            owner,
+            address,
+            chain_id,
+            provider.clone(),
+            cache.clone(),
+        );
+        let reduced = ReducedHistory::new(per_token, reducer, evm_pos_cmp);
+
+        all_histories.push(reduced.history());
+        _reduced_backends.push(reduced);
+        _log_backends.push(h_out);
+        _log_backends.push(h_in);
     }
 
+    // Merge all reduced histories across tokens
     let history = History::merge(all_histories, evm_pos_cmp);
 
     let chain_id = history.source_id();
@@ -363,7 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.follow {
         println!("Following new events (Ctrl+C to stop)...\n");
-        for backend in &all_backends {
+        for backend in &_log_backends {
             let _handle = backend.start_tip_tracking(std::time::Duration::from_secs(2));
             backend.poll_tip().await?;
         }

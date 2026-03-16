@@ -24,6 +24,7 @@ sol! {
     function name() external view returns (string);
     function symbol() external view returns (string);
     function decimals() external view returns (uint8);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 /// Keccak256 of `Transfer(address,address,uint256)`.
@@ -233,4 +234,240 @@ pub fn evm_pos_cmp(a: &EvmPosition, b: &EvmPosition) -> Ordering {
         "comparing positions from different chains"
     );
     (a.block_number, a.log_index).cmp(&(b.block_number, b.log_index))
+}
+
+// ============================================================
+// Erc20BalanceReducer
+// ============================================================
+
+use std::sync::Arc;
+
+use crate::provider::Reducer;
+
+/// Reducer that tracks an ERC20 token balance for a specific owner.
+///
+/// - `apply`: adds incoming amounts, subtracts outgoing amounts
+/// - `fetch_state`: calls `balanceOf(owner)` at the given block via RPC,
+///   with SQLite caching in the `erc20_balances` table
+pub struct Erc20BalanceReducer<P> {
+    pub owner: [u8; 20],
+    pub token_address: [u8; 20],
+    pub chain_id: u64,
+    pub provider: P,
+    pub cache: Arc<LogCache>,
+}
+
+impl<P> Erc20BalanceReducer<P> {
+    pub fn new(
+        owner: [u8; 20],
+        token_address: [u8; 20],
+        chain_id: u64,
+        provider: P,
+        cache: Arc<LogCache>,
+    ) -> Self {
+        Self {
+            owner,
+            token_address,
+            chain_id,
+            provider,
+            cache,
+        }
+    }
+
+    /// Apply a transfer event to a balance. Usable without Provider bound.
+    pub fn apply_transfer(&self, balance: U256, event: &EvmEvent) -> U256 {
+        if let Some(t) = decode_transfer(event) {
+            if t.to == self.owner {
+                balance.wrapping_add(t.amount)
+            } else if t.from == self.owner {
+                balance.checked_sub(t.amount).unwrap_or(U256::ZERO)
+            } else {
+                balance
+            }
+        } else {
+            balance
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> Reducer<EvmPosition>
+    for Erc20BalanceReducer<P>
+{
+    type Event = EvmEvent;
+    type State = U256;
+
+    fn apply(&self, balance: U256, event: &EvmEvent) -> U256 {
+        self.apply_transfer(balance, event)
+    }
+
+    async fn fetch_state(&self, pos: &EvmPosition) -> Result<U256, HistoryError> {
+        // 1. Check erc20_balances cache
+        if let Some(cached) = self
+            .cache
+            .get_erc20_balance(self.chain_id, &self.token_address, &self.owner, pos.block_number)
+            .map_err(|e| HistoryError::internal(format!("balance cache read: {e}")))?
+        {
+            return Ok(U256::from_be_bytes(cached));
+        }
+
+        // 2. eth_call balanceOf(owner) at pos.block_number
+        let addr = Address::from_slice(&self.token_address);
+        let owner_addr = Address::from_slice(&self.owner);
+        let calldata = balanceOfCall {
+            account: owner_addr,
+        }
+        .abi_encode();
+
+        use alloy::network::TransactionBuilder;
+        use alloy::rpc::types::TransactionRequest;
+
+        let tx = TransactionRequest::default()
+            .with_to(addr)
+            .with_input(Bytes::from(calldata));
+
+        let block = BlockNumberOrTag::Number(pos.block_number);
+        let result = self
+            .provider
+            .call(tx)
+            .block(block.into())
+            .await
+            .map_err(|e| HistoryError::internal(format!("balanceOf call: {e}")))?;
+
+        let balance = balanceOfCall::abi_decode_returns(&result)
+            .map_err(|e| HistoryError::internal(format!("balanceOf decode: {e}")))?;
+
+        // 3. Cache the result
+        let balance_bytes: [u8; 32] = balance.to_be_bytes();
+        self.cache
+            .insert_erc20_balance(
+                self.chain_id,
+                &self.token_address,
+                &self.owner,
+                pos.block_number,
+                &balance_bytes,
+            )
+            .map_err(|e| HistoryError::internal(format!("balance cache write: {e}")))?;
+
+        Ok(balance)
+    }
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_transfer_event(from: [u8; 20], to: [u8; 20], amount: U256) -> EvmEvent {
+        let mut topic1 = [0u8; 32];
+        topic1[12..32].copy_from_slice(&from);
+        let mut topic2 = [0u8; 32];
+        topic2[12..32].copy_from_slice(&to);
+        let mut data = vec![0u8; 32];
+        amount.to_be_bytes::<32>().iter().enumerate().for_each(|(i, b)| data[i] = *b);
+
+        EvmEvent {
+            contract_address: [0x42; 20],
+            block_number: 100,
+            timestamp: 1000,
+            block_hash: [0; 32],
+            log_index: 0,
+            tx_hash: [0; 32],
+            topics: vec![TRANSFER_TOPIC, topic1, topic2],
+            data,
+        }
+    }
+
+    #[test]
+    fn apply_incoming_adds() {
+        let owner = [0x01u8; 20];
+        let other = [0x02u8; 20];
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let reducer = Erc20BalanceReducer {
+            owner,
+            token_address: [0x42; 20],
+            chain_id: 1,
+            provider: (), // unused in apply
+            cache,
+        };
+        let event = make_transfer_event(other, owner, U256::from(100));
+        assert_eq!(reducer.apply_transfer(U256::from(50), &event), U256::from(150));
+    }
+
+    #[test]
+    fn apply_outgoing_subtracts() {
+        let owner = [0x01u8; 20];
+        let other = [0x02u8; 20];
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let reducer = Erc20BalanceReducer {
+            owner,
+            token_address: [0x42; 20],
+            chain_id: 1,
+            provider: (),
+            cache,
+        };
+        let event = make_transfer_event(owner, other, U256::from(30));
+        assert_eq!(reducer.apply_transfer(U256::from(50), &event), U256::from(20));
+    }
+
+    #[test]
+    fn apply_underflow_saturates_to_zero() {
+        let owner = [0x01u8; 20];
+        let other = [0x02u8; 20];
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let reducer = Erc20BalanceReducer {
+            owner,
+            token_address: [0x42; 20],
+            chain_id: 1,
+            provider: (),
+            cache,
+        };
+        let event = make_transfer_event(owner, other, U256::from(100));
+        assert_eq!(reducer.apply_transfer(U256::from(50), &event), U256::ZERO);
+    }
+
+    #[test]
+    fn apply_non_transfer_is_noop() {
+        let owner = [0x01u8; 20];
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let reducer = Erc20BalanceReducer {
+            owner,
+            token_address: [0x42; 20],
+            chain_id: 1,
+            provider: (),
+            cache,
+        };
+        // Event with wrong topic0
+        let event = EvmEvent {
+            contract_address: [0x42; 20],
+            block_number: 100,
+            timestamp: 1000,
+            block_hash: [0; 32],
+            log_index: 0,
+            tx_hash: [0; 32],
+            topics: vec![[0xFF; 32]],
+            data: vec![],
+        };
+        assert_eq!(reducer.apply_transfer(U256::from(50), &event), U256::from(50));
+    }
+
+    #[test]
+    fn apply_unrelated_transfer_is_noop() {
+        let owner = [0x01u8; 20];
+        let other_a = [0x02u8; 20];
+        let other_b = [0x03u8; 20];
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let reducer = Erc20BalanceReducer {
+            owner,
+            token_address: [0x42; 20],
+            chain_id: 1,
+            provider: (),
+            cache,
+        };
+        let event = make_transfer_event(other_a, other_b, U256::from(100));
+        assert_eq!(reducer.apply_transfer(U256::from(50), &event), U256::from(50));
+    }
 }

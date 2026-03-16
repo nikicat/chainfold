@@ -1,13 +1,13 @@
 //! Implementation-side building blocks for chainfold backends.
 //!
 //! Currently provides [`PositionedEvent`] (event + position pair) and
-//! [`Reducer`] (pure state fold). Traits for Source and EventStore are
-//! intentionally deferred until concrete implementations (EVM, BTC)
-//! reveal the right abstractions.
+//! [`Reducer`] (state fold with external state fetching). Traits for
+//! Source and EventStore are intentionally deferred until concrete
+//! implementations (EVM, BTC) reveal the right abstractions.
 //!
 //! See [`arch`](crate::arch) for the public consumer API.
 
-use crate::arch::Position;
+use crate::arch::{HistoryError, Position};
 
 // ============================================================
 // PositionedEvent
@@ -35,38 +35,45 @@ impl<P: Position, T> PositionedEvent<P, T> {
 // Reducer
 // ============================================================
 
-/// Pure state fold: `(State, Event) -> State`.
+/// State fold with external state fetching: `(State, Event) -> State`.
 ///
-/// Used to derive a state [`History`](crate::arch::History) from an
-/// event history. No I/O, no side effects.
+/// Used by [`ReducedHistory`](crate::reduce::ReducedHistory) to derive
+/// a state history from an event history. `apply` is pure; `fetch_state`
+/// may do I/O (e.g. RPC call) to obtain ground-truth state at an
+/// arbitrary position.
 ///
-/// `initial()` returns the genesis state (before any events). For
-/// backfilling from a non-genesis position, the orchestrator provides
-/// the starting state — the reducer doesn't need to know where it
-/// came from.
+/// No `initial()` — `fetch_state(earliest())` replaces it. A reducer
+/// that can't fetch state at an arbitrary position can't be used
+/// meaningfully; replaying from genesis is never acceptable.
 ///
 /// ```ignore
-/// struct BalanceReducer;
+/// struct BalanceReducer { ... }
 ///
-/// impl Reducer for BalanceReducer {
-///     type Event = Erc20Transfer;
-///     type State = u128;
+/// #[async_trait::async_trait]
+/// impl Reducer<EvmPosition> for BalanceReducer {
+///     type Event = EvmEvent;
+///     type State = U256;
 ///
-///     fn initial(&self) -> u128 { 0 }
+///     fn apply(&self, balance: U256, event: &EvmEvent) -> U256 {
+///         // parse transfer, add/subtract
+///         balance
+///     }
 ///
-///     fn apply(&self, balance: u128, transfer: &Erc20Transfer) -> u128 {
-///         // simplified — real impl checks from/to
-///         balance + transfer.amount.raw
+///     async fn fetch_state(&self, pos: &EvmPosition) -> Result<U256, HistoryError> {
+///         // eth_call balanceOf at pos.block_number
+///         Ok(U256::ZERO)
 ///     }
 /// }
 /// ```
-pub trait Reducer: Send + Sync + 'static {
-    type Event;
-    type State: Clone + Send + Sync;
-
-    /// Starting state before any events (genesis).
-    fn initial(&self) -> Self::State;
+#[async_trait::async_trait]
+pub trait Reducer<P: Position>: Send + Sync + 'static {
+    type Event: Clone + Send + Sync + 'static;
+    type State: Clone + Send + Sync + 'static;
 
     /// Apply one event, producing the next state.
     fn apply(&self, state: Self::State, event: &Self::Event) -> Self::State;
+
+    /// Fetch state at a position from an external source (e.g., RPC call).
+    /// Used when no nearby cached state exists.
+    async fn fetch_state(&self, position: &P) -> Result<Self::State, HistoryError>;
 }
