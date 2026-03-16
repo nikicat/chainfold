@@ -1,7 +1,7 @@
 //! Dedicated ERC20 transfer explorer.
 //!
 //! Auto-fetches token metadata (name, symbol, decimals) from the contract.
-//! Shows decoded transfers for a specific owner address.
+//! Shows decoded transfers for a specific owner address. Supports multiple tokens.
 //!
 //! Usage:
 //!   cargo run --features evm --example erc20_explorer -- \
@@ -9,10 +9,13 @@
 //!     --owner 0xYourAddress \
 //!     --from 2025-01-15 --to 2025-01-16
 //!
-//!   # or with block numbers:
+//!   # Multiple tokens (USDC + WETH):
 //!   cargo run --features evm --example erc20_explorer -- \
+//!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+//!     --address 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
 //!     --owner 0xYourAddress --from-block 22000000 --num-blocks 100
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use alloy::primitives::U256;
@@ -20,7 +23,8 @@ use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{Cursor, History, Side};
 use chainfold::evm::{
-    decode_transfer, evm_pos_cmp, fetch_erc20_metadata, EvmLogHistory, LogCache, TRANSFER_TOPIC,
+    decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogCache,
+    TRANSFER_TOPIC,
 };
 use chrono::NaiveDate;
 use clap::Parser;
@@ -32,9 +36,9 @@ struct Args {
     #[arg(long, default_value = "https://eth.llamarpc.com")]
     rpc_url: String,
 
-    /// Token contract address (0x-prefixed hex)
+    /// Token contract address(es) (0x-prefixed hex). Repeat for multiple tokens.
     #[arg(long, default_value = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
-    address: String,
+    address: Vec<String>,
 
     /// Owner address to track transfers for (0x-prefixed hex, required)
     #[arg(long)]
@@ -194,14 +198,14 @@ fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
 
 const AMOUNT_WHOLE_WIDTH: usize = 6;
 
-fn format_amount(raw: U256, decimals: u8, whole_width: usize) -> String {
+fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: usize) -> String {
     let divisor = U256::from(10u64).pow(U256::from(decimals as u64));
     let whole = raw / divisor;
     let frac = raw % divisor;
 
     let whole_str = format!("{:>width$}", whole, width = whole_width);
 
-    if decimals == 0 {
+    if frac_width == 0 {
         return whole_str;
     }
 
@@ -209,10 +213,10 @@ fn format_amount(raw: U256, decimals: u8, whole_width: usize) -> String {
     let trimmed = frac_str.trim_end_matches('0');
     if trimmed.is_empty() {
         // No fractional part — pad with spaces where digits would be
-        format!("{}{}", whole_str, " ".repeat(decimals as usize + 1))
+        format!("{}{}", whole_str, " ".repeat(frac_width + 1))
     } else {
-        // Show fractional, pad trimmed portion with trailing spaces
-        let trailing_pad = decimals as usize - trimmed.len();
+        // Show fractional, pad trimmed portion to frac_width
+        let trailing_pad = frac_width - trimmed.len();
         format!("{}.{}{}", whole_str, trimmed, " ".repeat(trailing_pad))
     }
 }
@@ -221,14 +225,20 @@ fn print_transfer(
     cursor: &Cursor<EvmEvent, EvmPosition>,
     index: usize,
     owner: &[u8; 20],
-    decimals: u8,
-    symbol: &str,
+    metadata: &HashMap<[u8; 20], Erc20Metadata>,
+    max_sym_width: usize,
+    max_decimals: usize,
     base_url: &str,
 ) {
     let e = cursor.value();
     if let Some(t) = decode_transfer(e) {
+        let meta = match metadata.get(&e.contract_address) {
+            Some(m) => m,
+            None => return,
+        };
         let direction = if &t.to == owner { " IN" } else { "OUT" };
-        let amount = format_amount(t.amount, decimals, AMOUNT_WHOLE_WIDTH);
+        let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, max_decimals);
+        let sym = format!("{:<width$}", meta.symbol, width = max_sym_width);
 
         println!(
             "[{:>4}] block={:<10} {}  {:>3}  {} → {}  {} {}",
@@ -239,7 +249,7 @@ fn print_transfer(
             linked_addr(&t.from, base_url),
             linked_addr(&t.to, base_url),
             amount,
-            symbol,
+            sym,
         );
     }
 }
@@ -252,7 +262,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    let address = parse_hex_address(&args.address)?;
+    let addresses: Vec<[u8; 20]> = args
+        .address
+        .iter()
+        .map(|a| parse_hex_address(a))
+        .collect::<Result<_, _>>()?;
     let owner = parse_hex_address(&args.owner)?;
 
     let url: alloy::transports::http::reqwest::Url = args.rpc_url.parse()?;
@@ -263,58 +277,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = chainfold::evm::versioned_path(&args.db);
     let cache = Arc::new(LogCache::open(&db_path)?);
 
-    // Fetch token metadata (cached in SQLite, Multicall3 on first run)
+    // Fetch token metadata for all addresses (cached in SQLite, Multicall3 on first run)
     let chain_id = provider.get_chain_id().await?;
     println!("Fetching token metadata...");
-    let meta = fetch_erc20_metadata(&provider, address, chain_id, &cache).await?;
-    println!(
-        "Token: {} ({}), {} decimals",
-        meta.symbol, meta.name, meta.decimals
-    );
+    let meta_futures = addresses
+        .iter()
+        .map(|addr| fetch_erc20_metadata(&provider, *addr, chain_id, &cache));
+    let meta_results = futures_util::future::join_all(meta_futures).await;
+
+    let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
+    for (addr, result) in addresses.iter().zip(meta_results) {
+        let meta = result?;
+        println!(
+            "  {} ({}) — {} decimals",
+            meta.symbol, meta.name, meta.decimals
+        );
+        metadata.insert(*addr, meta);
+    }
+    let max_sym_width = metadata.values().map(|m| m.symbol.len()).max().unwrap_or(0);
+    let max_decimals = metadata.values().map(|m| m.decimals as usize).max().unwrap_or(0);
     println!();
 
-    // Build merged history: outgoing + incoming transfers for owner
+    // Build merged history: outgoing + incoming transfers for owner, per token
     let mut padded_owner = [0u8; 32];
     padded_owner[12..32].copy_from_slice(&owner);
 
-    // Outgoing: Transfer(from=owner, *, *)
-    let topics_out: [Option<[u8; 32]>; 4] =
-        [Some(TRANSFER_TOPIC), Some(padded_owner), None, None];
-    let h_out = EvmLogHistory::with_options(
-        provider.clone(),
-        cache.clone(),
-        address,
-        topics_out,
-        args.chunk_size,
-        12,
-    )
-    .await?;
+    let mut all_histories = Vec::new();
+    let mut all_backends = Vec::new();
 
-    // Incoming: Transfer(*, to=owner, *)
-    let topics_in: [Option<[u8; 32]>; 4] =
-        [Some(TRANSFER_TOPIC), None, Some(padded_owner), None];
-    let h_in = EvmLogHistory::with_options(
-        provider.clone(),
-        cache.clone(),
-        address,
-        topics_in,
-        args.chunk_size,
-        12,
-    )
-    .await?;
+    for &address in &addresses {
+        // Outgoing: Transfer(from=owner, *, *)
+        let topics_out: [Option<[u8; 32]>; 4] =
+            [Some(TRANSFER_TOPIC), Some(padded_owner), None, None];
+        let h_out = EvmLogHistory::with_options(
+            provider.clone(),
+            cache.clone(),
+            address,
+            topics_out,
+            args.chunk_size,
+            12,
+        )
+        .await?;
 
-    let history = History::merge(
-        vec![h_out.history(), h_in.history()],
-        evm_pos_cmp,
-    );
-    // Keep backends alive — they own the tip tracking state.
-    let _backends = vec![h_out, h_in];
+        // Incoming: Transfer(*, to=owner, *)
+        let topics_in: [Option<[u8; 32]>; 4] =
+            [Some(TRANSFER_TOPIC), None, Some(padded_owner), None];
+        let h_in = EvmLogHistory::with_options(
+            provider.clone(),
+            cache.clone(),
+            address,
+            topics_in,
+            args.chunk_size,
+            12,
+        )
+        .await?;
+
+        all_histories.push(h_out.history());
+        all_histories.push(h_in.history());
+        all_backends.push(h_out);
+        all_backends.push(h_in);
+    }
+
+    let history = History::merge(all_histories, evm_pos_cmp);
 
     let chain_id = history.source_id();
     let base_url = explorer_base_url(chain_id);
 
-    println!("  Address:  0x{}", hex::encode(address));
     println!("  Owner:    0x{}", hex::encode(owner));
+    println!("  Tokens:   {}", addresses.len());
     println!("  Chain:    {}", chain_id);
 
     // Resolve range: either --from/--to (dates) or --from-block/--num-blocks
@@ -326,7 +356,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.follow {
         println!("Following new events (Ctrl+C to stop)...\n");
-        for backend in &_backends {
+        for backend in &all_backends {
             let _handle = backend.start_tip_tracking(std::time::Duration::from_secs(2));
             backend.poll_tip().await?;
         }
@@ -334,7 +364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut count = 0;
         let mut maybe_cursor = history.after(&start, None).await?;
         while let Some(cursor) = maybe_cursor {
-            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol, base_url);
+            print_transfer(&cursor, count, &owner, &metadata, max_sym_width, max_decimals, base_url);
             count += 1;
             maybe_cursor = history.after(cursor.after(), None).await?;
         }
@@ -348,7 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("... (limit reached, use --limit to show more)");
                 break;
             }
-            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol, base_url);
+            print_transfer(&cursor, count, &owner, &metadata, max_sym_width, max_decimals, base_url);
             count += 1;
             maybe_cursor = history.before(cursor.before(), Some(&start)).await?;
         }
@@ -366,7 +396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("... (limit reached, use --limit to show more)");
                 break;
             }
-            print_transfer(&cursor, count, &owner, meta.decimals, &meta.symbol, base_url);
+            print_transfer(&cursor, count, &owner, &metadata, max_sym_width, max_decimals, base_url);
             count += 1;
             maybe_cursor = history.after(cursor.after(), Some(&cutoff)).await?;
         }
