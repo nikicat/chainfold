@@ -24,7 +24,7 @@ pub fn versioned_path(base: &str) -> String {
 
 use std::sync::Mutex;
 
-use alloy::primitives::{Address, Bytes, LogData, B256};
+use alloy::primitives::{Address, Bytes, LogData, B256, U256};
 use alloy::rpc::types::Log;
 use rusqlite::Connection;
 
@@ -733,7 +733,7 @@ impl LogCache {
         address: &[u8; 20],
         owner: &[u8; 20],
         block_number: u64,
-    ) -> Result<Option<[u8; 32]>, CacheError> {
+    ) -> Result<Option<U256>, CacheError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT balance FROM erc20_balances
@@ -748,16 +748,50 @@ impl LogCache {
             ],
             |row| {
                 let bytes: Vec<u8> = row.get(0)?;
-                let mut balance = [0u8; 32];
-                if bytes.len() == 32 {
-                    balance.copy_from_slice(&bytes);
-                }
-                Ok(balance)
+                Ok(bytes)
             },
         )?;
         match rows.next() {
-            Some(row) => Ok(Some(row?)),
-            None => Ok(None),
+            Some(Ok(bytes)) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(U256::from_be_bytes(arr)))
+            }
+            Some(Err(e)) => Err(e.into()),
+            _ => Ok(None),
+        }
+    }
+
+    /// Get the closest cached ERC20 balance at or before `max_block`.
+    pub fn get_erc20_balance_floor(
+        &self,
+        chain_id: u64,
+        address: &[u8; 20],
+        owner: &[u8; 20],
+        max_block: u64,
+    ) -> Result<Option<(u64, U256)>, CacheError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT block_number, balance FROM erc20_balances
+             WHERE chain_id = ?1 AND address = ?2 AND owner = ?3 AND block_number <= ?4
+             ORDER BY block_number DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(
+            rusqlite::params![chain_id as i64, &address[..], &owner[..], max_block as i64],
+            |row| {
+                let block: i64 = row.get(0)?;
+                let balance: Vec<u8> = row.get(1)?;
+                Ok((block as u64, balance))
+            },
+        )?;
+        match rows.next() {
+            Some(Ok((block, bytes))) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(Some((block, U256::from_be_bytes(arr))))
+            }
+            Some(Err(e)) => Err(e.into()),
+            _ => Ok(None),
         }
     }
 
@@ -768,8 +802,9 @@ impl LogCache {
         address: &[u8; 20],
         owner: &[u8; 20],
         block_number: u64,
-        balance: &[u8; 32],
+        balance: U256,
     ) -> Result<(), CacheError> {
+        let bytes: [u8; 32] = balance.to_be_bytes();
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO erc20_balances (chain_id, address, owner, block_number, balance)
@@ -779,7 +814,7 @@ impl LogCache {
                 &address[..],
                 &owner[..],
                 block_number as i64,
-                &balance[..]
+                &bytes[..]
             ],
         )?;
         Ok(())
@@ -1191,11 +1226,9 @@ mod tests {
         let cache = LogCache::open_in_memory().unwrap();
         let addr = [0x42u8; 20];
         let owner = [0x01u8; 20];
-        let mut balance = [0u8; 32];
-        balance[31] = 100; // U256(100)
-        cache.insert_erc20_balance(1, &addr, &owner, 1000, &balance).unwrap();
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, U256::from(100)).unwrap();
         let got = cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap();
-        assert_eq!(got, balance);
+        assert_eq!(got, U256::from(100));
     }
 
     #[test]
@@ -1203,14 +1236,10 @@ mod tests {
         let cache = LogCache::open_in_memory().unwrap();
         let addr = [0x42u8; 20];
         let owner = [0x01u8; 20];
-        let mut bal_a = [0u8; 32];
-        bal_a[31] = 100;
-        let mut bal_b = [0u8; 32];
-        bal_b[31] = 200;
-        cache.insert_erc20_balance(1, &addr, &owner, 1000, &bal_a).unwrap();
-        cache.insert_erc20_balance(1, &addr, &owner, 2000, &bal_b).unwrap();
-        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap(), bal_a);
-        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 2000).unwrap().unwrap(), bal_b);
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, U256::from(100)).unwrap();
+        cache.insert_erc20_balance(1, &addr, &owner, 2000, U256::from(200)).unwrap();
+        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap(), U256::from(100));
+        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 2000).unwrap().unwrap(), U256::from(200));
         assert!(cache.get_erc20_balance(1, &addr, &owner, 1500).unwrap().is_none());
     }
 
@@ -1219,13 +1248,9 @@ mod tests {
         let cache = LogCache::open_in_memory().unwrap();
         let addr = [0x42u8; 20];
         let owner = [0x01u8; 20];
-        let mut bal_a = [0u8; 32];
-        bal_a[31] = 100;
-        let mut bal_b = [0u8; 32];
-        bal_b[31] = 200;
-        cache.insert_erc20_balance(1, &addr, &owner, 1000, &bal_a).unwrap();
-        cache.insert_erc20_balance(1, &addr, &owner, 1000, &bal_b).unwrap();
-        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap(), bal_b);
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, U256::from(100)).unwrap();
+        cache.insert_erc20_balance(1, &addr, &owner, 1000, U256::from(200)).unwrap();
+        assert_eq!(cache.get_erc20_balance(1, &addr, &owner, 1000).unwrap().unwrap(), U256::from(200));
     }
 
     // -- cleanup --
@@ -1240,5 +1265,52 @@ mod tests {
         let logs = vec![make_test_log(200, 0, BLOCK_HASH_B)];
         cache.insert_logs(&FH, &logs).unwrap();
         assert!(cache.get_cached_logs(&FH, 200, 200).unwrap().is_empty());
+    }
+
+    // -- erc20_balance_floor --
+
+    #[test]
+    fn erc20_balance_floor_lookup() {
+        let cache = LogCache::open_in_memory().unwrap();
+        let addr = [0x42u8; 20];
+        let owner = [0x01u8; 20];
+
+        cache.insert_erc20_balance(1, &addr, &owner, 100, U256::from(100)).unwrap();
+        cache.insert_erc20_balance(1, &addr, &owner, 200, U256::from(200)).unwrap();
+        cache.insert_erc20_balance(1, &addr, &owner, 300, U256::from(50)).unwrap();
+
+        // Floor at 250 → block 200
+        let (block, balance) = cache.get_erc20_balance_floor(1, &addr, &owner, 250).unwrap().unwrap();
+        assert_eq!(block, 200);
+        assert_eq!(balance, U256::from(200));
+
+        // Floor at 200 (exact) → block 200
+        let (block, balance) = cache.get_erc20_balance_floor(1, &addr, &owner, 200).unwrap().unwrap();
+        assert_eq!(block, 200);
+        assert_eq!(balance, U256::from(200));
+
+        // Floor at 350 → block 300
+        let (block, balance) = cache.get_erc20_balance_floor(1, &addr, &owner, 350).unwrap().unwrap();
+        assert_eq!(block, 300);
+        assert_eq!(balance, U256::from(50));
+
+        // Floor at 100 (exact) → block 100
+        let (block, balance) = cache.get_erc20_balance_floor(1, &addr, &owner, 100).unwrap().unwrap();
+        assert_eq!(block, 100);
+        assert_eq!(balance, U256::from(100));
+    }
+
+    #[test]
+    fn erc20_balance_floor_none() {
+        let cache = LogCache::open_in_memory().unwrap();
+        let addr = [0x42u8; 20];
+        let owner = [0x01u8; 20];
+
+        // No entries at all
+        assert!(cache.get_erc20_balance_floor(1, &addr, &owner, 100).unwrap().is_none());
+
+        // Entry at 200, query at 100 (before) → None
+        cache.insert_erc20_balance(1, &addr, &owner, 200, U256::from(42)).unwrap();
+        assert!(cache.get_erc20_balance_floor(1, &addr, &owner, 100).unwrap().is_none());
     }
 }

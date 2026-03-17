@@ -824,6 +824,30 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistoryBackend<EvmEv
     ) -> Result<bool, HistoryError> {
         Ok((cursor_pos.block_number, cursor_pos.log_index) < (p.block_number, p.log_index))
     }
+
+    fn estimate_scan_count(&self, from: &EvmPosition, to: &EvmPosition) -> u64 {
+        if from.block_number >= to.block_number {
+            return 0;
+        }
+        let scanned = self
+            .cache
+            .get_scanned_ranges(&self.filter_hash)
+            .unwrap_or_default();
+        let gaps =
+            crate::evm::log_cache::compute_gaps((from.block_number, to.block_number), &scanned);
+        gaps.iter()
+            .map(|&(s, e)| (e - s) / self.chunk_size + 1)
+            .sum()
+    }
+
+    fn scan_chunk_before(&self, target: &EvmPosition) -> EvmPosition {
+        EvmPosition {
+            block_number: target.block_number.saturating_sub(self.chunk_size),
+            log_index: 0,
+            side: Side::Before,
+            ..target.clone()
+        }
+    }
 }
 
 // ============================================================
@@ -1317,5 +1341,61 @@ mod tests {
 
         assert!(h.after(&EvmPosition::earliest(TEST_CHAIN), Some(&cutoff)).await.unwrap().is_none());
         assert!(h.before(&EvmPosition::never(TEST_CHAIN), None).await.unwrap().is_none());
+    }
+
+    // -- estimate_scan_count --
+
+    #[tokio::test]
+    async fn estimate_scan_count_cached() {
+        // Fully scanned range → 0 scans needed
+        let (cache, _) = warm_cache(); // scanned [0, 200]
+        let h = make_history(cache).await;
+        let from = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 0, log_index: 0,
+            block_hash: [0; 32], timestamp: 0, side: Side::After,
+        };
+        let to = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 200, log_index: 0,
+            block_hash: [0; 32], timestamp: 0, side: Side::After,
+        };
+        assert_eq!(h.estimate_scan_count(&from, &to), 0);
+    }
+
+    #[tokio::test]
+    async fn estimate_scan_count_uncached() {
+        // No scanned ranges → ceil(range/chunk)
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
+        cache.insert_block_header(200, &BH_200, &BH_0, GENESIS_TS + 2400).unwrap();
+
+        let h = make_history(cache).await;
+        // chunk_size is 100 (make_history uses with_options(..., 100, 12))
+        // range is 0..2000 → one gap (0, 2000), (2000-0)/100 + 1 = 21
+        let from = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 0, log_index: 0,
+            block_hash: [0; 32], timestamp: 0, side: Side::After,
+        };
+        let to = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 2000, log_index: 0,
+            block_hash: [0; 32], timestamp: 0, side: Side::After,
+        };
+        assert_eq!(h.estimate_scan_count(&from, &to), 21);
+    }
+
+    #[tokio::test]
+    async fn estimate_scan_count_gaps() {
+        // Partial coverage: scanned [0,200], gap [201, 1500]
+        let (cache, _fh) = warm_cache(); // scanned [0, 200]
+        let h = make_history(cache).await;
+        let from = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 0, log_index: 0,
+            block_hash: [0; 32], timestamp: 0, side: Side::After,
+        };
+        let to = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 1500, log_index: 0,
+            block_hash: [0; 32], timestamp: 0, side: Side::After,
+        };
+        // Gap: (201, 1500), width = 1299, chunk_size=100 → 1299/100 + 1 = 13
+        assert_eq!(h.estimate_scan_count(&from, &to), 13);
     }
 }

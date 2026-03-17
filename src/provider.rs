@@ -76,4 +76,11 @@ pub trait Reducer<P: Position>: Send + Sync + 'static {
     /// Fetch state at a position from an external source (e.g., RPC call).
     /// Used when no nearby cached state exists.
     async fn fetch_state(&self, position: &P) -> Result<Self::State, HistoryError>;
+
+    /// Find the closest externally-cached state at or before `pos`.
+    /// Returns None if no cached state exists outside the in-memory cache.
+    /// Used to find efficient replay starting points across sessions.
+    fn find_cached_state_floor(&self, _pos: &P) -> Option<(P, Self::State)> {
+        None
+    }
 }

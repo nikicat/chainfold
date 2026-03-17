@@ -274,6 +274,26 @@ impl<P> Erc20BalanceReducer<P> {
         }
     }
 
+    /// Look up the closest cached balance at or before `pos`. No Provider needed.
+    pub fn cached_balance_floor(&self, pos: &EvmPosition) -> Option<(EvmPosition, U256)> {
+        let (block, balance) = self
+            .cache
+            .get_erc20_balance_floor(
+                self.chain_id,
+                &self.token_address,
+                &self.owner,
+                pos.block_number,
+            )
+            .ok()??;
+        let evm_pos = EvmPosition {
+            block_number: block,
+            log_index: 0,
+            side: crate::arch::Side::After,
+            ..pos.clone()
+        };
+        Some((evm_pos, balance))
+    }
+
     /// Apply a transfer event to a balance. Usable without Provider bound.
     pub fn apply_transfer(&self, balance: U256, event: &EvmEvent) -> U256 {
         if let Some(t) = decode_transfer(event) {
@@ -308,7 +328,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> Reducer<EvmPosition>
             .get_erc20_balance(self.chain_id, &self.token_address, &self.owner, pos.block_number)
             .map_err(|e| HistoryError::internal(format!("balance cache read: {e}")))?
         {
-            return Ok(U256::from_be_bytes(cached));
+            return Ok(cached);
         }
 
         // 2. eth_call balanceOf(owner) at pos.block_number
@@ -338,18 +358,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> Reducer<EvmPosition>
             .map_err(|e| HistoryError::internal(format!("balanceOf decode: {e}")))?;
 
         // 3. Cache the result
-        let balance_bytes: [u8; 32] = balance.to_be_bytes();
         self.cache
             .insert_erc20_balance(
                 self.chain_id,
                 &self.token_address,
                 &self.owner,
                 pos.block_number,
-                &balance_bytes,
+                balance,
             )
             .map_err(|e| HistoryError::internal(format!("balance cache write: {e}")))?;
 
         Ok(balance)
+    }
+
+    fn find_cached_state_floor(&self, pos: &EvmPosition) -> Option<(EvmPosition, U256)> {
+        self.cached_balance_floor(pos)
     }
 }
 
@@ -360,6 +383,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> Reducer<EvmPosition>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arch::Side;
 
     fn make_transfer_event(from: [u8; 20], to: [u8; 20], amount: U256) -> EvmEvent {
         let mut topic1 = [0u8; 32];
@@ -469,5 +493,49 @@ mod tests {
         };
         let event = make_transfer_event(other_a, other_b, U256::from(100));
         assert_eq!(reducer.apply_transfer(U256::from(50), &event), U256::from(50));
+    }
+
+    #[test]
+    fn find_cached_state_floor_from_sqlite() {
+        let owner = [0x01u8; 20];
+        let token = [0x42u8; 20];
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+
+        // Insert balances at blocks 100 and 200
+        cache.insert_erc20_balance(1, &token, &owner, 100, U256::from(500)).unwrap();
+        cache.insert_erc20_balance(1, &token, &owner, 200, U256::from(1000)).unwrap();
+
+        let reducer = Erc20BalanceReducer {
+            owner,
+            token_address: token,
+            chain_id: 1,
+            provider: (),
+            cache,
+        };
+
+        // Query at block 150 → should return block 100, balance 500
+        let pos = EvmPosition {
+            chain_id: 1, block_number: 150, log_index: 0,
+            block_hash: [0; 32], timestamp: 1500, side: Side::Before,
+        };
+        let (floor_pos, balance) = reducer.cached_balance_floor(&pos).unwrap();
+        assert_eq!(floor_pos.block_number, 100);
+        assert_eq!(balance, U256::from(500));
+
+        // Query at block 250 → should return block 200, balance 1000
+        let pos2 = EvmPosition {
+            chain_id: 1, block_number: 250, log_index: 0,
+            block_hash: [0; 32], timestamp: 2500, side: Side::Before,
+        };
+        let (floor_pos2, balance2) = reducer.cached_balance_floor(&pos2).unwrap();
+        assert_eq!(floor_pos2.block_number, 200);
+        assert_eq!(balance2, U256::from(1000));
+
+        // Query at block 50 → no entry before, None
+        let pos3 = EvmPosition {
+            chain_id: 1, block_number: 50, log_index: 0,
+            block_hash: [0; 32], timestamp: 500, side: Side::Before,
+        };
+        assert!(reducer.cached_balance_floor(&pos3).is_none());
     }
 }

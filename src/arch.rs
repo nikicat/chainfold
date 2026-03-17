@@ -447,6 +447,18 @@ impl<T: Send + Sync + 'static, P: Position> History<T, P> {
         crate::merge::MergedHistory::into_history(sources, pos_cmp)
     }
 
+    // -- Cost estimation ----------------------------------------
+
+    /// Minimum number of scan RPCs to cover [from, to], accounting for cached ranges.
+    pub fn estimate_scan_count(&self, from: &P, to: &P) -> u64 {
+        self.inner.estimate_scan_count(from, to)
+    }
+
+    /// Position one scan-chunk before `target`. Used for the fetch-and-scan fallback.
+    pub fn scan_chunk_before(&self, target: &P) -> P {
+        self.inner.scan_chunk_before(target)
+    }
+
     // -- Serialization -----------------------------------------
 
     /// Deserialize a position previously saved with [`Position::marshal`].
@@ -538,6 +550,16 @@ pub(crate) trait HistoryBackend<T: Send + Sync + 'static, P: Position>: Send + S
 
     async fn is_after(&self, cursor_pos: &P, p: &P) -> Result<bool, HistoryError>;
     async fn is_before(&self, cursor_pos: &P, p: &P) -> Result<bool, HistoryError>;
+
+    /// Minimum number of scan RPCs to cover [from, to], accounting for cached ranges.
+    fn estimate_scan_count(&self, _from: &P, _to: &P) -> u64 {
+        0
+    }
+
+    /// Position one scan-chunk before `target`. Used for the fetch-and-scan fallback.
+    fn scan_chunk_before(&self, target: &P) -> P {
+        target.clone()
+    }
 }
 
 // ============================================================

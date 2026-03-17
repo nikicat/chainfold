@@ -376,6 +376,14 @@ impl<T: Send + Sync + 'static, P: Position> HistoryBackend<T, P> for MergedHisto
     async fn is_before(&self, cursor_pos: &P, p: &P) -> Result<bool, HistoryError> {
         Ok((self.pos_cmp)(cursor_pos, p) == Ordering::Less)
     }
+
+    fn estimate_scan_count(&self, from: &P, to: &P) -> u64 {
+        self.sources.iter().map(|s| s.estimate_scan_count(from, to)).sum()
+    }
+
+    fn scan_chunk_before(&self, target: &P) -> P {
+        self.sources[0].scan_chunk_before(target)
+    }
 }
 
 #[cfg(test)]

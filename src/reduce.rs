@@ -42,21 +42,32 @@ pub struct ReducedHistory<R: Reducer<P>, P: Position> {
     pos_cmp: fn(&P, &P) -> Ordering,
     /// Sorted vec of (position, state_after_event). Floor lookup via pos_cmp.
     state_cache: Mutex<Vec<(P, R::State)>>,
+    /// Cost per eth_getLogs RPC call (provider config).
+    scan_cost: u64,
+    /// Cost per eth_call / state fetch RPC (provider config).
+    fetch_cost: u64,
     self_ref: OnceLock<Weak<Self>>,
 }
 
 impl<R: Reducer<P>, P: Position> ReducedHistory<R, P> {
     /// Create a new ReducedHistory wrapping `inner` with the given reducer.
+    ///
+    /// `scan_cost` / `fetch_cost` control the cost-based query planner in
+    /// `resolve_state`. Typical: free RPC `(1, 1)`, premium `(5, 1)`.
     pub fn new(
         inner: History<R::Event, P>,
         reducer: R,
         pos_cmp: fn(&P, &P) -> Ordering,
+        scan_cost: u64,
+        fetch_cost: u64,
     ) -> Arc<Self> {
         let rh = Arc::new(Self {
             inner,
             reducer,
             pos_cmp,
             state_cache: Mutex::new(Vec::new()),
+            scan_cost,
+            fetch_cost,
             self_ref: OnceLock::new(),
         });
         let _ = rh.self_ref.set(Arc::downgrade(&rh));
@@ -116,29 +127,68 @@ impl<R: Reducer<P>, P: Position> ReducedHistory<R, P> {
     // State resolution
     // --------------------------------------------------------
 
-    /// Resolve state at `pos`: floor-lookup + replay, or fetch_state fallback.
+    /// Replay forward from `floor_state` at `floor_pos` to `target`,
+    /// caching intermediate states along the way.
+    async fn replay_forward(
+        &self,
+        floor_state: R::State,
+        floor_pos: &P,
+        target: &P,
+    ) -> Result<R::State, HistoryError> {
+        let mut state = floor_state;
+        let mut cursor = self.inner.after(floor_pos, Some(target)).await?;
+        while let Some(c) = cursor {
+            state = self.reducer.apply(state, c.value());
+            let event_pos = c.after().clone();
+            self.cache_state(event_pos.clone(), state.clone());
+            cursor = self.inner.after(c.after(), Some(target)).await?;
+        }
+        Ok(state)
+    }
+
+    /// Resolve state at `pos` using cost-based query planning.
+    ///
+    /// Checks three sources for the closest floor state (in-memory cache,
+    /// reducer's external cache, earliest position), then compares the cost
+    /// of replaying from the floor vs. fetching state one chunk back.
     async fn resolve_state(&self, pos: &P) -> Result<R::State, HistoryError> {
-        // 1. Floor lookup
-        if let Some((cached_pos, cached_state)) = self.floor_state(pos) {
-            if (self.pos_cmp)(&cached_pos, pos) == Ordering::Equal {
-                return Ok(cached_state);
+        // 1. Find closest known state from all sources
+        let mut best_floor: Option<(P, R::State)> = None;
+
+        // Check in-memory cache
+        if let Some((p, s)) = self.floor_state(pos) {
+            if (self.pos_cmp)(&p, pos) == Ordering::Equal {
+                return Ok(s); // exact hit
             }
-            // Replay forward from cached_pos to pos
-            let mut state = cached_state;
-            let mut cursor = self.inner.after(&cached_pos, Some(pos)).await?;
-            while let Some(c) = cursor {
-                state = self.reducer.apply(state, c.value());
-                let event_pos = c.after().clone();
-                self.cache_state(event_pos.clone(), state.clone());
-                cursor = self.inner.after(c.after(), Some(pos)).await?;
-            }
-            return Ok(state);
+            best_floor = Some((p, s));
         }
 
-        // 2. No floor entry — fetch from external source
-        let state = self.reducer.fetch_state(pos).await?;
-        self.cache_state(pos.clone(), state.clone());
-        Ok(state)
+        // Check Reducer's external cache (e.g. SQLite)
+        if let Some((p, s)) = self.reducer.find_cached_state_floor(pos) {
+            let dominated = best_floor
+                .as_ref()
+                .is_some_and(|(bp, _)| (self.pos_cmp)(bp, &p) != Ordering::Less);
+            if !dominated {
+                best_floor = Some((p, s));
+            }
+        }
+
+        // 2. If we have a floor, compare costs
+        if let Some((floor_pos, floor_state)) = best_floor {
+            let scan_count = self.inner.estimate_scan_count(&floor_pos, pos);
+            let restore_cost = self.scan_cost * scan_count;
+            let fetch_and_scan = self.fetch_cost + self.scan_cost;
+
+            if restore_cost <= fetch_and_scan {
+                return self.replay_forward(floor_state, &floor_pos, pos).await;
+            }
+        }
+
+        // 3. Fallback: fetch state one chunk back, scan that range
+        let checkpoint = self.inner.scan_chunk_before(pos);
+        let cp_state = self.reducer.fetch_state(&checkpoint).await?;
+        self.cache_state(checkpoint.clone(), cp_state.clone());
+        self.replay_forward(cp_state, &checkpoint, pos).await
     }
 
     /// Resolve state at the position of a found event. The event itself
@@ -360,6 +410,14 @@ impl<R: Reducer<P>, P: Position> HistoryBackend<ReducedEvent<R::Event, R::State>
 
     async fn is_before(&self, cursor_pos: &P, p: &P) -> Result<bool, HistoryError> {
         Ok((self.pos_cmp)(cursor_pos, p) == Ordering::Less)
+    }
+
+    fn estimate_scan_count(&self, from: &P, to: &P) -> u64 {
+        self.inner.estimate_scan_count(from, to)
+    }
+
+    fn scan_chunk_before(&self, target: &P) -> P {
+        self.inner.scan_chunk_before(target)
     }
 }
 
@@ -664,7 +722,7 @@ mod tests {
         let history = h.into_history();
 
         let reducer = SumReducer::new(HashMap::new());
-        let rh = ReducedHistory::new(history, reducer, evm_cmp);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
 
         // Pre-cache state at block 100 (state = 50)
         let pos_100 = EvmPosition {
@@ -702,7 +760,7 @@ mod tests {
         let mut fetch_vals = HashMap::new();
         fetch_vals.insert(0, 100); // fetch at earliest returns 100
         let reducer = SumReducer::new(fetch_vals);
-        let rh = ReducedHistory::new(history, reducer, evm_cmp);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
 
         let cut = cutoff(300);
         let start = EvmPosition::earliest(TEST_CHAIN);
@@ -721,7 +779,7 @@ mod tests {
         let mut fetch_vals = HashMap::new();
         fetch_vals.insert(0, 0);
         let reducer = SumReducer::new(fetch_vals);
-        let rh = ReducedHistory::new(history, reducer, evm_cmp);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
 
         let cut = cutoff(400);
         let start = EvmPosition::earliest(TEST_CHAIN);
@@ -753,7 +811,7 @@ mod tests {
         fetch_vals.insert(0, 0); // earliest
         fetch_vals.insert(200, 30); // at block 200
         let reducer = SumReducer::new(fetch_vals);
-        let rh = ReducedHistory::new(history, reducer, evm_cmp);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
 
         let never = EvmPosition::never(TEST_CHAIN);
         let c = rh.before(&never, None).await.unwrap().unwrap();
@@ -768,7 +826,7 @@ mod tests {
         let history = h.into_history();
 
         let reducer = SumReducer::new(HashMap::new());
-        let rh = ReducedHistory::new(history, reducer, evm_cmp);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
 
         // Cache states at blocks 100 and 200
         let pos_100 = EvmPosition {
@@ -815,8 +873,8 @@ mod tests {
         let r1 = SumReducer::new(fv.clone());
         let r2 = SumReducer::new(fv);
 
-        let rh1 = ReducedHistory::new(h1.into_history(), r1, evm_cmp);
-        let rh2 = ReducedHistory::new(h2.into_history(), r2, evm_cmp);
+        let rh1 = ReducedHistory::new(h1.into_history(), r1, evm_cmp, 1, 1);
+        let rh2 = ReducedHistory::new(h2.into_history(), r2, evm_cmp, 1, 1);
 
         let merged = History::merge(vec![rh1.history(), rh2.history()], evm_cmp);
 
@@ -845,12 +903,275 @@ mod tests {
         let history = h.into_history();
 
         let reducer = SumReducer::new(HashMap::new());
-        let rh = ReducedHistory::new(history, reducer, evm_cmp);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
         let rh_history = rh.history();
 
         assert_eq!(rh_history.source_id(), TEST_CHAIN);
         assert_eq!(rh_history.earliest().block_number, 0);
         assert_eq!(rh_history.never().block_number, u64::MAX);
         assert_eq!(rh_history.at(12345).block_number, 12345);
+    }
+
+    // --------------------------------------------------------
+    // Cost-aware FakeHistory — configurable estimate_scan_count
+    // --------------------------------------------------------
+
+    struct CostFakeHistory {
+        inner: Arc<FakeHistory>,
+        scan_count: u64,
+        chunk_size: u64,
+    }
+
+    impl CostFakeHistory {
+        fn new(events: Vec<(u64, u32, u64)>, scan_count: u64, chunk_size: u64) -> Arc<Self> {
+            let inner = FakeHistory::new(events);
+            let h = Arc::new(Self {
+                inner,
+                scan_count,
+                chunk_size,
+            });
+            h
+        }
+
+        fn into_history(self: Arc<Self>) -> History<u64, EvmPosition> {
+            History::new(self as Arc<dyn HistoryBackend<u64, EvmPosition>>)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HistoryBackend<u64, EvmPosition> for CostFakeHistory {
+        fn source_id(&self) -> u64 { self.inner.source_id() }
+        fn earliest(&self) -> EvmPosition { self.inner.earliest() }
+        fn never(&self) -> EvmPosition { self.inner.never() }
+        fn latest(&self) -> &Store<EvmPosition> { self.inner.latest() }
+        fn best(&self) -> &Store<EvmPosition> { self.inner.best() }
+        fn safe(&self) -> &Store<EvmPosition> { self.inner.safe() }
+        fn at(&self, time: Timestamp) -> EvmPosition { self.inner.at(time) }
+
+        async fn is_equiv(&self, a: &EvmPosition, b: &EvmPosition) -> Result<bool, HistoryError> {
+            self.inner.is_equiv(a, b).await
+        }
+        async fn lca(&self, a: &EvmPosition, b: &EvmPosition) -> Result<EvmPosition, HistoryError> {
+            self.inner.lca(a, b).await
+        }
+        fn search_after(&self, position: &EvmPosition, cutoff: Option<&EvmPosition>) -> SearchStream<u64, EvmPosition> {
+            self.inner.search_after(position, cutoff)
+        }
+        fn search_before(&self, position: &EvmPosition, cutoff: Option<&EvmPosition>) -> SearchStream<u64, EvmPosition> {
+            self.inner.search_before(position, cutoff)
+        }
+        async fn after(&self, position: &EvmPosition, cutoff: Option<&EvmPosition>) -> Result<Option<Cursor<u64, EvmPosition>>, HistoryError> {
+            self.inner.after(position, cutoff).await
+        }
+        async fn before(&self, position: &EvmPosition, cutoff: Option<&EvmPosition>) -> Result<Option<Cursor<u64, EvmPosition>>, HistoryError> {
+            self.inner.before(position, cutoff).await
+        }
+        async fn is_after(&self, cursor_pos: &EvmPosition, p: &EvmPosition) -> Result<bool, HistoryError> {
+            self.inner.is_after(cursor_pos, p).await
+        }
+        async fn is_before(&self, cursor_pos: &EvmPosition, p: &EvmPosition) -> Result<bool, HistoryError> {
+            self.inner.is_before(cursor_pos, p).await
+        }
+
+        fn estimate_scan_count(&self, _from: &EvmPosition, _to: &EvmPosition) -> u64 {
+            self.scan_count
+        }
+
+        fn scan_chunk_before(&self, target: &EvmPosition) -> EvmPosition {
+            EvmPosition {
+                block_number: target.block_number.saturating_sub(self.chunk_size),
+                log_index: 0,
+                side: Side::Before,
+                ..target.clone()
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // SumReducer with external cache
+    // --------------------------------------------------------
+
+    struct CostSumReducer {
+        inner: SumReducer,
+        external_cache: HashMap<u64, u64>, // block_number -> state
+    }
+
+    impl CostSumReducer {
+        fn new(
+            fetch_values: HashMap<u64, u64>,
+            external_cache: HashMap<u64, u64>,
+        ) -> Self {
+            Self {
+                inner: SumReducer::new(fetch_values),
+                external_cache,
+            }
+        }
+
+        fn fetch_count(&self) -> usize {
+            self.inner.fetch_count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Reducer<EvmPosition> for CostSumReducer {
+        type Event = u64;
+        type State = u64;
+
+        fn apply(&self, state: u64, event: &u64) -> u64 {
+            self.inner.apply(state, event)
+        }
+
+        async fn fetch_state(&self, pos: &EvmPosition) -> Result<u64, HistoryError> {
+            self.inner.fetch_state(pos).await
+        }
+
+        fn find_cached_state_floor(&self, pos: &EvmPosition) -> Option<(EvmPosition, u64)> {
+            // Find closest block_number <= pos.block_number
+            let mut best: Option<(u64, u64)> = None;
+            for (&block, &state) in &self.external_cache {
+                if block <= pos.block_number {
+                    if best.is_none() || block > best.unwrap().0 {
+                        best = Some((block, state));
+                    }
+                }
+            }
+            best.map(|(block, state)| {
+                let p = EvmPosition {
+                    chain_id: TEST_CHAIN,
+                    block_number: block,
+                    log_index: 0,
+                    block_hash: [0; 32],
+                    timestamp: block,
+                    side: Side::After,
+                };
+                (p, state)
+            })
+        }
+    }
+
+    // --------------------------------------------------------
+    // Cost-based resolve_state tests
+    // --------------------------------------------------------
+
+    #[tokio::test]
+    async fn cost_prefers_replay_when_cheap() {
+        // scan_count=0 from CostFakeHistory, floor exists in-memory.
+        // Should replay (free) without calling fetch_state.
+        let h = CostFakeHistory::new(vec![(200, 0, 20)], 0, 500);
+        let history = h.into_history();
+
+        let mut fv = HashMap::new();
+        fv.insert(0, 0);
+        let reducer = SumReducer::new(fv);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
+
+        // Pre-cache state at block 100
+        let pos_100 = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 100, log_index: 0,
+            block_hash: [0; 32], timestamp: 100, side: Side::After,
+        };
+        rh.cache_state(pos_100, 50);
+
+        // Search for event at 200 — floor at 100, scan_count=0, replay is free
+        let c = rh.after(
+            &EvmPosition {
+                chain_id: TEST_CHAIN, block_number: 100, log_index: 0,
+                block_hash: [0; 32], timestamp: 100, side: Side::After,
+            },
+            Some(&cutoff(300)),
+        ).await.unwrap().unwrap();
+
+        assert_eq!(c.value().event, 20);
+        assert_eq!(c.value().state, 70); // 50 + 20
+        assert_eq!(rh.reducer.fetch_count(), 0); // no RPC needed
+    }
+
+    #[tokio::test]
+    async fn cost_prefers_fetch_when_replay_expensive() {
+        // scan_count=10, scan_cost=1, fetch_cost=1 → restore_cost=10 > fetch+scan=2.
+        // Floor at block 1, target at 1_000_000.
+        // Should use fetch fallback, not replay from floor.
+        let h = CostFakeHistory::new(
+            vec![(999_990, 0, 42)],
+            10, // estimate_scan_count always returns 10
+            500,
+        );
+        let history = h.into_history();
+
+        let mut fv = HashMap::new();
+        fv.insert(0, 0);
+        fv.insert(999_490, 100); // fetch at checkpoint (999_990 - 500 = 999_490)
+        let reducer = SumReducer::new(fv);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
+
+        // Pre-cache floor at block 1 (very far away)
+        let pos_1 = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 1, log_index: 0,
+            block_hash: [0; 32], timestamp: 1, side: Side::After,
+        };
+        rh.cache_state(pos_1, 5);
+
+        // Target: find event near block 1M
+        let start = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 999_000, log_index: 0,
+            block_hash: [0; 32], timestamp: 999_000, side: Side::Before,
+        };
+        let c = rh.after(&start, Some(&cutoff(1_000_000))).await.unwrap().unwrap();
+
+        assert_eq!(c.value().event, 42);
+        // fetch_state was called (checkpoint at 999_490)
+        assert!(rh.reducer.fetch_count() >= 1);
+    }
+
+    #[tokio::test]
+    async fn fallback_uses_scan_chunk_before() {
+        // No floor at all, no external cache. Should fetch at checkpoint = target - chunk.
+        // resolve_state(start=block 900) → checkpoint = 900-500 = 400 → fetch_state(400)
+        let h = CostFakeHistory::new(vec![(1000, 0, 77)], 5, 500);
+        let history = h.into_history();
+
+        let mut fv = HashMap::new();
+        fv.insert(400, 10); // fetch at checkpoint (900 - 500 = 400)
+        let reducer = SumReducer::new(fv);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
+
+        let start = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 900, log_index: 0,
+            block_hash: [0; 32], timestamp: 900, side: Side::Before,
+        };
+        let c = rh.after(&start, Some(&cutoff(1100))).await.unwrap().unwrap();
+
+        assert_eq!(c.value().event, 77);
+        assert_eq!(c.value().state, 87); // 10 (fetched at 400) + 77
+        assert_eq!(rh.reducer.fetch_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn external_cache_floor_used() {
+        // Reducer returns a floor from find_cached_state_floor (simulating SQLite).
+        // scan_count=0, so replay from external floor is free.
+        let h = CostFakeHistory::new(vec![(200, 0, 20)], 0, 500);
+        let history = h.into_history();
+
+        let mut ext_cache = HashMap::new();
+        ext_cache.insert(150, 99); // external state at block 150
+
+        let reducer = CostSumReducer::new(HashMap::new(), ext_cache);
+        let rh = ReducedHistory::new(history, reducer, evm_cmp, 1, 1);
+
+        // Query from block 160 (after the external floor at 150).
+        // resolve_state(160) finds external floor at 150 with state=99.
+        // scan_count=0, restore_cost=0 <= fetch_and_scan=2, so replay.
+        // No events between 150 and 160, state stays 99.
+        // Then apply event 20 → state = 99 + 20 = 119.
+        let start = EvmPosition {
+            chain_id: TEST_CHAIN, block_number: 160, log_index: 0,
+            block_hash: [0; 32], timestamp: 160, side: Side::After,
+        };
+        let c = rh.after(&start, Some(&cutoff(300))).await.unwrap().unwrap();
+
+        assert_eq!(c.value().event, 20);
+        assert_eq!(c.value().state, 119); // 99 (external floor) + 20
+        assert_eq!(rh.reducer.fetch_count(), 0); // no RPC fetch needed
     }
 }

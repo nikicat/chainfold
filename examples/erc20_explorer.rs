@@ -360,7 +360,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             provider.clone(),
             cache.clone(),
         );
-        let reduced = ReducedHistory::new(per_token, reducer, evm_pos_cmp);
+        let reduced = ReducedHistory::new(per_token, reducer, evm_pos_cmp, 1, 1);
 
         all_histories.push(reduced.history());
         _reduced_backends.push(reduced);
