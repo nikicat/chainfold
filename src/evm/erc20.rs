@@ -16,7 +16,7 @@ use alloy::sol_types::{SolCall, SolEvent};
 use crate::arch::evm::{EvmEvent, EvmPosition};
 use crate::arch::HistoryError;
 
-use super::log_cache::LogCache;
+use super::log_cache_legacy::LogCache;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);

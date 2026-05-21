@@ -45,10 +45,6 @@ name = "chainfold"
 path = "src/bin/chainfold/main.rs"
 required-features = ["cli"]
 
-[[test]]
-name = "erc20_tests"
-required-features = ["evm"]
-
 [[example]]
 name = "history_explorer"
 required-features = ["evm"]

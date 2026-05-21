@@ -26,7 +26,7 @@ use crate::arch::{
     Cursor, HistoryBackend, HistoryError, SearchEvent, SearchStream, Side, Store,
     Timestamp,
 };
-use crate::evm::log_cache::{BlockHeader, LogCache};
+use crate::evm::log_cache_legacy::{BlockHeader, LogCache};
 
 /// Default chunk size for `eth_getLogs` calls (in blocks).
 const DEFAULT_CHUNK_SIZE: u64 = 1000;
@@ -97,7 +97,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         chunk_size: u64,
         block_time: u64,
     ) -> Result<Arc<Self>, HistoryError> {
-        let filter_hash = crate::evm::log_cache::compute_filter_hash(&address, &topics);
+        let filter_hash = crate::evm::log_cache_legacy::compute_filter_hash(&address, &topics);
 
         // Fetch chain_id and a recent anchor block for at() estimation.
         let chain_id = provider.get_chain_id().await
@@ -252,7 +252,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         let scanned = self.cache.get_scanned_ranges(&self.filter_hash)
             .map_err(|e| HistoryError::internal(e.to_string()))?;
 
-        let gaps = crate::evm::log_cache::compute_gaps((start_block, end_block), &scanned);
+        let gaps = crate::evm::log_cache_legacy::compute_gaps((start_block, end_block), &scanned);
 
         if gaps.is_empty() {
             tracing::trace!(start_block, end_block, "cache hit");
@@ -834,7 +834,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistoryBackend<EvmEv
             .get_scanned_ranges(&self.filter_hash)
             .unwrap_or_default();
         let gaps =
-            crate::evm::log_cache::compute_gaps((from.block_number, to.block_number), &scanned);
+            crate::evm::log_cache_legacy::compute_gaps((from.block_number, to.block_number), &scanned);
         gaps.iter()
             .map(|&(s, e)| (e - s) / self.chunk_size + 1)
             .sum()
@@ -858,7 +858,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistoryBackend<EvmEv
 mod tests {
     use super::*;
     use crate::arch::Position;
-    use crate::evm::log_cache::compute_filter_hash;
+    use crate::evm::log_cache_legacy::compute_filter_hash;
     use alloy::primitives::{Address, Bytes, LogData, B256};
     use alloy::providers::ProviderBuilder;
     use alloy::rpc::types::Log;
