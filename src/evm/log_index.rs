@@ -13,20 +13,52 @@
 //! at the cost of one bookkeeping `Vec<(u64, u64)>` of windows already
 //! pulled in.
 //!
-//! Scope of this commit (Phase 1b scaffold): types, page insertion (the
-//! four late-item cases), and lazy-load of scanned ranges. The
-//! `items()` async generator, `first_*` / `last_*` navigation methods,
-//! and the fetcher-driven singleflight follow in a subsequent commit
-//! before the Phase 1b review checkpoint.
+//! This module owns: types, page insertion (four late-item cases),
+//! lazy-load of scanned ranges, the fetcher-driven singleflight, the
+//! `items()` async stream, and the cached-only navigation methods
+//! (`first_at_or_after`, `first_after`, `last_at_or_before`,
+//! `last_before`). Wiring into `EvmLogHistory` lands in Phase 1c.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::ops::Bound;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use alloy::rpc::types::Log;
+use futures_core::Stream;
 use tokio::sync::Notify;
 
 use super::log_store::LogStore;
 use crate::arch::HistoryError;
+
+// ============================================================
+// Fetcher
+// ============================================================
+
+/// Fills a gap on demand. Returns the [`LogPage`] for the requested
+/// inclusive block range `[from_block, to_block]`.
+///
+/// In production this wraps `eth_getLogs`; tests pass a closure to make
+/// `LogIndex` pure-Rust testable.
+pub type Fetcher = Arc<
+    dyn Fn(u64, u64) -> Pin<Box<dyn Future<Output = Result<LogPage, HistoryError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Build a [`Fetcher`] that always errors. Useful in tests that should
+/// never trigger a fetch — if the fetcher is invoked the test fails
+/// with a clear message.
+pub fn never_fetch() -> Fetcher {
+    Arc::new(|_, _| {
+        Box::pin(async {
+            Err(HistoryError::internal(
+                "never_fetch fetcher was invoked: an unexpected gap fill was triggered",
+            ))
+        })
+    })
+}
 
 // ============================================================
 // BlockPos — position type for the tree
@@ -184,6 +216,7 @@ pub struct LogPage {
 pub struct LogIndex {
     store: Arc<LogStore>,
     filter_hash: [u8; 32],
+    fetcher: Fetcher,
     /// Aligned scanned-range chunk size (blocks). Determines the
     /// granularity at which gaps get fetched and the alignment of
     /// `scanned_ranges` rows recorded in [`LogStore`].
@@ -198,20 +231,22 @@ pub struct LogIndex {
 impl LogIndex {
     /// Construct a fresh, empty index over `store` for `filter_hash`.
     /// Aligned chunk size defaults to `1000` blocks via [`Self::with_chunk_size`].
-    pub fn new(store: Arc<LogStore>, filter_hash: [u8; 32]) -> Self {
-        Self::with_chunk_size(store, filter_hash, 1000)
+    pub fn new(store: Arc<LogStore>, filter_hash: [u8; 32], fetcher: Fetcher) -> Self {
+        Self::with_chunk_size(store, filter_hash, fetcher, 1000)
     }
 
     /// Like [`Self::new`] but with an explicit aligned chunk size.
     pub fn with_chunk_size(
         store: Arc<LogStore>,
         filter_hash: [u8; 32],
+        fetcher: Fetcher,
         chunk_size: u64,
     ) -> Self {
         assert!(chunk_size > 0, "chunk_size must be positive");
         Self {
             store,
             filter_hash,
+            fetcher,
             chunk_size,
             tree: Mutex::new(BTreeMap::new()),
             loaded_windows: Mutex::new(Vec::new()),
@@ -461,6 +496,582 @@ impl LogIndex {
             .push((aligned_from, aligned_to));
         Ok(())
     }
+
+    // --------------------------------------------------------
+    // Cached-only navigation (no fetching)
+    // --------------------------------------------------------
+
+    /// First cached log at or after `(block, log_index)`. Pure tree
+    /// lookup: never triggers a fetch and never blocks on a peer's fetch.
+    /// Empty (tombstone) ranges are skipped. Returns `None` once the
+    /// search exits a contiguous cached region (i.e. hits a gap or the
+    /// end of the tree).
+    pub fn first_at_or_after(
+        &self,
+        block: u64,
+        log_index: u32,
+    ) -> Result<Option<Log>, HistoryError> {
+        self.cached_navigate(NavDir::ForwardInclusive, block, log_index)
+    }
+
+    /// First cached log strictly after `(block, log_index)`.
+    pub fn first_after(
+        &self,
+        block: u64,
+        log_index: u32,
+    ) -> Result<Option<Log>, HistoryError> {
+        self.cached_navigate(NavDir::ForwardExclusive, block, log_index)
+    }
+
+    /// Last cached log at or before `(block, log_index)`.
+    pub fn last_at_or_before(
+        &self,
+        block: u64,
+        log_index: u32,
+    ) -> Result<Option<Log>, HistoryError> {
+        self.cached_navigate(NavDir::BackwardInclusive, block, log_index)
+    }
+
+    /// Last cached log strictly before `(block, log_index)`.
+    pub fn last_before(
+        &self,
+        block: u64,
+        log_index: u32,
+    ) -> Result<Option<Log>, HistoryError> {
+        self.cached_navigate(NavDir::BackwardExclusive, block, log_index)
+    }
+
+    fn cached_navigate(
+        &self,
+        dir: NavDir,
+        block: u64,
+        log_index: u32,
+    ) -> Result<Option<Log>, HistoryError> {
+        let pivot = BlockPos::At { block, log_index };
+        let log_ref_opt = {
+            let tree = self.tree.lock().unwrap();
+            match dir {
+                NavDir::ForwardInclusive | NavDir::ForwardExclusive => {
+                    let from = match dir {
+                        NavDir::ForwardInclusive => Bound::Included(pivot),
+                        NavDir::ForwardExclusive => Bound::Excluded(pivot),
+                        _ => unreachable!(),
+                    };
+                    let mut last_end: Option<BlockPos> = None;
+                    let mut found = None;
+                    for (&_key, r) in tree.range((from, Bound::Unbounded)) {
+                        // Tombstone range — skip but track contiguity.
+                        if r.item.is_none() {
+                            // Detect a gap between the previous range's end
+                            // and this range's start.
+                            if let Some(prev_end) = last_end {
+                                if r.start > prev_end {
+                                    // Gap — cached region ends here.
+                                    break;
+                                }
+                            } else {
+                                // First range we examined. Its `start` should
+                                // sit below our pivot for the scan to be
+                                // contiguous from the pivot onward.
+                                if r.start > pivot {
+                                    break;
+                                }
+                            }
+                            last_end = Some(r.end);
+                            continue;
+                        }
+                        // Filled range. Item sits at r.end.
+                        // The first filled range whose end satisfies our
+                        // direction is the answer.
+                        let satisfies = match dir {
+                            NavDir::ForwardInclusive => r.end >= pivot,
+                            NavDir::ForwardExclusive => r.end > pivot,
+                            _ => unreachable!(),
+                        };
+                        if !satisfies {
+                            last_end = Some(r.end);
+                            continue;
+                        }
+                        // Contiguity check: the range we're about to yield
+                        // must abut the previous cached region or contain
+                        // our pivot.
+                        if let Some(prev_end) = last_end {
+                            if r.start > prev_end {
+                                break;
+                            }
+                        } else if r.start > pivot {
+                            break;
+                        }
+                        found = Some(r.item.expect("filled"));
+                        break;
+                    }
+                    let _ = last_end;
+                    found
+                }
+                NavDir::BackwardInclusive | NavDir::BackwardExclusive => {
+                    let upper = match dir {
+                        NavDir::BackwardInclusive => Bound::Included(pivot),
+                        NavDir::BackwardExclusive => Bound::Excluded(pivot),
+                        _ => unreachable!(),
+                    };
+                    let mut last_start: Option<BlockPos> = None;
+                    let mut found = None;
+                    for (&_key, r) in tree.range((Bound::Unbounded, upper)).rev() {
+                        if r.item.is_none() {
+                            if let Some(prev_start) = last_start {
+                                if r.end < prev_start {
+                                    break;
+                                }
+                            } else if r.end < pivot {
+                                // Cached region doesn't reach our pivot.
+                                break;
+                            }
+                            last_start = Some(r.start);
+                            continue;
+                        }
+                        let satisfies = match dir {
+                            NavDir::BackwardInclusive => r.end <= pivot,
+                            NavDir::BackwardExclusive => r.end < pivot,
+                            _ => unreachable!(),
+                        };
+                        if !satisfies {
+                            last_start = Some(r.start);
+                            continue;
+                        }
+                        if let Some(prev_start) = last_start {
+                            if r.end < prev_start {
+                                break;
+                            }
+                        }
+                        found = Some(r.item.expect("filled"));
+                        break;
+                    }
+                    found
+                }
+            }
+        };
+        match log_ref_opt {
+            Some(lr) => self.resolve(&lr).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve a [`LogRef`] to a full [`Log`] via [`LogStore`]. Returns
+    /// `ChainReorg` if the cached block has since been marked reorged.
+    fn resolve(&self, lr: &LogRef) -> Result<Log, HistoryError> {
+        match self
+            .store
+            .get_log_by_ref(&self.filter_hash, &lr.block_hash, lr.log_index)
+            .map_err(|e| HistoryError::internal(format!("get_log_by_ref: {e}")))?
+        {
+            Some(log) => Ok(log),
+            None => Err(HistoryError::ChainReorg),
+        }
+    }
+
+    // --------------------------------------------------------
+    // ensure_cached + singleflight
+    // --------------------------------------------------------
+
+    /// Fill any gaps in `[from_block, to_block]` by calling the fetcher.
+    /// Concurrent callers share work via per-range [`Notify`] sentinels —
+    /// the first arrival at a gap installs the notify, fetches, drops the
+    /// notify, and notifies waiters; later arrivals see the notify, wait
+    /// on it, and re-walk.
+    pub async fn ensure_cached(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<(), HistoryError> {
+        self.ensure_window_loaded(from_block, to_block)?;
+
+        let from_pos = BlockPos::before_block(from_block);
+        let to_pos = BlockPos::end_of_block(to_block);
+        loop {
+            let action = self.find_next_gap_or_wait(from_pos, to_pos);
+            match action {
+                NextStep::Done => return Ok(()),
+                NextStep::Wait(notify) => {
+                    notify.notified().await;
+                }
+                NextStep::FillGap {
+                    start_pos,
+                    end_pos,
+                    notify,
+                } => {
+                    // We hold the in-tree fetch notify; fetch outside the lock.
+                    let (block_from, block_to) = gap_block_range(start_pos, end_pos);
+                    let fetch_result = (self.fetcher)(block_from, block_to).await;
+                    // Always remove the placeholder + notify on completion.
+                    self.finalize_gap_fill(start_pos, end_pos, fetch_result.as_ref().ok())?;
+                    notify.notify_waiters();
+                    fetch_result?;
+                }
+            }
+        }
+    }
+
+    /// Walk the tree (under lock) from `from` toward `to` looking for the
+    /// next gap, in-flight fetch, or completion. Returns an action without
+    /// holding any locks across an await.
+    fn find_next_gap_or_wait(&self, from: BlockPos, to: BlockPos) -> NextStep {
+        if from >= to {
+            return NextStep::Done;
+        }
+        let mut tree = self.tree.lock().unwrap();
+        let mut cursor = from;
+        loop {
+            let next = tree
+                .range((Bound::Excluded(cursor), Bound::Unbounded))
+                .next()
+                .map(|(_, r)| (r.start, r.end, r.fetch.clone()));
+            match next {
+                None => {
+                    // No range past cursor — trailing gap (cursor, to].
+                    let notify = Arc::new(Notify::new());
+                    let placeholder = Range {
+                        start: cursor,
+                        end: to,
+                        item: None,
+                        fetch: Some(notify.clone()),
+                    };
+                    tree.insert(to, placeholder);
+                    return NextStep::FillGap {
+                        start_pos: cursor,
+                        end_pos: to,
+                        notify,
+                    };
+                }
+                Some((start, _end, Some(notify))) => {
+                    if start > cursor {
+                        // Gap before the in-flight range — fill the gap (we win the race).
+                        let gap_end = if start < to { start } else { to };
+                        let our_notify = Arc::new(Notify::new());
+                        let placeholder = Range {
+                            start: cursor,
+                            end: gap_end,
+                            item: None,
+                            fetch: Some(our_notify.clone()),
+                        };
+                        tree.insert(gap_end, placeholder);
+                        return NextStep::FillGap {
+                            start_pos: cursor,
+                            end_pos: gap_end,
+                            notify: our_notify,
+                        };
+                    }
+                    // We're inside an in-flight range — wait for it. After
+                    // waking we'll re-walk from `cursor`, so the range's end
+                    // doesn't need to be threaded out of the closure.
+                    return NextStep::Wait(notify);
+                }
+                Some((start, end, None)) => {
+                    if start > cursor {
+                        // Gap before this range.
+                        let gap_end = if start < to { start } else { to };
+                        let our_notify = Arc::new(Notify::new());
+                        let placeholder = Range {
+                            start: cursor,
+                            end: gap_end,
+                            item: None,
+                            fetch: Some(our_notify.clone()),
+                        };
+                        tree.insert(gap_end, placeholder);
+                        return NextStep::FillGap {
+                            start_pos: cursor,
+                            end_pos: gap_end,
+                            notify: our_notify,
+                        };
+                    }
+                    // No gap; range is fully cached. Advance and continue.
+                    if end >= to {
+                        return NextStep::Done;
+                    }
+                    cursor = end;
+                }
+            }
+        }
+    }
+
+    /// Remove the placeholder fetch range and insert any fetched logs as
+    /// proper Range entries. Called after the fetcher returns (success or
+    /// failure). On failure we just remove the placeholder so a subsequent
+    /// caller retries.
+    fn finalize_gap_fill(
+        &self,
+        start_pos: BlockPos,
+        end_pos: BlockPos,
+        page: Option<&LogPage>,
+    ) -> Result<(), HistoryError> {
+        let mut tree = self.tree.lock().unwrap();
+        // Drop placeholder.
+        tree.remove(&end_pos);
+        let Some(page) = page else { return Ok(()) };
+        // Translate page items into Ranges chained from start_pos to end_pos.
+        let mut prev = start_pos;
+        for log in &page.items {
+            let Some(item) = log_ref_from(log) else {
+                continue;
+            };
+            let pos = item.pos();
+            if pos <= prev || pos > end_pos {
+                continue;
+            }
+            tree.insert(pos, Range::filled(prev, pos, item));
+            prev = pos;
+        }
+        if end_pos > prev {
+            tree.insert(end_pos, Range::empty(prev, end_pos));
+        }
+        // Persist to LogStore so the next process sees the same shape.
+        drop(tree);
+        if !page.items.is_empty() {
+            self.store
+                .insert_logs(&self.filter_hash, &page.items)
+                .map_err(|e| HistoryError::internal(format!("insert_logs: {e}")))?;
+        }
+        self.store
+            .record_scanned_range(
+                &self.filter_hash,
+                page.from_block,
+                page.to_block,
+                &page.end_block_hash,
+            )
+            .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))?;
+        Ok(())
+    }
+
+    // --------------------------------------------------------
+    // items() async stream
+    // --------------------------------------------------------
+
+    /// Yield every cached and fetched-on-demand log whose position is
+    /// in `(from, to]`, in ascending order. Closes when `to` is reached.
+    ///
+    /// Mirrors the reference `RangeTree.items` (history.ts:872–915): gaps in
+    /// the tree trigger a fetcher call on the consuming task; in-flight
+    /// fetches block on the notify. Cancellation is by dropping the
+    /// stream (which drops the Arc<Self> capture).
+    pub fn items(
+        self: Arc<Self>,
+        from: BlockPos,
+        to: BlockPos,
+    ) -> Pin<Box<dyn Stream<Item = Result<Log, HistoryError>> + Send>> {
+        use futures_util::stream::unfold;
+        let state = ItemsState {
+            index: self,
+            cursor: from,
+            to,
+            done: false,
+        };
+        Box::pin(unfold(state, |mut state| async move {
+            if state.done || state.cursor >= state.to {
+                return None;
+            }
+            match state.index.clone().next_yield(state.cursor, state.to).await {
+                Ok(Some((log, advanced))) => {
+                    state.cursor = advanced;
+                    Some((Ok(log), state))
+                }
+                Ok(None) => {
+                    state.done = true;
+                    None
+                }
+                Err(e) => {
+                    state.done = true;
+                    Some((Err(e), state))
+                }
+            }
+        }))
+    }
+
+    /// Internal helper for [`Self::items`] — walks the tree until it can
+    /// yield exactly one item or determines there's nothing left in
+    /// `(from, to]`. Same dispatch as [`Self::find_next_gap_or_wait`] but
+    /// also yields filled items.
+    async fn next_yield(
+        self: Arc<Self>,
+        mut from: BlockPos,
+        to: BlockPos,
+    ) -> Result<Option<(Log, BlockPos)>, HistoryError> {
+        loop {
+            if from >= to {
+                return Ok(None);
+            }
+            let snap = self.snapshot_walk(from, to);
+            match snap {
+                WalkStep::Yield(item, next_from) => {
+                    let log = self.resolve(&item)?;
+                    return Ok(Some((log, next_from)));
+                }
+                WalkStep::Skip(next_from) => {
+                    from = next_from;
+                }
+                WalkStep::FillGap {
+                    start_pos,
+                    end_pos,
+                    notify,
+                } => {
+                    let (block_from, block_to) = gap_block_range(start_pos, end_pos);
+                    let result = (self.fetcher)(block_from, block_to).await;
+                    self.finalize_gap_fill(start_pos, end_pos, result.as_ref().ok())?;
+                    notify.notify_waiters();
+                    result?;
+                    // Tree changed; restart from current cursor.
+                }
+                WalkStep::Wait(notify) => {
+                    notify.notified().await;
+                }
+                WalkStep::Done => return Ok(None),
+            }
+        }
+    }
+
+    /// One step of the items() walk performed entirely under the tree
+    /// mutex. Side effect: installs a fetch placeholder + notify when
+    /// returning [`WalkStep::FillGap`].
+    fn snapshot_walk(&self, from: BlockPos, to: BlockPos) -> WalkStep {
+        let mut tree = self.tree.lock().unwrap();
+        let next = tree
+            .range((Bound::Excluded(from), Bound::Unbounded))
+            .next()
+            .map(|(_, r)| (r.start, r.end, r.fetch.clone(), r.item));
+        let Some((start, end, fetch_opt, item_opt)) = next else {
+            // No range past cursor — trailing gap.
+            if to <= from {
+                return WalkStep::Done;
+            }
+            let notify = Arc::new(Notify::new());
+            tree.insert(
+                to,
+                Range {
+                    start: from,
+                    end: to,
+                    item: None,
+                    fetch: Some(notify.clone()),
+                },
+            );
+            return WalkStep::FillGap {
+                start_pos: from,
+                end_pos: to,
+                notify,
+            };
+        };
+        if let Some(notify) = fetch_opt {
+            if start > from {
+                // Gap to fill before the in-flight range.
+                let gap_end = if start < to { start } else { to };
+                let our_notify = Arc::new(Notify::new());
+                tree.insert(
+                    gap_end,
+                    Range {
+                        start: from,
+                        end: gap_end,
+                        item: None,
+                        fetch: Some(our_notify.clone()),
+                    },
+                );
+                return WalkStep::FillGap {
+                    start_pos: from,
+                    end_pos: gap_end,
+                    notify: our_notify,
+                };
+            }
+            return WalkStep::Wait(notify);
+        }
+        if start > from {
+            // Gap.
+            let gap_end = if start < to { start } else { to };
+            let our_notify = Arc::new(Notify::new());
+            tree.insert(
+                gap_end,
+                Range {
+                    start: from,
+                    end: gap_end,
+                    item: None,
+                    fetch: Some(our_notify.clone()),
+                },
+            );
+            return WalkStep::FillGap {
+                start_pos: from,
+                end_pos: gap_end,
+                notify: our_notify,
+            };
+        }
+        // start <= from. Use this range.
+        if end > to {
+            // Range extends past our cap. If item lies past `to`, done.
+            // Filled at end > to means item is outside our window.
+            return WalkStep::Done;
+        }
+        match item_opt {
+            Some(item) => WalkStep::Yield(item, end),
+            None => WalkStep::Skip(end),
+        }
+    }
+}
+
+// ============================================================
+// Private supporting types
+// ============================================================
+
+#[derive(Copy, Clone)]
+enum NavDir {
+    ForwardInclusive,
+    ForwardExclusive,
+    BackwardInclusive,
+    BackwardExclusive,
+}
+
+enum NextStep {
+    Done,
+    FillGap {
+        start_pos: BlockPos,
+        end_pos: BlockPos,
+        notify: Arc<Notify>,
+    },
+    Wait(Arc<Notify>),
+}
+
+enum WalkStep {
+    Yield(LogRef, BlockPos),
+    Skip(BlockPos),
+    FillGap {
+        start_pos: BlockPos,
+        end_pos: BlockPos,
+        notify: Arc<Notify>,
+    },
+    Wait(Arc<Notify>),
+    Done,
+}
+
+struct ItemsState {
+    index: Arc<LogIndex>,
+    cursor: BlockPos,
+    to: BlockPos,
+    done: bool,
+}
+
+/// Convert a position-level gap `(start, end]` to inclusive block-level
+/// bounds `(from_block, to_block)` suitable for the fetcher. If `start`
+/// is at the end of a block, advance past that block. If `start` is
+/// `Bottom`, start from block 0.
+fn gap_block_range(start: BlockPos, end: BlockPos) -> (u64, u64) {
+    let from_block = match start {
+        BlockPos::Bottom => 0,
+        BlockPos::At { block, log_index } => {
+            if log_index == u32::MAX {
+                block.saturating_add(1)
+            } else {
+                block
+            }
+        }
+    };
+    let to_block = match end {
+        BlockPos::Bottom => 0,
+        BlockPos::At { block, .. } => block,
+    };
+    (from_block, to_block)
 }
 
 // ============================================================
@@ -535,7 +1146,11 @@ mod tests {
     }
 
     fn mk_index() -> LogIndex {
-        LogIndex::new(Arc::new(LogStore::open_in_memory().unwrap()), FH)
+        LogIndex::new(
+            Arc::new(LogStore::open_in_memory().unwrap()),
+            FH,
+            never_fetch(),
+        )
     }
 
     // -- BlockPos ordering --
@@ -718,7 +1333,7 @@ mod tests {
             .record_scanned_range(&FH, 100, 200, &HASH_A)
             .unwrap();
 
-        let idx = LogIndex::with_chunk_size(store, FH, 1000);
+        let idx = LogIndex::with_chunk_size(store, FH, never_fetch(), 1000);
         assert_eq!(idx.len(), 0, "tree starts empty");
 
         idx.ensure_window_loaded(100, 200).unwrap();
@@ -766,5 +1381,200 @@ mod tests {
         assert!(r.is_empty(), "empty range survives as a tombstone");
         assert_eq!(r.start, BlockPos::before_block(100));
         assert_eq!(r.end, BlockPos::end_of_block(200));
+    }
+
+    // -- navigation (cached-only) --
+
+    #[tokio::test]
+    async fn first_at_or_after_finds_next_cached_log() {
+        let idx = Arc::new(mk_index());
+        idx.insert_page(&LogPage {
+            from_block: 100,
+            to_block: 200,
+            items: vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)],
+            end_block_hash: HASH_B,
+        });
+        // We need the logs to exist in LogStore for resolve() to find them.
+        idx.store
+            .insert_logs(&FH, &[mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)])
+            .unwrap();
+
+        let log = idx.first_at_or_after(140, 0).unwrap().unwrap();
+        assert_eq!(log.block_number, Some(150));
+
+        let log = idx.first_at_or_after(150, 0).unwrap().unwrap();
+        assert_eq!(log.block_number, Some(150));
+
+        let log = idx.first_at_or_after(150, 1).unwrap().unwrap();
+        assert_eq!(log.block_number, Some(180));
+
+        // After the last cached item: empty-tail range is contiguous up to
+        // block 200, but there are no items past 180; we return None.
+        let none = idx.first_at_or_after(201, 0).unwrap();
+        assert!(none.is_none(), "past cached region returns None");
+    }
+
+    #[tokio::test]
+    async fn last_at_or_before_finds_prev_cached_log() {
+        let idx = Arc::new(mk_index());
+        idx.insert_page(&LogPage {
+            from_block: 100,
+            to_block: 200,
+            items: vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)],
+            end_block_hash: HASH_B,
+        });
+        idx.store
+            .insert_logs(&FH, &[mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)])
+            .unwrap();
+
+        let log = idx.last_at_or_before(200, 0).unwrap().unwrap();
+        assert_eq!(log.block_number, Some(180));
+
+        let log = idx.last_at_or_before(180, 2).unwrap().unwrap();
+        assert_eq!(log.block_number, Some(180));
+
+        let log = idx.last_before(180, 2).unwrap().unwrap();
+        assert_eq!(log.block_number, Some(150));
+    }
+
+    // -- items() with fetcher --
+
+    fn one_log_fetcher(log_block: u64, log_idx: u32, hash: [u8; 32]) -> Fetcher {
+        Arc::new(move |from, to| {
+            let from_block = from;
+            let to_block = to;
+            let hash = hash;
+            Box::pin(async move {
+                Ok(LogPage {
+                    from_block,
+                    to_block,
+                    items: if log_block >= from_block && log_block <= to_block {
+                        vec![mk_log(log_block, log_idx as u64, hash)]
+                    } else {
+                        vec![]
+                    },
+                    end_block_hash: hash,
+                })
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn items_walks_filled_ranges_yields_in_order() {
+        use futures_util::StreamExt;
+        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let logs = vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)];
+        store.insert_logs(&FH, &logs).unwrap();
+        let idx = Arc::new(LogIndex::new(store, FH, never_fetch()));
+        idx.insert_page(&LogPage {
+            from_block: 100,
+            to_block: 200,
+            items: logs,
+            end_block_hash: HASH_B,
+        });
+        let mut stream = idx
+            .clone()
+            .items(BlockPos::before_block(100), BlockPos::end_of_block(200));
+        let a = stream.next().await.unwrap().unwrap();
+        assert_eq!(a.block_number, Some(150));
+        let b = stream.next().await.unwrap().unwrap();
+        assert_eq!(b.block_number, Some(180));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn items_into_uncached_gap_calls_store_and_caches() {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher: Fetcher = {
+            let calls = calls.clone();
+            Arc::new(move |from, to| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(LogPage {
+                        from_block: from,
+                        to_block: to,
+                        items: vec![mk_log(150, 0, HASH_A)],
+                        end_block_hash: HASH_A,
+                    })
+                })
+            })
+        };
+        let idx = Arc::new(LogIndex::new(store.clone(), FH, fetcher));
+
+        // First walk fetches.
+        let mut stream = idx
+            .clone()
+            .items(BlockPos::before_block(100), BlockPos::end_of_block(200));
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.block_number, Some(150));
+        drop(stream);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Second walk over the same range should NOT refetch — the gap has
+        // been backfilled both in the in-memory tree and in LogStore.
+        let mut stream2 = idx
+            .clone()
+            .items(BlockPos::before_block(100), BlockPos::end_of_block(200));
+        let first2 = stream2.next().await.unwrap().unwrap();
+        assert_eq!(first2.block_number, Some(150));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no refetch on warm tree");
+
+        // And the persisted scanned_ranges row is there.
+        let ranges = store.get_scanned_ranges(&FH).unwrap();
+        assert!(!ranges.is_empty(), "scanned range was persisted");
+    }
+
+    // -- singleflight --
+
+    #[tokio::test]
+    async fn concurrent_searches_in_same_gap_fire_one_fetch() {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher: Fetcher = {
+            let calls = calls.clone();
+            Arc::new(move |from, to| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    // Give peers time to enter the wait state.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Ok(LogPage {
+                        from_block: from,
+                        to_block: to,
+                        items: vec![mk_log(150, 0, HASH_A)],
+                        end_block_hash: HASH_A,
+                    })
+                })
+            })
+        };
+        let idx = Arc::new(LogIndex::new(store, FH, fetcher));
+
+        // Spawn 5 concurrent walkers over the same uncached gap.
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let idx = idx.clone();
+            handles.push(tokio::spawn(async move {
+                let mut s =
+                    idx.items(BlockPos::before_block(100), BlockPos::end_of_block(200));
+                s.next().await.map(|r| r.map(|log| log.block_number))
+            }));
+        }
+        for h in handles {
+            let result = h.await.unwrap();
+            let block = result.unwrap().unwrap();
+            assert_eq!(block, Some(150));
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "exactly one fetch served 5 concurrent walkers"
+        );
     }
 }
