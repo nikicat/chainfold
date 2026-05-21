@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy::rpc::types::Log;
 use futures_core::Stream;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Notify;
 
 use super::log_store::LogStore;
@@ -197,6 +198,7 @@ impl Range {
 ///
 /// `end_block_hash` lets the consumer record the matching scanned-range
 /// entry in [`LogStore::record_scanned_range`].
+#[derive(Clone)]
 pub struct LogPage {
     pub from_block: u64,
     pub to_block: u64,
@@ -226,6 +228,12 @@ pub struct LogIndex {
     /// `LogStore::get_scanned_ranges`. Tracked so a second visit to the
     /// same window does not re-slurp.
     loaded_windows: Mutex<Vec<(u64, u64)>>,
+    /// Optional async drain. When attached, every page passed to
+    /// [`Self::insert_page`] is cloned onto the channel and persisted to
+    /// [`LogStore`] by a background task. None means the index is purely
+    /// in-memory (tests, or the legacy fetcher-driven path which writes
+    /// inline in [`Self::finalize_gap_fill`]).
+    drain_tx: Mutex<Option<UnboundedSender<LogPage>>>,
 }
 
 impl LogIndex {
@@ -250,7 +258,51 @@ impl LogIndex {
             chunk_size,
             tree: Mutex::new(BTreeMap::new()),
             loaded_windows: Mutex::new(Vec::new()),
+            drain_tx: Mutex::new(None),
         }
+    }
+
+    /// Spawn a background task that persists every page passed to
+    /// [`Self::insert_page`] to [`LogStore`]. Returns `false` (and skips
+    /// spawning) if a drain is already attached.
+    ///
+    /// Items are written via [`LogStore::insert_logs`]; the scanned range
+    /// is recorded via [`LogStore::record_scanned_range`]. Failures are
+    /// logged but never propagated — the in-memory tree remains the source
+    /// of truth on the live-event path.
+    pub fn attach_drain(&self) -> bool {
+        let mut drain = self.drain_tx.lock().unwrap();
+        if drain.is_some() {
+            return false;
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LogPage>();
+        let store = self.store.clone();
+        let filter_hash = self.filter_hash;
+        tokio::spawn(async move {
+            while let Some(page) = rx.recv().await {
+                if !page.items.is_empty() {
+                    if let Err(e) = store.insert_logs(&filter_hash, &page.items) {
+                        tracing::warn!(error = %e, "drain insert_logs");
+                    }
+                }
+                if let Err(e) = store.record_scanned_range(
+                    &filter_hash,
+                    page.from_block,
+                    page.to_block,
+                    &page.end_block_hash,
+                ) {
+                    tracing::warn!(error = %e, "drain record_scanned_range");
+                }
+            }
+        });
+        *drain = Some(tx);
+        true
+    }
+
+    /// Whether a drain task is currently attached. Test helper.
+    #[cfg(test)]
+    pub(crate) fn has_drain(&self) -> bool {
+        self.drain_tx.lock().unwrap().is_some()
     }
 
     /// Filter hash this index serves.
@@ -349,6 +401,15 @@ impl LogIndex {
 
         for r in new_ranges {
             tree.insert(r.end, r);
+        }
+        drop(tree);
+
+        // Async drain to LogStore — see attach_drain. Cloning the page is
+        // necessary because `page: &LogPage` is borrowed; the drain task
+        // owns its copy. In-memory tree update above is the source of truth
+        // for navigation; persistence is best-effort.
+        if let Some(tx) = self.drain_tx.lock().unwrap().as_ref() {
+            let _ = tx.send(page.clone());
         }
     }
 
@@ -1575,6 +1636,70 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "exactly one fetch served 5 concurrent walkers"
+        );
+    }
+
+    // -- attach_drain: async sqlite persistence --
+
+    #[tokio::test]
+    async fn insert_page_drains_to_store_asynchronously() {
+        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let idx = LogIndex::new(store.clone(), FH, never_fetch());
+        assert!(idx.attach_drain(), "first attach succeeds");
+        assert!(!idx.attach_drain(), "second attach is a no-op");
+
+        let page = LogPage {
+            from_block: 100,
+            to_block: 200,
+            items: vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)],
+            end_block_hash: HASH_B,
+        };
+
+        // The synchronous tree update must complete before the drain runs.
+        // Right after insert_page returns, the tree has the entries but the
+        // store has not been written yet (drain task hasn't been polled).
+        idx.insert_page(&page);
+        assert_eq!(idx.len(), 3, "tree updated synchronously");
+
+        // Yield so the drain task can run.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            let logs = store.get_logs_in_range(&FH, 100, 200).unwrap();
+            if logs.len() == 2 {
+                break;
+            }
+        }
+
+        let logs = store.get_logs_in_range(&FH, 100, 200).unwrap();
+        assert_eq!(logs.len(), 2, "drain wrote both logs to the store");
+        let ranges = store.get_scanned_ranges(&FH).unwrap();
+        assert_eq!(ranges, vec![(100, 200)], "drain recorded the scanned range");
+    }
+
+    #[tokio::test]
+    async fn insert_page_without_drain_does_not_touch_store() {
+        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let idx = LogIndex::new(store.clone(), FH, never_fetch());
+        assert!(!idx.has_drain());
+
+        idx.insert_page(&LogPage {
+            from_block: 100,
+            to_block: 200,
+            items: vec![mk_log(150, 0, HASH_A)],
+            end_block_hash: HASH_A,
+        });
+
+        // Give any background work a chance to run.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            store.get_logs_in_range(&FH, 100, 200).unwrap().len(),
+            0,
+            "no drain attached — store remains empty"
+        );
+        assert!(
+            store.get_scanned_ranges(&FH).unwrap().is_empty(),
+            "no drain attached — scanned ranges remain empty"
         );
     }
 }

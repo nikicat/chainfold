@@ -152,9 +152,15 @@ async fn run_transfers<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     if follow {
         println!("Following new events (Ctrl+C to stop)...\n");
+        let mut _subscribers = Vec::new();
         for backend in &_log_backends {
-            let _handle = backend.start_tip_tracking(std::time::Duration::from_secs(2));
-            backend.poll_tip().await?;
+            _subscribers.push(
+                backend
+                    .subscribe(chainfold::evm::SubscribeTransport::Poll {
+                        interval: std::time::Duration::from_secs(2),
+                    })
+                    .await?,
+            );
         }
 
         let mut count = 0;
@@ -286,9 +292,15 @@ async fn run_balances<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     if follow {
         println!("Following new events (Ctrl+C to stop)...\n");
+        let mut _subscribers = Vec::new();
         for backend in &_log_backends {
-            let _handle = backend.start_tip_tracking(std::time::Duration::from_secs(2));
-            backend.poll_tip().await?;
+            _subscribers.push(
+                backend
+                    .subscribe(chainfold::evm::SubscribeTransport::Poll {
+                        interval: std::time::Duration::from_secs(2),
+                    })
+                    .await?,
+            );
         }
 
         let mut count = 0;

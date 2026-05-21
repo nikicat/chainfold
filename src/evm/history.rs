@@ -13,11 +13,19 @@
 //!
 //! ## Tip tracking
 //!
-//! Call [`start_tip_tracking`](EvmLogHistory::start_tip_tracking) to spawn
-//! a background task that polls the chain head and updates the reactive
-//! [`Store`]s. Without it, `after()` with no cutoff returns `None` at the
+//! Call [`subscribe`](EvmLogHistory::subscribe) to spawn a background
+//! task that delivers fresh log pages and tip updates. With the WS
+//! transport (`SubscribeTransport::Ws`) events arrive sub-second; with
+//! the Poll transport they arrive at the configured interval. Without an
+//! active subscription, `after()` with no cutoff returns `None` at the
 //! tip instead of blocking.
+//!
+//! The deprecated `start_tip_tracking` / `poll_tip` helpers remain for
+//! one release as a thin polling-only path; new code should use
+//! `subscribe()`.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
@@ -34,15 +42,15 @@ use crate::arch::{
 };
 use crate::evm::log_index::{Fetcher, LogIndex, LogPage};
 use crate::evm::log_store::{compute_filter_hash, compute_gaps, BlockHeader, LogStore};
+use crate::evm::subscriber::{
+    EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks,
+};
 
 /// Default chunk size for `eth_getLogs` calls (in blocks).
 const DEFAULT_CHUNK_SIZE: u64 = 1000;
 
 /// Assumed block time in seconds for `at(time)` estimation.
 const DEFAULT_BLOCK_TIME: u64 = 12;
-
-/// Default tip polling interval.
-const DEFAULT_TIP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // ============================================================
 // EvmLogHistory
@@ -176,6 +184,19 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         crate::arch::History::new(Arc::clone(self) as Arc<dyn HistoryBackend<EvmEvent, EvmPosition>>)
     }
 
+    /// Reactive store of the current chain head as an [`EvmPosition`].
+    /// Updates as the subscriber observes new heads.
+    pub fn latest_store(&self) -> &Store<EvmPosition> {
+        &self.latest_store
+    }
+
+    /// 32-byte blake3 hash identifying the (address, topics) filter this
+    /// history is scoped to. Stable across processes; used as the join
+    /// key into [`LogStore`] tables.
+    pub fn filter_hash(&self) -> &[u8; 32] {
+        &self.filter_hash
+    }
+
     /// Get a strong Arc<Self> from the stored weak ref.
     fn arc_self(&self) -> Arc<Self> {
         self.self_ref
@@ -214,17 +235,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     /// Spawn a background task that polls the chain head at `interval`
-    /// and updates the `latest` store. Returns a `JoinHandle` that can
-    /// be used to cancel it.
+    /// and updates the `latest` store. Returns a `JoinHandle`.
     ///
-    /// Without this, `after()` with no cutoff returns `None` at the tip
-    /// instead of blocking for new events.
+    /// Deprecated: prefer [`Self::subscribe`] with
+    /// [`SubscribeTransport::Poll`] or [`SubscribeTransport::Ws`]. The new
+    /// path also persists log pages to [`LogStore`] via the index drain
+    /// and supports reconnect gap-fill; this helper does neither.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use subscribe(SubscribeTransport::Poll { interval }) instead"
+    )]
     pub fn start_tip_tracking(self: &Arc<Self>, interval: Duration) -> JoinHandle<()> {
+        #[allow(deprecated)]
         self.start_tip_tracking_with_cancel(interval, tokio_util::sync::CancellationToken::new())
     }
 
-    /// Same as [`start_tip_tracking`](Self::start_tip_tracking) but accepts
-    /// an external cancellation token.
+    /// Cancellation-aware variant of the deprecated [`Self::start_tip_tracking`].
+    #[deprecated(since = "0.2.0", note = "use subscribe() instead")]
     pub fn start_tip_tracking_with_cancel(
         self: &Arc<Self>,
         interval: Duration,
@@ -245,12 +272,142 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         })
     }
 
+    /// Start a push-based subscription to fresh log pages and tip updates.
+    ///
+    /// Replaces the deprecated `start_tip_tracking` polling loop. Returns
+    /// an [`EvmLogSubscriber`] handle that cancels the background task on
+    /// drop. With the WS transport, new events propagate sub-second; with
+    /// the Poll transport, they arrive every `interval` (HTTP fallback).
+    ///
+    /// Wiring:
+    /// * Each delivered page is fed to [`LogIndex::insert_page`] for the
+    ///   in-memory tree update, then drained asynchronously into
+    ///   [`LogStore`] via [`LogIndex::attach_drain`].
+    /// * Tip advances bump the `latest` reactive store and unblock any
+    ///   navigation calls waiting on [`Self::wait_for_tip_advance`].
+    /// * On reconnect after a transport error, the subscriber calls
+    ///   [`LogIndex::ensure_cached`] for the gap between the last-seen
+    ///   tip and the current tip — duplicates are absorbed by the
+    ///   late-item rules.
+    pub async fn subscribe(
+        self: &Arc<Self>,
+        transport: SubscribeTransport,
+    ) -> Result<EvmLogSubscriber, HistoryError> {
+        // Ensure subscriber-delivered pages get persisted to LogStore.
+        // Idempotent: a second call is a no-op.
+        self.index.attach_drain();
+
+        // Seed `latest` with the current tip so wait_for_tip_advance has a
+        // baseline and reconnect knows where the gap-fill starts.
+        let start_block = self.poll_tip().await?;
+
+        let filter = self.build_filter(None, None);
+
+        let index = self.index.clone();
+        let on_page: Arc<dyn Fn(LogPage) + Send + Sync> = Arc::new(move |page: LogPage| {
+            index.insert_page(&page);
+        });
+
+        let history = Arc::clone(self);
+        let on_tip = Arc::new(move |bn: u64| {
+            let history = history.clone();
+            Box::pin(async move {
+                if let Err(e) = history.update_tip_to(bn).await {
+                    tracing::warn!(block_number = bn, error = %e, "update_tip");
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        });
+
+        let history = Arc::clone(self);
+        let on_reconnect = Arc::new(move |last_tip: u64| {
+            let history = history.clone();
+            Box::pin(async move {
+                if let Err(e) = history.gap_fill_after_reconnect(last_tip).await {
+                    tracing::warn!(last_tip, error = %e, "reconnect gap-fill");
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        });
+
+        let callbacks = SubscriberCallbacks {
+            on_page,
+            on_tip,
+            on_reconnect,
+        };
+
+        Ok(EvmLogSubscriber::start(
+            self.provider.clone(),
+            filter,
+            transport,
+            start_block,
+            callbacks,
+        ))
+    }
+
+    /// Internal: bump the `latest` tip store to `block_number`. Fetches the
+    /// header (cache-first) for hash + timestamp. Used by [`Self::subscribe`].
+    async fn update_tip_to(&self, block_number: u64) -> Result<(), HistoryError> {
+        let header = self.ensure_block_header(block_number).await?;
+        let pos = EvmPosition {
+            chain_id: self.chain_id,
+            block_number,
+            log_index: u32::MAX,
+            block_hash: header.hash,
+            timestamp: header.timestamp,
+            side: Side::After,
+        };
+        let _ = self.latest_tx.send(pos);
+        Ok(())
+    }
+
+    /// Internal: after a transport reconnect, fill the gap between
+    /// `last_tip` and the current chain head via [`LogIndex::ensure_cached`].
+    /// Duplicate logs (already delivered before disconnect) are absorbed by
+    /// the late-item insertion rules.
+    async fn gap_fill_after_reconnect(&self, last_tip: u64) -> Result<(), HistoryError> {
+        let current = self.latest_block_number().await?;
+        if current <= last_tip {
+            return Ok(());
+        }
+        tracing::info!(
+            from = last_tip + 1,
+            to = current,
+            "reconnect gap-fill"
+        );
+        self.index.ensure_cached(last_tip + 1, current).await
+    }
+
+    /// Build an alloy [`Filter`] from the configured address + topics for
+    /// a given block window. `from` and `to` are optional — `None` leaves
+    /// the field unset (used for subscriptions).
+    fn build_filter(&self, from: Option<u64>, to: Option<u64>) -> Filter {
+        let mut filter = Filter::new().address(alloy::primitives::Address::from(self.address));
+        if let Some(f) = from {
+            filter = filter.from_block(f);
+        }
+        if let Some(t) = to {
+            filter = filter.to_block(t);
+        }
+        if let Some(t) = self.topics[0] {
+            filter = filter.event_signature(alloy::primitives::B256::from(t));
+        }
+        if let Some(t) = self.topics[1] {
+            filter = filter.topic1(alloy::primitives::B256::from(t));
+        }
+        if let Some(t) = self.topics[2] {
+            filter = filter.topic2(alloy::primitives::B256::from(t));
+        }
+        if let Some(t) = self.topics[3] {
+            filter = filter.topic3(alloy::primitives::B256::from(t));
+        }
+        filter
+    }
+
     /// Wait for the latest store to advance past `current_block`.
     async fn wait_for_tip_advance(&self, current_block: u64) -> Result<u64, HistoryError> {
         let mut rx = self.latest_tx.subscribe();
         loop {
             rx.changed().await.map_err(|_| {
-                HistoryError::internal("tip tracking channel closed — call start_tip_tracking()")
+                HistoryError::internal("tip channel closed — call subscribe() before tip-blocking navigation")
             })?;
             let pos = rx.borrow_and_update().clone();
             if pos.block_number > current_block {

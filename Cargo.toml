@@ -19,7 +19,7 @@ tokio-util = "0.7"    # CancellationToken (included by default, no "sync" featur
 rusqlite = { version = "0.34", features = ["bundled"] }
 rusqlite_migration = "2"
 postcard = { version = "1", features = ["alloc"] }
-alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types"], optional = true }
+alloy = { version = "1", features = ["provider-http", "provider-ws", "pubsub", "rpc-types", "sol-types"], optional = true }
 tracing = { version = "0.1", optional = true }
 blake3 = { version = "1.8", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
@@ -33,7 +33,7 @@ dirs = { version = "6", optional = true }
 tokio = { version = "1", features = ["rt", "macros"] }
 futures-util = "0.3"
 tempfile = "3"
-alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types", "contract", "json-abi"] }
+alloy = { version = "1", features = ["provider-http", "provider-ws", "pubsub", "rpc-types", "sol-types", "contract", "json-abi"] }
 alloy-node-bindings = "1"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
@@ -57,6 +57,10 @@ required-features = ["evm"]
 
 [[test]]
 name = "phase1_layering"
+required-features = ["evm"]
+
+[[test]]
+name = "phase2_push"
 required-features = ["evm"]
 
 [[example]]

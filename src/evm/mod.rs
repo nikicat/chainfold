@@ -17,6 +17,7 @@ mod log_index;
 mod log_cache_legacy;
 mod history;
 mod retry;
+mod subscriber;
 pub mod erc20;
 
 pub use aligned_ranges::{aligned_block_ranges, AlignedRange};
@@ -29,6 +30,9 @@ pub use log_store::{
 pub use log_cache_legacy::LogCache;
 pub use history::EvmLogHistory;
 pub use retry::rpc_retry_layer;
+pub use subscriber::{
+    AsyncCallback, EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks,
+};
 pub use erc20::{
     decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20BalanceReducer, Erc20Metadata,
     TransferData, TRANSFER_TOPIC,

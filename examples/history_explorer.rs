@@ -277,8 +277,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.follow {
         println!("Following new events (Ctrl+C to stop)...\n");
-        let _handle = backend.start_tip_tracking(std::time::Duration::from_secs(2));
-        backend.poll_tip().await?;
+        let _subscriber = backend
+            .subscribe(chainfold::evm::SubscribeTransport::Poll {
+                interval: std::time::Duration::from_secs(2),
+            })
+            .await?;
 
         let mut count = 0;
         let mut maybe_cursor = history.after(&start, None).await?;
