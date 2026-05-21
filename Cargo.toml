@@ -33,17 +33,27 @@ dirs = { version = "6", optional = true }
 tokio = { version = "1", features = ["rt", "macros"] }
 futures-util = "0.3"
 tempfile = "3"
-alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types"] }
+alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types", "contract", "json-abi"] }
+alloy-node-bindings = "1"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
+dotenvy = "0.15"
 
 [[bin]]
 name = "chainfold"
 path = "src/bin/chainfold/main.rs"
 required-features = ["cli"]
+
+[[test]]
+name = "anvil_smoke"
+required-features = ["evm"]
+
+[[test]]
+name = "mock_provider_smoke"
+required-features = ["evm"]
 
 [[example]]
 name = "history_explorer"
