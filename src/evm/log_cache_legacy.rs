@@ -17,30 +17,38 @@ use alloy::rpc::types::Log;
 
 use super::log_store::{row_to_log, LogStore};
 
-// Re-export helpers and types that history.rs / erc20.rs still import
-// via this module. `versioned_path` and `CACHE_VERSION` live directly on
-// the parent `evm::` module — no legacy alias needed.
-pub use super::log_store::{
-    compute_filter_hash, compute_gaps, BlockHeader, CacheError, CachedErc20Metadata,
-};
+// Re-export helpers and types that downstream code may still import
+// via this module. Most direct imports moved over to `log_store` in
+// Phase 1c; the re-exports here keep the legacy path valid until the
+// module is fully removed.
+pub use super::log_store::{BlockHeader, CacheError, CachedErc20Metadata};
 
 /// Legacy cache surface. Wraps [`LogStore`] and adds navigation queries
 /// that have been moved to `LogIndex` in Phase 1.
+#[deprecated(
+    note = "use `LogStore` + `LogIndex` directly; LogCache is a transitional facade and will be removed after Phase 3"
+)]
 pub struct LogCache {
-    inner: LogStore,
+    inner: std::sync::Arc<LogStore>,
 }
 
 impl LogCache {
     pub fn open(path: &str) -> Result<Self, CacheError> {
         Ok(Self {
-            inner: LogStore::open(path)?,
+            inner: std::sync::Arc::new(LogStore::open(path)?),
         })
     }
 
     pub fn open_in_memory() -> Result<Self, CacheError> {
         Ok(Self {
-            inner: LogStore::open_in_memory()?,
+            inner: std::sync::Arc::new(LogStore::open_in_memory()?),
         })
+    }
+
+    /// Borrow the underlying [`LogStore`]. Used by `EvmLogHistory` to wire
+    /// a `LogIndex` over the same backing storage.
+    pub fn store(&self) -> &std::sync::Arc<LogStore> {
+        &self.inner
     }
 
     // --------------------------------------------------------

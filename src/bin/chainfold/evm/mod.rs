@@ -3,7 +3,7 @@ pub mod erc20;
 use std::sync::Arc;
 
 use alloy::providers::Provider;
-use chainfold::evm::{LogCache, versioned_path, rpc_retry_layer};
+use chainfold::evm::{LogStore, versioned_path, rpc_retry_layer};
 
 use crate::cli::{EvmArgs, EvmCommand};
 use crate::config::Config;
@@ -23,7 +23,7 @@ pub async fn run(
     let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
 
     let db_path = versioned_path(&args.db);
-    let cache = Arc::new(LogCache::open(&db_path)?);
+    let cache = Arc::new(LogStore::open(&db_path)?);
 
     let chain_id = provider.get_chain_id().await?;
     if chain_id != args.chain_id {

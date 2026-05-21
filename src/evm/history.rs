@@ -1,9 +1,15 @@
 //! Concrete `HistoryBackend<EvmEvent, EvmPosition>` backed by an alloy
-//! Provider and [`LogCache`].
+//! Provider, [`LogStore`], and [`LogIndex`].
 //!
 //! This is the first concrete history implementation. It fetches EVM logs
-//! from an RPC provider, caches them in SQLite via `LogCache`, and serves
-//! navigation queries from the cache.
+//! from an RPC provider via the [`LogIndex`] fetcher closure, persists
+//! them in SQLite via [`LogStore`], and serves navigation queries from
+//! the in-memory range tree.
+//!
+//! Phase 1c (refactor.md) replaced the prior `LogCache`-direct surface
+//! with `LogStore` + `LogIndex` so SQLite no longer sits on the navigation
+//! hot path. The four `first_log_*` / `last_log_*` queries that used to
+//! hit `cached_logs` directly now hit the `BTreeMap` in `LogIndex`.
 //!
 //! ## Tip tracking
 //!
@@ -26,7 +32,8 @@ use crate::arch::{
     Cursor, HistoryBackend, HistoryError, SearchEvent, SearchStream, Side, Store,
     Timestamp,
 };
-use crate::evm::log_cache_legacy::{BlockHeader, LogCache};
+use crate::evm::log_index::{Fetcher, LogIndex, LogPage};
+use crate::evm::log_store::{compute_filter_hash, compute_gaps, BlockHeader, LogStore};
 
 /// Default chunk size for `eth_getLogs` calls (in blocks).
 const DEFAULT_CHUNK_SIZE: u64 = 1000;
@@ -47,7 +54,8 @@ const DEFAULT_TIP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Each instance is scoped to a single log filter (address + topics).
 pub struct EvmLogHistory<P> {
     provider: P,
-    cache: Arc<LogCache>,
+    store: Arc<LogStore>,
+    index: Arc<LogIndex>,
     filter_hash: [u8; 32],
     address: [u8; 20],
     topics: [Option<[u8; 32]>; 4],
@@ -81,38 +89,47 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     /// Fetches genesis block timestamp from RPC for `at(time)` estimation.
     pub async fn new(
         provider: P,
-        cache: Arc<LogCache>,
+        store: Arc<LogStore>,
         address: [u8; 20],
         topics: [Option<[u8; 32]>; 4],
     ) -> Result<Arc<Self>, HistoryError> {
-        Self::with_options(provider, cache, address, topics, DEFAULT_CHUNK_SIZE, DEFAULT_BLOCK_TIME).await
+        Self::with_options(provider, store, address, topics, DEFAULT_CHUNK_SIZE, DEFAULT_BLOCK_TIME).await
     }
 
     /// Create with explicit chunk size and block time.
     pub async fn with_options(
         provider: P,
-        cache: Arc<LogCache>,
+        store: Arc<LogStore>,
         address: [u8; 20],
         topics: [Option<[u8; 32]>; 4],
         chunk_size: u64,
         block_time: u64,
     ) -> Result<Arc<Self>, HistoryError> {
-        let filter_hash = crate::evm::log_cache_legacy::compute_filter_hash(&address, &topics);
+        let filter_hash = compute_filter_hash(&address, &topics);
 
         // Fetch chain_id and a recent anchor block for at() estimation.
         let chain_id = provider.get_chain_id().await
             .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
         let anchor_block = provider.get_block_number().await
             .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))?;
-        let anchor_timestamp = Self::fetch_block_timestamp(&provider, &cache, anchor_block).await?;
+        let anchor_timestamp = Self::fetch_block_timestamp(&provider, &store, anchor_block).await?;
 
         let (latest_tx, latest_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
         let (best_tx, best_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
         let (safe_tx, safe_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
 
+        let fetcher = build_fetcher(provider.clone(), store.clone(), address, topics);
+        let index = Arc::new(LogIndex::with_chunk_size(
+            store.clone(),
+            filter_hash,
+            fetcher,
+            chunk_size,
+        ));
+
         let history = Arc::new(Self {
             provider,
-            cache,
+            store,
+            index,
             filter_hash,
             address,
             topics,
@@ -246,150 +263,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     // Cache management
     // --------------------------------------------------------
 
-    /// Ensure the cache covers [start_block, end_block] for our filter.
-    /// Fetches any missing sub-ranges from RPC.
-    async fn ensure_cached(&self, start_block: u64, end_block: u64) -> Result<(), HistoryError> {
-        let scanned = self.cache.get_scanned_ranges(&self.filter_hash)
-            .map_err(|e| HistoryError::internal(e.to_string()))?;
-
-        let gaps = crate::evm::log_cache_legacy::compute_gaps((start_block, end_block), &scanned);
-
-        if gaps.is_empty() {
-            tracing::trace!(start_block, end_block, "cache hit");
-        } else {
-            tracing::debug!(start_block, end_block, num_gaps = gaps.len(), "cache miss, fetching gaps");
-        }
-
-        for (gap_start, gap_end) in gaps {
-            self.fetch_gap(gap_start, gap_end).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Fetch logs for a single gap range, chunking if necessary.
-    async fn fetch_gap(&self, start: u64, end: u64) -> Result<(), HistoryError> {
-        let mut cursor = start;
-        while cursor <= end {
-            let chunk_end = cursor.saturating_add(self.chunk_size - 1).min(end);
-            self.fetch_chunk(cursor, chunk_end).await?;
-            if chunk_end >= end {
-                break;
-            }
-            cursor = chunk_end + 1;
-        }
-        Ok(())
-    }
-
-    /// Fetch a single chunk of logs from RPC and insert into cache.
-    async fn fetch_chunk(&self, from: u64, to: u64) -> Result<(), HistoryError> {
-        let mut filter = Filter::new()
-            .address(alloy::primitives::Address::from(self.address))
-            .from_block(from)
-            .to_block(to);
-
-        if let Some(t) = self.topics[0] {
-            filter = filter.event_signature(alloy::primitives::B256::from(t));
-        }
-        if let Some(t) = self.topics[1] {
-            filter = filter.topic1(alloy::primitives::B256::from(t));
-        }
-        if let Some(t) = self.topics[2] {
-            filter = filter.topic2(alloy::primitives::B256::from(t));
-        }
-        if let Some(t) = self.topics[3] {
-            filter = filter.topic3(alloy::primitives::B256::from(t));
-        }
-
-        tracing::debug!(from, to, blocks = to - from + 1, "eth_getLogs");
-
-        let logs = self.provider.get_logs(&filter).await
-            .map_err(|e| HistoryError::internal(format!("eth_getLogs failed: {e}")))?;
-
-        tracing::debug!(from, to, num_logs = logs.len(), "eth_getLogs returned");
-
-        self.cache.insert_logs(&self.filter_hash, &logs)
-            .map_err(|e| HistoryError::internal(e.to_string()))?;
-
-        // Record scanned range. Need the end block's hash.
-        let end_header = self.ensure_block_header(to).await?;
-        self.cache
-            .record_scanned_range(&self.filter_hash, from, to, &end_header.hash)
-            .map_err(|e| HistoryError::internal(e.to_string()))?;
-
-        // Cache block headers for blocks that have logs.
-        for log in &logs {
-            if let Some(bn) = log.block_number {
-                let _ = self.ensure_block_header(bn).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get block header, cache-first with RPC fallback.
+    /// Get a block header — cache-first with RPC fallback, persisted on miss.
     async fn ensure_block_header(&self, block_number: u64) -> Result<BlockHeader, HistoryError> {
-        if let Some(header) = self.cache.get_block_header(block_number)
-            .map_err(|e| HistoryError::internal(e.to_string()))?
-        {
-            tracing::trace!(block_number, "block header cache hit");
-            return Ok(header);
-        }
-
-        tracing::debug!(block_number, "eth_getBlockByNumber");
-
-        let block = self.provider
-            .get_block_by_number(BlockNumberOrTag::Number(block_number))
-            .await
-            .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
-            .ok_or_else(|| HistoryError::internal(format!("block {block_number} not found")))?;
-
-        let hash: [u8; 32] = block.header.hash.0;
-        let parent_hash: [u8; 32] = block.header.parent_hash.0;
-        let timestamp = block.header.timestamp;
-
-        self.cache
-            .insert_block_header(block_number, &hash, &parent_hash, timestamp)
-            .map_err(|e| HistoryError::internal(e.to_string()))?;
-
-        Ok(BlockHeader {
-            height: block_number,
-            hash,
-            parent_hash,
-            timestamp,
-        })
+        ensure_block_header_static(&self.provider, &self.store, block_number).await
     }
 
-    /// Fetch block timestamp (with caching). Static — used by constructor.
+    /// Static variant for use by the `LogIndex` fetcher closure (which
+    /// captures `provider` and `store` independently of `&self`).
     async fn fetch_block_timestamp(
         provider: &P,
-        cache: &LogCache,
+        store: &LogStore,
         block_number: u64,
     ) -> Result<u64, HistoryError> {
-        if let Some(header) = cache.get_block_header(block_number)
-            .map_err(|e| HistoryError::internal(e.to_string()))?
-        {
-            tracing::trace!(block_number, "genesis block header cache hit");
-            return Ok(header.timestamp);
-        }
-
-        tracing::debug!(block_number, "eth_getBlockByNumber (genesis)");
-
-        let block = provider
-            .get_block_by_number(BlockNumberOrTag::Number(block_number))
-            .await
-            .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
-            .ok_or_else(|| HistoryError::internal(format!("block {block_number} not found")))?;
-
-        let hash: [u8; 32] = block.header.hash.0;
-        let parent_hash: [u8; 32] = block.header.parent_hash.0;
-        let timestamp = block.header.timestamp;
-
-        cache
-            .insert_block_header(block_number, &hash, &parent_hash, timestamp)
-            .map_err(|e| HistoryError::internal(e.to_string()))?;
-
-        Ok(timestamp)
+        let header =
+            ensure_block_header_via(provider, store, block_number).await?;
+        Ok(header.timestamp)
     }
 
     // --------------------------------------------------------
@@ -493,8 +381,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     /// Search forward for first matching log starting from `position`,
-    /// up to `max_block`. Returns the log if found.
-    fn search_cache_forward(
+    /// up to `end_block`. Pure in-memory tree lookup — assumes the index
+    /// already covers `[start_block, end_block]` (caller arranges this
+    /// via [`LogIndex::ensure_cached`]).
+    fn search_index_forward(
         &self,
         position: &EvmPosition,
         start_block: u64,
@@ -504,18 +394,14 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         let log = if is_first_chunk {
             let (block, idx) = Self::search_coords(position);
             match position.side {
-                Side::Before => self.cache
-                    .first_log_at_or_after(&self.filter_hash, block, idx),
-                Side::After => self.cache
-                    .first_log_after(&self.filter_hash, block, idx),
+                Side::Before => self.index.first_at_or_after(block, idx)?,
+                Side::After => self.index.first_after(block, idx)?,
             }
         } else {
-            self.cache
-                .first_log_at_or_after(&self.filter_hash, start_block, 0)
+            self.index.first_at_or_after(start_block, 0)?
         };
         // Discard results beyond the current cached chunk — the range
         // (end_block+1..) may not have been fetched yet.
-        let log = log.map_err(|e| HistoryError::internal(e.to_string()))?;
         Ok(log.filter(|l| l.block_number.unwrap_or(0) <= end_block))
     }
 
@@ -565,10 +451,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             let mut chunk_start = search_from;
             while chunk_start <= max_block {
                 let chunk_end = (chunk_start + self.chunk_size - 1).min(max_block);
-                self.ensure_cached(chunk_start, chunk_end).await?;
+                self.index.ensure_cached(chunk_start, chunk_end).await?;
 
                 let is_first = chunk_start == start_block;
-                if let Some(log) = self.search_cache_forward(position, chunk_start, chunk_end, is_first)? {
+                if let Some(log) = self.search_index_forward(position, chunk_start, chunk_end, is_first)? {
                     let (lb, li) = (
                         log.block_number.unwrap_or(0),
                         log.log_index.unwrap_or(0) as u32,
@@ -634,7 +520,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             if tip.block_number > 0 && tip.block_number < u64::MAX {
                 tip.block_number
             } else {
-                let ranges = self.cache.get_scanned_ranges(&self.filter_hash)
+                let ranges = self.store.get_scanned_ranges(&self.filter_hash)
                     .map_err(|e| HistoryError::internal(e.to_string()))?;
                 match ranges.last() {
                     Some(r) => r.1,
@@ -652,21 +538,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
                 min_block
             };
 
-            self.ensure_cached(search_start, search_end).await?;
+            self.index.ensure_cached(search_start, search_end).await?;
 
             let log = if search_end == block {
                 match position.side {
-                    Side::After => self.cache
-                        .last_log_at_or_before(&self.filter_hash, block, idx)
-                        .map_err(|e| HistoryError::internal(e.to_string()))?,
-                    Side::Before => self.cache
-                        .last_log_before(&self.filter_hash, block, idx)
-                        .map_err(|e| HistoryError::internal(e.to_string()))?,
+                    Side::After => self.index.last_at_or_before(block, idx)?,
+                    Side::Before => self.index.last_before(block, idx)?,
                 }
             } else {
-                self.cache
-                    .last_log_at_or_before(&self.filter_hash, search_end, u32::MAX)
-                    .map_err(|e| HistoryError::internal(e.to_string()))?
+                self.index.last_at_or_before(search_end, u32::MAX)?
             };
             // Discard results before the current cached chunk.
             let log = log.filter(|l| l.block_number.unwrap_or(0) >= search_start);
@@ -830,11 +710,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistoryBackend<EvmEv
             return 0;
         }
         let scanned = self
-            .cache
+            .store
             .get_scanned_ranges(&self.filter_hash)
             .unwrap_or_default();
-        let gaps =
-            crate::evm::log_cache_legacy::compute_gaps((from.block_number, to.block_number), &scanned);
+        let gaps = compute_gaps((from.block_number, to.block_number), &scanned);
         gaps.iter()
             .map(|&(s, e)| (e - s) / self.chunk_size + 1)
             .sum()
@@ -851,6 +730,123 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistoryBackend<EvmEv
 }
 
 // ============================================================
+// Free helpers (block header fetch + LogIndex fetcher builder)
+// ============================================================
+
+/// Cache-first block-header lookup. Falls back to RPC and persists.
+async fn ensure_block_header_via<P>(
+    provider: &P,
+    store: &LogStore,
+    block_number: u64,
+) -> Result<BlockHeader, HistoryError>
+where
+    P: Provider<Ethereum>,
+{
+    if let Some(header) = store
+        .get_block_header(block_number)
+        .map_err(|e| HistoryError::internal(e.to_string()))?
+    {
+        tracing::trace!(block_number, "block header cache hit");
+        return Ok(header);
+    }
+
+    tracing::debug!(block_number, "eth_getBlockByNumber");
+
+    let block = provider
+        .get_block_by_number(BlockNumberOrTag::Number(block_number))
+        .await
+        .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
+        .ok_or_else(|| HistoryError::internal(format!("block {block_number} not found")))?;
+
+    let hash: [u8; 32] = block.header.hash.0;
+    let parent_hash: [u8; 32] = block.header.parent_hash.0;
+    let timestamp = block.header.timestamp;
+
+    store
+        .insert_block_header(block_number, &hash, &parent_hash, timestamp)
+        .map_err(|e| HistoryError::internal(e.to_string()))?;
+
+    Ok(BlockHeader {
+        height: block_number,
+        hash,
+        parent_hash,
+        timestamp,
+    })
+}
+
+/// Static variant of [`EvmLogHistory::ensure_block_header`] that doesn't
+/// require `&self`. Used inside the [`LogIndex`] fetcher closure.
+async fn ensure_block_header_static<P>(
+    provider: &P,
+    store: &LogStore,
+    block_number: u64,
+) -> Result<BlockHeader, HistoryError>
+where
+    P: Provider<Ethereum>,
+{
+    ensure_block_header_via(provider, store, block_number).await
+}
+
+/// Build a [`Fetcher`] closure that issues `eth_getLogs` for the
+/// `(address, topics)` filter and returns the resulting [`LogPage`].
+/// Pre-fetches block headers for every block that hit a log so the
+/// `log_to_cursor` path stays cache-resident.
+fn build_fetcher<P>(
+    provider: P,
+    store: Arc<LogStore>,
+    address: [u8; 20],
+    topics: [Option<[u8; 32]>; 4],
+) -> Fetcher
+where
+    P: Provider<Ethereum> + Clone + Send + Sync + 'static,
+{
+    Arc::new(move |from, to| {
+        let provider = provider.clone();
+        let store = store.clone();
+        Box::pin(async move {
+            let mut filter = Filter::new()
+                .address(alloy::primitives::Address::from(address))
+                .from_block(from)
+                .to_block(to);
+            if let Some(t) = topics[0] {
+                filter = filter.event_signature(alloy::primitives::B256::from(t));
+            }
+            if let Some(t) = topics[1] {
+                filter = filter.topic1(alloy::primitives::B256::from(t));
+            }
+            if let Some(t) = topics[2] {
+                filter = filter.topic2(alloy::primitives::B256::from(t));
+            }
+            if let Some(t) = topics[3] {
+                filter = filter.topic3(alloy::primitives::B256::from(t));
+            }
+            tracing::debug!(from, to, blocks = to - from + 1, "eth_getLogs");
+            let logs = provider
+                .get_logs(&filter)
+                .await
+                .map_err(|e| HistoryError::internal(format!("eth_getLogs failed: {e}")))?;
+            tracing::debug!(from, to, num_logs = logs.len(), "eth_getLogs returned");
+
+            let end_header = ensure_block_header_via(&provider, &store, to).await?;
+            // Pre-cache headers for blocks that hit a log so cursor
+            // construction never round-trips to RPC mid-stream.
+            for log in &logs {
+                if let Some(bn) = log.block_number {
+                    let _ = ensure_block_header_via(&provider, &store, bn).await;
+                }
+            }
+
+            Ok(LogPage {
+                from_block: from,
+                to_block: to,
+                items: logs,
+                end_block_hash: end_header.hash,
+            })
+        })
+    })
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -858,7 +854,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistoryBackend<EvmEv
 mod tests {
     use super::*;
     use crate::arch::Position;
-    use crate::evm::log_cache_legacy::compute_filter_hash;
     use alloy::primitives::{Address, Bytes, LogData, B256};
     use alloy::providers::ProviderBuilder;
     use alloy::rpc::types::Log;
@@ -896,8 +891,8 @@ mod tests {
 
     /// Pre-populate cache with genesis + test blocks/logs, scanned ranges.
     /// Returns (cache, filter_hash).
-    fn warm_cache() -> (Arc<LogCache>, [u8; 32]) {
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+    fn warm_cache() -> (Arc<LogStore>, [u8; 32]) {
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 
         // Block headers
@@ -924,7 +919,7 @@ mod tests {
     /// for construction (genesis header is in cache) or bounded queries
     /// (scanned ranges cover [0, 200]).
     async fn make_history(
-        cache: Arc<LogCache>,
+        store: Arc<LogStore>,
     ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + Send + Sync + 'static>> {
         let asserter = Asserter::new();
         // Constructor calls: get_chain_id(), get_block_number() (anchor)
@@ -932,7 +927,7 @@ mod tests {
         asserter.push_success(&alloy::primitives::U64::from(200u64));
         // fetch_block_timestamp(200) hits cache (warm_cache has block 200 header)
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
-        EvmLogHistory::with_options(provider, cache, ADDR, TOPICS, 100, 12)
+        EvmLogHistory::with_options(provider, store, ADDR, TOPICS, 100, 12)
             .await
             .unwrap()
     }
@@ -1246,7 +1241,7 @@ mod tests {
         // After the fix: chunk [0,99] bounded query finds nothing (500 > 99).
         // The search continues through [100,199], finds nothing, and
         // correctly returns None.
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 
         cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
@@ -1301,7 +1296,7 @@ mod tests {
         // Before the fix, the unbounded backward query from search_end=200
         // could return 10 (if 150 didn't exist) skipping uncached ranges.
         // We test the simpler case: log at 150 should be found, not 10.
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 
         cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
@@ -1328,7 +1323,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_history_returns_none() {
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
         cache.insert_block_header(200, &BH_200, &BH_0, GENESIS_TS + 2400).unwrap();
 
@@ -1364,7 +1359,7 @@ mod tests {
     #[tokio::test]
     async fn estimate_scan_count_uncached() {
         // No scanned ranges → ceil(range/chunk)
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
         cache.insert_block_header(200, &BH_200, &BH_0, GENESIS_TS + 2400).unwrap();
 

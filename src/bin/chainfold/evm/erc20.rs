@@ -8,7 +8,7 @@ use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{History, Side};
 use chainfold::evm::{
     evm_pos_cmp, fetch_erc20_metadata, Erc20BalanceReducer, Erc20Metadata, EvmLogHistory,
-    LogCache, TRANSFER_TOPIC,
+    LogStore, TRANSFER_TOPIC,
 };
 use chainfold::reduce::{ReducedEvent, ReducedHistory};
 
@@ -20,7 +20,7 @@ type BalanceEvent = ReducedEvent<EvmEvent, U256>;
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     provider: &P,
-    cache: &Arc<LogCache>,
+    cache: &Arc<LogStore>,
     db_path: &str,
     evm_args: &EvmArgs,
     erc20_args: &Erc20Args,
@@ -80,7 +80,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 #[allow(clippy::too_many_arguments)]
 async fn run_transfers<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     provider: &P,
-    cache: &Arc<LogCache>,
+    cache: &Arc<LogStore>,
     db_path: &str,
     evm_args: &EvmArgs,
     addresses: &[[u8; 20]],
@@ -201,7 +201,7 @@ async fn run_transfers<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 #[allow(clippy::too_many_arguments)]
 async fn run_balances<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     provider: &P,
-    cache: &Arc<LogCache>,
+    cache: &Arc<LogStore>,
     db_path: &str,
     evm_args: &EvmArgs,
     addresses: &[[u8; 20]],

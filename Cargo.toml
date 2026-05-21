@@ -55,6 +55,10 @@ required-features = ["evm"]
 name = "mock_provider_smoke"
 required-features = ["evm"]
 
+[[test]]
+name = "phase1_layering"
+required-features = ["evm"]
+
 [[example]]
 name = "history_explorer"
 required-features = ["evm"]

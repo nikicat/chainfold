@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{Cursor, History, Side};
-use chainfold::evm::{EvmLogHistory, LogCache};
+use chainfold::evm::{EvmLogHistory, LogStore};
 use chrono::NaiveDate;
 use clap::Parser;
 
@@ -70,6 +70,14 @@ struct Args {
     /// Follow (block at tip for new events)
     #[arg(long)]
     follow: bool,
+
+    /// Run a cold → warm → hot timing sweep over the resolved range and
+    /// print wall-clock for each. Cold = whatever the DB currently looks
+    /// like (may fetch from RPC). Warm = drop & reopen — pure SQLite into
+    /// a fresh BTreeMap. Hot = walk the already-warm BTreeMap a second
+    /// time. Implies forward navigation; ignores --reverse / --follow.
+    #[arg(long)]
+    measure: bool,
 }
 
 fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
@@ -183,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http(url);
     let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
     let db_path = chainfold::evm::versioned_path(&args.db);
-    let cache = Arc::new(LogCache::open(&db_path)?);
+    let store = Arc::new(LogStore::open(&db_path)?);
 
     println!("Building EvmLogHistory...");
     println!("  Address:  0x{}", hex::encode(address));
@@ -192,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let backend = EvmLogHistory::with_options(
-        provider, cache, address, topics, args.chunk_size, 12,
+        provider, store, address, topics, args.chunk_size, 12,
     ).await?;
     let history = backend.history();
 
@@ -206,6 +214,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         start.block_number, cutoff.block_number);
     println!("  DB:       {}", db_path);
     println!();
+
+    if args.measure {
+        use std::time::Instant;
+        async fn walk_forward(
+            history: &chainfold::arch::History<EvmEvent, EvmPosition>,
+            start: &EvmPosition,
+            cutoff: &EvmPosition,
+        ) -> Result<usize, chainfold::arch::HistoryError> {
+            let mut anchor = start.clone();
+            let mut count = 0;
+            while let Some(cursor) = history.after(&anchor, Some(cutoff)).await? {
+                anchor = cursor.after().clone();
+                count += 1;
+            }
+            Ok(count)
+        }
+
+        // Cold walk: against the current backend (may fetch RPC if DB is empty).
+        let t0 = Instant::now();
+        let cold_n = walk_forward(&history, &start, &cutoff).await?;
+        let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Warm walk: drop the existing index/history, reopen against the
+        // same DB. Same provider client — should never reach RPC because
+        // every gap is already in scanned_ranges.
+        drop(history);
+        drop(backend);
+        let store2 = Arc::new(LogStore::open(&db_path)?);
+        let url2: alloy::transports::http::reqwest::Url = args.rpc_url.parse()?;
+        let client2 = alloy::rpc::client::ClientBuilder::default()
+            .layer(chainfold::evm::rpc_retry_layer())
+            .http(url2);
+        let provider2 = alloy::providers::ProviderBuilder::new().connect_client(client2);
+        let backend2 = EvmLogHistory::with_options(
+            provider2, store2, address, topics, args.chunk_size, 12,
+        ).await?;
+        let history2 = backend2.history();
+        let t1 = Instant::now();
+        let warm_n = walk_forward(&history2, &start, &cutoff).await?;
+        let warm_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        // Hot walk: same history2, second pass over the same range.
+        // Should be pure BTreeMap traversal + LogStore::get_log_by_ref lookups.
+        let t2 = Instant::now();
+        let hot_n = walk_forward(&history2, &start, &cutoff).await?;
+        let hot_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+        println!("--measure summary over {} blocks:",
+            cutoff.block_number - start.block_number + 1);
+        println!("  cold  {cold_n:>6} events  {cold_ms:>10.2} ms  (RPC + SQLite + BTree)");
+        println!("  warm  {warm_n:>6} events  {warm_ms:>10.2} ms  (SQLite -> fresh BTree)");
+        println!("  hot   {hot_n:>6} events  {hot_ms:>10.2} ms  (warm BTree only)");
+        println!(
+            "  speedup: cold/warm={:.1}x  warm/hot={:.1}x  cold/hot={:.1}x",
+            cold_ms / warm_ms,
+            warm_ms / hot_ms,
+            cold_ms / hot_ms
+        );
+        return Ok(());
+    }
 
     if args.follow {
         println!("Following new events (Ctrl+C to stop)...\n");

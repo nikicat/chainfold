@@ -25,7 +25,7 @@ use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{Cursor, History, Side};
 use chainfold::evm::{
     decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20BalanceReducer, Erc20Metadata,
-    EvmLogHistory, LogCache, TRANSFER_TOPIC,
+    EvmLogHistory, LogStore, TRANSFER_TOPIC,
 };
 use chainfold::reduce::{ReducedEvent, ReducedHistory};
 use chrono::NaiveDate;
@@ -290,7 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http(url);
     let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
     let db_path = chainfold::evm::versioned_path(&args.db);
-    let cache = Arc::new(LogCache::open(&db_path)?);
+    let cache = Arc::new(LogStore::open(&db_path)?);
 
     // Fetch token metadata for all addresses (cached in SQLite, Multicall3 on first run)
     let chain_id = provider.get_chain_id().await?;

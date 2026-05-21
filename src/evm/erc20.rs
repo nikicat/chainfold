@@ -16,7 +16,7 @@ use alloy::sol_types::{SolCall, SolEvent};
 use crate::arch::evm::{EvmEvent, EvmPosition};
 use crate::arch::HistoryError;
 
-use super::log_cache_legacy::LogCache;
+use super::log_store::LogStore;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -49,7 +49,7 @@ pub async fn fetch_erc20_metadata<P: Provider<Ethereum>>(
     provider: &P,
     address: [u8; 20],
     chain_id: u64,
-    cache: &LogCache,
+    cache: &LogStore,
 ) -> Result<Erc20Metadata, HistoryError> {
     // 1. Cache check
     if let Some(cached) = cache
@@ -254,7 +254,7 @@ pub struct Erc20BalanceReducer<P> {
     pub token_address: [u8; 20],
     pub chain_id: u64,
     pub provider: P,
-    pub cache: Arc<LogCache>,
+    pub cache: Arc<LogStore>,
 }
 
 impl<P> Erc20BalanceReducer<P> {
@@ -263,7 +263,7 @@ impl<P> Erc20BalanceReducer<P> {
         token_address: [u8; 20],
         chain_id: u64,
         provider: P,
-        cache: Arc<LogCache>,
+        cache: Arc<LogStore>,
     ) -> Self {
         Self {
             owner,
@@ -409,7 +409,7 @@ mod tests {
     fn apply_incoming_adds() {
         let owner = [0x01u8; 20];
         let other = [0x02u8; 20];
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let reducer = Erc20BalanceReducer {
             owner,
             token_address: [0x42; 20],
@@ -425,7 +425,7 @@ mod tests {
     fn apply_outgoing_subtracts() {
         let owner = [0x01u8; 20];
         let other = [0x02u8; 20];
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let reducer = Erc20BalanceReducer {
             owner,
             token_address: [0x42; 20],
@@ -441,7 +441,7 @@ mod tests {
     fn apply_underflow_saturates_to_zero() {
         let owner = [0x01u8; 20];
         let other = [0x02u8; 20];
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let reducer = Erc20BalanceReducer {
             owner,
             token_address: [0x42; 20],
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn apply_non_transfer_is_noop() {
         let owner = [0x01u8; 20];
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let reducer = Erc20BalanceReducer {
             owner,
             token_address: [0x42; 20],
@@ -483,7 +483,7 @@ mod tests {
         let owner = [0x01u8; 20];
         let other_a = [0x02u8; 20];
         let other_b = [0x03u8; 20];
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let reducer = Erc20BalanceReducer {
             owner,
             token_address: [0x42; 20],
@@ -499,7 +499,7 @@ mod tests {
     fn find_cached_state_floor_from_sqlite() {
         let owner = [0x01u8; 20];
         let token = [0x42u8; 20];
-        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogStore::open_in_memory().unwrap());
 
         // Insert balances at blocks 100 and 200
         cache.insert_erc20_balance(1, &token, &owner, 100, U256::from(500)).unwrap();
