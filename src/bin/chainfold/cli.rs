@@ -1,0 +1,109 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "chainfold", about = "Blockchain history explorer")]
+pub struct Cli {
+    /// Path to config file
+    #[arg(long, global = true)]
+    pub config: Option<String>,
+
+    /// Navigate backwards instead of forwards
+    #[arg(long, global = true)]
+    pub reverse: bool,
+
+    /// Follow (block at tip for new events)
+    #[arg(long, global = true)]
+    pub follow: bool,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Config management
+    Config {
+        #[command(subcommand)]
+        action: ConfigCommand,
+    },
+    /// EVM chain commands
+    Evm(EvmArgs),
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommand {
+    /// Print resolved config (API key masked)
+    Show,
+    /// Validate config and test RPC connectivity
+    Check,
+}
+
+#[derive(Parser)]
+pub struct EvmArgs {
+    /// Chain ID (default: 1 for Ethereum mainnet)
+    #[arg(long, default_value = "1")]
+    pub chain_id: u64,
+
+    /// RPC endpoint URL (overrides config)
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+
+    /// SQLite cache path
+    #[arg(long, default_value = "./chainfold.db")]
+    pub db: String,
+
+    /// Block chunk size for eth_getLogs
+    #[arg(long, default_value = "1000")]
+    pub chunk_size: u64,
+
+    /// Start date, UTC (e.g. 2025-01-15 or 2025-01-15T12:00:00)
+    #[arg(long, value_name = "DATE")]
+    pub from: Option<String>,
+
+    /// End date, UTC (e.g. 2025-01-16 or 2025-01-16T12:00:00)
+    #[arg(long, value_name = "DATE")]
+    pub to: Option<String>,
+
+    /// Starting block number
+    #[arg(long)]
+    pub from_block: Option<u64>,
+
+    /// Number of blocks to scan (used with --from-block)
+    #[arg(long, default_value = "100")]
+    pub num_blocks: u64,
+
+    /// Max events to print
+    #[arg(long, default_value = "20")]
+    pub limit: usize,
+
+    #[command(subcommand)]
+    pub command: EvmCommand,
+}
+
+#[derive(Subcommand)]
+pub enum EvmCommand {
+    /// ERC20 token commands
+    Erc20(Erc20Args),
+}
+
+#[derive(Parser)]
+pub struct Erc20Args {
+    /// Token contract address(es) (0x-prefixed hex). Repeat for multiple tokens.
+    #[arg(long, required = true)]
+    pub address: Vec<String>,
+
+    /// Owner address to track (0x-prefixed hex)
+    #[arg(long)]
+    pub owner: String,
+
+    #[command(subcommand)]
+    pub command: Erc20Command,
+}
+
+#[derive(Subcommand)]
+pub enum Erc20Command {
+    /// Show ERC20 transfers (no balance tracking)
+    Transfers,
+    /// Show ERC20 transfers with running balance column
+    Balances,
+}

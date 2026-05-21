@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 evm = ["dep:alloy", "dep:tracing", "dep:blake3"]
+cli = ["evm", "dep:clap", "dep:hex", "dep:tracing-subscriber", "dep:chrono", "dep:toml", "dep:dirs"]
 
 [dependencies]
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
@@ -21,6 +22,12 @@ postcard = { version = "1", features = ["alloc"] }
 alloy = { version = "1", features = ["provider-http", "rpc-types", "sol-types"], optional = true }
 tracing = { version = "0.1", optional = true }
 blake3 = { version = "1.8", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+hex = { version = "0.4", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+chrono = { version = "0.4", optional = true }
+toml = { version = "0.8", optional = true }
+dirs = { version = "6", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
@@ -32,6 +39,11 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
+
+[[bin]]
+name = "chainfold"
+path = "src/bin/chainfold/main.rs"
+required-features = ["cli"]
 
 [[test]]
 name = "erc20_tests"
