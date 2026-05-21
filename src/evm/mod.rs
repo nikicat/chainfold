@@ -12,6 +12,7 @@
 //! Requires the `evm` feature flag.
 
 mod log_store;
+mod log_index;
 mod log_cache_legacy;
 mod history;
 mod retry;

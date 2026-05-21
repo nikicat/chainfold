@@ -310,6 +310,34 @@ impl LogStore {
         Ok(())
     }
 
+    /// Resolve a single cached log by its `(block_hash, log_index)` identity
+    /// under `filter_hash`. Does NOT consult `reorged_blocks` — the caller
+    /// (typically `LogIndex`) is expected to never request a reference into
+    /// a reorged block.
+    pub fn get_log_by_ref(
+        &self,
+        filter_hash: &[u8; 32],
+        block_hash: &[u8; 32],
+        log_index: u32,
+    ) -> Result<Option<Log>, CacheError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT block_number, log_index, address, topic0, topic1, topic2, topic3,
+                    data, block_hash, transaction_hash, transaction_index
+             FROM cached_logs
+             WHERE filter_hash = ?1 AND block_hash = ?2 AND log_index = ?3
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(
+            rusqlite::params![&filter_hash[..], &block_hash[..], log_index as i64],
+            |row| row_to_log(row),
+        )?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     /// All cached, non-reorged logs for `filter_hash` in `[from_block, to_block]`,
     /// ordered by (block_number, log_index).
     pub fn get_logs_in_range(
