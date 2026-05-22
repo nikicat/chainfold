@@ -76,16 +76,17 @@ impl HistoryError {
 ///
 /// A position is the gap *between* (or at the boundary of) items — never an
 /// item itself. The natural lower bound (analogous to "before any item") is
-/// the type's own `Default` value when that makes sense; sources document
-/// their own convention (e.g. EVM uses `EvmPosition { block: 0, log_index:
-/// 0 }`).
+/// the type's own [`Default`] value; e.g. EVM uses `EvmPosition { block: 0,
+/// log_index: 0 }`. This sentinel is what [`crate::merge::ErasedHistStore`]
+/// substitutes when a saved [`crate::merge::MergedPos`] lacks an entry for
+/// a newly-added source.
 ///
 /// **Source-local.** Positions from different sources are not comparable
 /// and the trait does not provide source identity — that concern lives on
-/// [`HistStore`]. Heterogeneous merge (planned) wraps per-source positions
-/// in a keyed structure, never compares them directly.
+/// [`HistStore`]. Heterogeneous merge wraps per-source positions in a keyed
+/// [`crate::merge::MergedPos`] and never compares them across sources.
 pub trait Position:
-    Clone + Eq + Ord + std::fmt::Debug + Send + Sync + 'static
+    Clone + Default + Eq + Ord + std::fmt::Debug + Send + Sync + 'static
 {
     /// Serialize for persistence. Reconstruct with [`unmarshal`](Self::unmarshal).
     fn marshal(&self) -> Vec<u8>;
@@ -267,14 +268,12 @@ impl<T: Send + Sync + 'static, P: Position> Hist<T, P> {
     /// If `p < start` the head is empty and tail == self. If `p > end` the
     /// head == self and tail is empty. Always returns two valid (possibly
     /// empty) snapshots; never widens the window.
+    ///
+    /// Clamping is delegated to [`HistBackend::clamp_pos`] so that backends
+    /// whose [`Position`] has non-canonical [`Ord`] (e.g. the keyed
+    /// [`crate::merge::MergedPos`]) can substitute component-wise clamping.
     pub fn split(&self, p: P) -> (Self, Self) {
-        let clamped = if p < self.start {
-            self.start.clone()
-        } else if p > self.end {
-            self.end.clone()
-        } else {
-            p
-        };
+        let clamped = self.backend.clamp_pos(p, &self.start, &self.end);
         let head = Self {
             backend: self.backend.clone(),
             start: self.start.clone(),
@@ -368,6 +367,22 @@ impl<T: Send + Sync + 'static, P: Position> HistStore<T, P> {
 pub trait HistBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// Stream items in `(start, end]` ascending.
     fn iter(&self, start: P, end: P) -> ItemStream<T, P>;
+
+    /// Clamp `p` to lie within `[start, end]`. Default implementation uses
+    /// [`Ord`] on `P`. Override for positions whose canonical `Ord` does
+    /// not reflect the window-containment semantics needed by
+    /// [`Hist::split`] — e.g. the keyed [`crate::merge::MergedPos`] uses a
+    /// byte-lex `Ord` for total order but clamps component-wise to honor
+    /// per-source containment.
+    fn clamp_pos(&self, p: P, start: &P, end: &P) -> P {
+        if &p < start {
+            start.clone()
+        } else if &p > end {
+            end.clone()
+        } else {
+            p
+        }
+    }
 }
 
 /// Backing implementation for [`HistStore`]. Implemented per source.
