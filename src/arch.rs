@@ -239,6 +239,12 @@ impl<T: Send + Sync + 'static, P: Position> Hist<T, P> {
         &self.end
     }
 
+    /// Underlying backend. Combinators wrap this to build proxy histories
+    /// without going through [`HistStore`].
+    pub fn backend(&self) -> &Arc<dyn HistBackend<T, P>> {
+        &self.backend
+    }
+
     /// True if `start == end` (no items in this snapshot).
     pub fn is_empty(&self) -> bool {
         self.start == self.end
