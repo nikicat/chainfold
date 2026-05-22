@@ -13,6 +13,7 @@ mod aligned_ranges;
 mod log_store;
 mod log_index;
 mod history;
+mod owned_erc20;
 mod retry;
 mod subscriber;
 pub mod erc20;
@@ -33,3 +34,4 @@ pub use erc20::{
     apply_transfer, decode_transfer, fetch_erc20_metadata, Erc20Metadata, TransferData,
     TRANSFER_TOPIC,
 };
+pub use owned_erc20::{OwnedErc20, IN_KEY, OUT_KEY};

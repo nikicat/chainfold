@@ -72,6 +72,10 @@ name = "phase5_merge"
 [[test]]
 name = "phase6_matcher"
 
+[[test]]
+name = "owned_erc20"
+required-features = ["evm"]
+
 [[example]]
 name = "history_explorer"
 required-features = ["evm"]

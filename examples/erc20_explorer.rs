@@ -1,15 +1,20 @@
 //! ERC20 transfer explorer with running balance, over the new
 //! `Hist` / `HistStore` API.
 //!
-//! Phase 3 trade-off: prior version used `merge` + `ReducedHistory` to
-//! interleave IN/OUT histories and fold balance reactively. Both pieces
-//! were deleted in Phase 3. This rewrite scans the full Transfer history
-//! for the token contract, filters for the owner client-side, and folds
-//! [`apply_transfer`] inline. Phase 5 brings the per-topic IN/OUT split
-//! back via `merge_hist_stores`; Phase 6 will rebuild a proper `Reducer`.
+//! Post-Phase 5 follow-up: the `--owner` path now uses [`OwnedErc20`],
+//! which opens two narrow per-topic histories (one for `from = owner`,
+//! one for `to = owner`) and merges them. RPC payload only contains
+//! owner-relevant logs; direction is delivered via
+//! `MergedItem.source_key` ("in" or "out").
+//!
+//! Self-transfers (from == to == owner) appear twice in the merged stream
+//! by design — once with source_key="in", once with source_key="out". The
+//! explorer dedupes by position so balance updates and printout happen
+//! once.
 //!
 //! Multi-token support: each `--address` is processed independently and
-//! its transfers print in its own section. No cross-token merge yet.
+//! its transfers print in its own section. Cross-token merge is a
+//! separate follow-up.
 //!
 //! Usage:
 //!   cargo run --features evm --example erc20_explorer -- \
@@ -17,17 +22,18 @@
 //!     --owner 0xYourAddress \
 //!     --from 2025-01-15 --to 2025-01-16
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use alloy::primitives::U256;
 use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::{watch_hist, Hist, HistBackend, Positioned};
+use chainfold::arch::{watch_hist, Position};
 use chainfold::evm::{
     apply_transfer, decode_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory,
-    LogStore, TRANSFER_TOPIC,
+    LogStore, OwnedErc20, IN_KEY, OUT_KEY,
 };
+use chainfold::merge::{MergedItem, MergedPos};
 use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
@@ -188,7 +194,8 @@ fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: usize)
 
 #[allow(clippy::too_many_arguments)]
 fn print_transfer(
-    item: &Positioned<EvmEvent, EvmPosition>,
+    event: &EvmEvent,
+    direction_key: &str,
     balance: U256,
     index: usize,
     owner: &[u8; 20],
@@ -197,11 +204,14 @@ fn print_transfer(
     max_decimals: usize,
     base_url: &str,
 ) {
-    let e = &item.item;
-    let Some(t) = decode_transfer(e) else {
+    let Some(t) = decode_transfer(event) else {
         return;
     };
-    let direction = if &t.to == owner { " IN" } else { "OUT" };
+    let direction = match direction_key {
+        IN_KEY => " IN",
+        OUT_KEY => "OUT",
+        _ => "  ?",
+    };
     let counterparty = if &t.to == owner { &t.from } else { &t.to };
     let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, max_decimals);
     let balance_str = format_amount(balance, meta.decimals, BALANCE_WHOLE_WIDTH, max_decimals);
@@ -210,9 +220,9 @@ fn print_transfer(
     println!(
         "[{:>4}] {:<10} {}  {}  {:>3}  {}  {} {} = {}",
         index,
-        e.block_number,
-        format_timestamp(e.timestamp),
-        linked_tx_hash(&e.tx_hash, base_url),
+        event.block_number,
+        format_timestamp(event.timestamp),
+        linked_tx_hash(&event.tx_hash, base_url),
         direction,
         linked_addr(counterparty, base_url),
         amount,
@@ -221,10 +231,15 @@ fn print_transfer(
     );
 }
 
-fn involves_owner(event: &EvmEvent, owner: &[u8; 20]) -> bool {
-    decode_transfer(event)
-        .map(|t| t.from == *owner || t.to == *owner)
-        .unwrap_or(false)
+/// Build the two-key `MergedPos` representing position `p` for both the
+/// `in` and `out` sub-histories. Used to bracket the merged stream when
+/// the caller has only an [`EvmPosition`] (e.g. from `resolve_range`).
+fn merged_pos_for(p: EvmPosition) -> MergedPos {
+    let bytes = p.marshal();
+    let mut m = BTreeMap::new();
+    m.insert(IN_KEY.into(), bytes.clone());
+    m.insert(OUT_KEY.into(), bytes);
+    MergedPos::new(m)
 }
 
 #[tokio::main]
@@ -275,77 +290,107 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     for address in &addresses {
-        let topics: [Option<[u8; 32]>; 4] = [Some(TRANSFER_TOPIC), None, None, None];
-        let backend = EvmLogHistory::with_options(
+        let owned = OwnedErc20::with_options(
             provider.clone(),
             cache.clone(),
+            owner,
             *address,
-            topics,
             args.chunk_size,
             12,
         )
         .await?;
+        // Update both inner histories' tips so the merged HistStore knows
+        // the current end-of-chain. Required before iterating without an
+        // active `subscribe()`.
+        owned.poll_tips().await?;
         let meta = metadata.get(address).expect("metadata fetched above");
 
-        let (start, end) = resolve_range(&args, &backend).await?;
+        // Use the outgoing inner history as the reference for time-pos /
+        // block-tip resolution. Both inner histories share the same chain
+        // and anchor block.
+        let (start, end) = resolve_range(&args, owned.out_history()).await?;
         println!(
-            "── {} transfers, block {}..{} ──",
+            "── {} transfers (owner only, IN/OUT merged), block {}..{} ──",
             meta.symbol, start.block, end.block
         );
 
+        let merged_hs = owned.transfers();
         let mut balance = U256::ZERO;
+        let mut last_pos: Option<EvmPosition> = None;
+        let mut count = 0;
 
         if args.follow {
-            let _subscriber = backend
+            // Both inner histories drive the merged tip independently;
+            // subscribe each.
+            let _sub_out = owned
+                .out_history()
                 .subscribe(chainfold::evm::SubscribeTransport::Poll {
                     interval: std::time::Duration::from_secs(2),
                 })
                 .await?;
-            let hs = backend.hist_store();
-            let mut stream = watch_hist(&hs, start);
-            let mut count = 0;
+            let _sub_in = owned
+                .in_history()
+                .subscribe(chainfold::evm::SubscribeTransport::Poll {
+                    interval: std::time::Duration::from_secs(2),
+                })
+                .await?;
+            let mut stream = watch_hist(&merged_hs, merged_pos_for(start));
             while let Some(item) = stream.next().await {
                 let item = item?;
-                balance = apply_transfer(owner, balance, &item.item);
-                if involves_owner(&item.item, &owner) {
-                    print_transfer(
-                        &item,
-                        balance,
-                        count,
-                        &owner,
-                        meta,
-                        max_sym_width,
-                        max_decimals,
-                        base_url,
-                    );
-                    count += 1;
+                let mi: &MergedItem<EvmEvent> = &item.item;
+                let event_pos = mi.item.position();
+                if Some(event_pos) == last_pos {
+                    // Self-transfer duplicate yield: already applied.
+                    continue;
                 }
+                last_pos = Some(event_pos);
+                balance = apply_transfer(owner, balance, &mi.item);
+                print_transfer(
+                    &mi.item,
+                    &mi.source_key,
+                    balance,
+                    count,
+                    &owner,
+                    meta,
+                    max_sym_width,
+                    max_decimals,
+                    base_url,
+                );
+                count += 1;
             }
         } else {
-            let backend_dyn: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
-            let hist = Hist::new(backend_dyn, start, end);
-            let mut stream = hist.iter();
-            let mut count = 0;
+            // Bracket the window: split at start (drop head), then at end
+            // (drop tail). The middle window iterates only owner-involved
+            // events within the requested range.
+            let hist = merged_hs.next().await;
+            let (_, after_start) = hist.split(merged_pos_for(start));
+            let (window, _) = after_start.split(merged_pos_for(end));
+            let mut stream = window.iter();
             while let Some(item) = stream.next().await {
                 let item = item?;
-                balance = apply_transfer(owner, balance, &item.item);
-                if involves_owner(&item.item, &owner) {
-                    if count >= args.limit {
-                        println!("... (limit reached, use --limit to show more)");
-                        break;
-                    }
-                    print_transfer(
-                        &item,
-                        balance,
-                        count,
-                        &owner,
-                        meta,
-                        max_sym_width,
-                        max_decimals,
-                        base_url,
-                    );
-                    count += 1;
+                let mi: &MergedItem<EvmEvent> = &item.item;
+                let event_pos = mi.item.position();
+                if Some(event_pos) == last_pos {
+                    continue;
                 }
+                last_pos = Some(event_pos);
+                balance = apply_transfer(owner, balance, &mi.item);
+                if count >= args.limit {
+                    println!("... (limit reached, use --limit to show more)");
+                    break;
+                }
+                print_transfer(
+                    &mi.item,
+                    &mi.source_key,
+                    balance,
+                    count,
+                    &owner,
+                    meta,
+                    max_sym_width,
+                    max_decimals,
+                    base_url,
+                );
+                count += 1;
             }
             if count == 0 {
                 println!("No transfers involving owner.");
