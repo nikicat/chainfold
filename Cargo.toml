@@ -69,6 +69,9 @@ name = "phase3_hist_store"
 [[test]]
 name = "phase5_merge"
 
+[[test]]
+name = "phase6_matcher"
+
 [[example]]
 name = "history_explorer"
 required-features = ["evm"]
@@ -79,4 +82,8 @@ required-features = ["evm"]
 
 [[example]]
 name = "bridge_explorer"
+required-features = ["evm"]
+
+[[example]]
+name = "bridge_matcher"
 required-features = ["evm"]
