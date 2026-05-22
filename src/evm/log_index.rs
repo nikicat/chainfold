@@ -51,7 +51,8 @@ pub type Fetcher = Arc<
 /// Build a [`Fetcher`] that always errors. Useful in tests that should
 /// never trigger a fetch — if the fetcher is invoked the test fails
 /// with a clear message.
-pub fn never_fetch() -> Fetcher {
+#[cfg(test)]
+pub(crate) fn never_fetch() -> Fetcher {
     Arc::new(|_, _| {
         Box::pin(async {
             Err(HistoryError::internal(
@@ -184,6 +185,7 @@ impl Range {
         }
     }
 
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.item.is_none()
     }
@@ -717,8 +719,11 @@ impl LogIndex {
         }
     }
 
-    /// Resolve a [`LogRef`] to a full [`Log`] via [`LogStore`]. Returns
-    /// `ChainReorg` if the cached block has since been marked reorged.
+    /// Resolve a [`LogRef`] to a full [`Log`] via [`LogStore`]. Returns an
+    /// internal error if the cached block has since been marked reorged —
+    /// consumers detect that condition by comparing `EvmEvent::block_hash`
+    /// against what the store currently reports (see module docs on
+    /// consumer-owned reorg recovery).
     fn resolve(&self, lr: &LogRef) -> Result<Log, HistoryError> {
         match self
             .store
@@ -726,7 +731,10 @@ impl LogIndex {
             .map_err(|e| HistoryError::internal(format!("get_log_by_ref: {e}")))?
         {
             Some(log) => Ok(log),
-            None => Err(HistoryError::ChainReorg),
+            None => Err(HistoryError::internal(format!(
+                "log_ref points to reorged block {:?} (log_index {})",
+                lr.block_hash, lr.log_index
+            ))),
         }
     }
 
@@ -934,10 +942,7 @@ impl LogIndex {
                     state.cursor = advanced;
                     Some((Ok(log), state))
                 }
-                Ok(None) => {
-                    state.done = true;
-                    None
-                }
+                Ok(None) => None,
                 Err(e) => {
                     state.done = true;
                     Some((Err(e), state))
@@ -1499,26 +1504,6 @@ mod tests {
     }
 
     // -- items() with fetcher --
-
-    fn one_log_fetcher(log_block: u64, log_idx: u32, hash: [u8; 32]) -> Fetcher {
-        Arc::new(move |from, to| {
-            let from_block = from;
-            let to_block = to;
-            let hash = hash;
-            Box::pin(async move {
-                Ok(LogPage {
-                    from_block,
-                    to_block,
-                    items: if log_block >= from_block && log_block <= to_block {
-                        vec![mk_log(log_block, log_idx as u64, hash)]
-                    } else {
-                        vec![]
-                    },
-                    end_block_hash: hash,
-                })
-            })
-        })
-    }
 
     #[tokio::test]
     async fn items_walks_filled_ranges_yields_in_order() {

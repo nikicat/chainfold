@@ -1,12 +1,33 @@
 //! chainfold — public API.
 //!
-//! Idiomatic Rust translation of `arch.md` pseudocode.
-//! Implementation-side traits (Source, EventStore, Reducer) live in
-//! [`provider`](crate::provider).
+//! Source-agnostic core: a stream of items is exposed as a sequence of
+//! [`Hist`] snapshots produced by a [`HistStore`]. Each [`Hist`] is finite,
+//! immutable, and iterates items in the half-open interval `(start, end]`.
+//! [`HistStore::gen`] yields a fresh [`Hist`] each time the source's tip
+//! advances; consumers resume by [`split`](Hist::split)ing at a saved
+//! position.
+//!
+//! ## Layering
+//!
+//! * **Generic core** (this module) knows nothing about EVM, Solana,
+//!   Bitcoin, CEXes, or any other concrete source. Tests for the core use a
+//!   synthetic position type, not [`evm::EvmPosition`].
+//! * **Source modules** ([`crate::evm`], future `crate::solana`, …) provide
+//!   concrete [`HistStoreBackend`] implementations and source-specific
+//!   event/position types.
+//!
+//! ## Convention
+//!
+//! Items in a [`Hist`] are at positions in `(start, end]` — strictly after
+//! `start`, at-or-before `end`. A position therefore represents the
+//! *post-cut* of an item: the place "just after" it. Save the position of
+//! the last item you processed as your resume anchor; [`Hist::split`] at
+//! that anchor yields `(empty_prefix, remaining_tail)`.
 
 use std::pin::Pin;
 use std::sync::Arc;
 
+use futures_core::Stream;
 use futures_util::StreamExt;
 
 // ============================================================
@@ -16,60 +37,22 @@ use futures_util::StreamExt;
 /// Unix timestamp in seconds.
 pub type Timestamp = u64;
 
-/// Boxed async stream, used by [`Store::subscribe`].
-pub type Subscription<T> = Pin<Box<dyn futures_core::Stream<Item = T> + Send>>;
+/// Boxed async stream.
+pub type Subscription<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 
-// ============================================================
-// SearchEvent
-// ============================================================
+/// Stream of items yielded by [`Hist::iter`].
+pub type ItemStream<T, P> = Subscription<Result<Positioned<T, P>, HistoryError>>;
 
-/// Progress update from a [`search_after`](HistoryBackend::search_after) or
-/// [`search_before`](HistoryBackend::search_before) stream.
-pub enum SearchEvent<T: Send + Sync + 'static, P: Position> {
-    /// Source has scanned up to this position with no event found yet.
-    /// Emitted after each chunk (eth_getLogs response, new block, etc.).
-    Scanned(P),
-    /// First matching event found. Definitive — no closer event exists
-    /// in this source. Stream ends after this.
-    Found(Cursor<T, P>),
-}
-
-/// Progressive search stream. Emits [`SearchEvent`]s as scanning progresses.
-///
-/// **Cancellation**: drop the stream to stop the search. Sources detect
-/// the dropped receiver and stop fetching.
-pub type SearchStream<T, P> =
-    Pin<Box<dyn futures_core::Stream<Item = Result<SearchEvent<T, P>, HistoryError>> + Send>>;
-
-// ============================================================
-// Side
-// ============================================================
-
-/// Whether a position sits just before or just after an event coordinate.
-///
-/// Between two adjacent cursors there are always two distinct positions:
-/// the [`After`](Side::After) of the first cursor and the [`Before`](Side::Before)
-/// of the second. These two positions are *equivalent*
-/// ([`History::is_equiv`]) even though they are not equal.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Side {
-    /// Just before the event at this coordinate.
-    Before,
-    /// Just after the event at this coordinate.
-    After,
-}
+/// Stream of snapshots yielded by [`HistStore::gen`].
+pub type HistStream<T, P> = Subscription<Hist<T, P>>;
 
 // ============================================================
 // HistoryError
 // ============================================================
 
-/// Errors returned by [`History`] and [`Cursor`] operations.
+/// Errors returned by [`Hist`] and [`HistStore`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
-    /// The referenced position belongs to a fork that is no longer canonical.
-    #[error("chain reorg: position no longer on canonical chain")]
-    ChainReorg,
-
     /// Storage, serialization, or other internal error.
     #[error(transparent)]
     Internal(Box<dyn std::error::Error + Send + Sync>),
@@ -80,7 +63,7 @@ pub enum HistoryError {
 struct InternalMsg(String);
 
 impl HistoryError {
-    pub(crate) fn internal(msg: impl Into<String>) -> Self {
+    pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(Box::new(InternalMsg(msg.into())))
     }
 }
@@ -89,34 +72,49 @@ impl HistoryError {
 // Position
 // ============================================================
 
-/// A separator in a [`History`] — divides it into "before" and "after".
+/// Totally-ordered, serializable cut point in a single source's stream.
 ///
-/// Does **not** point to a specific event (that's [`Cursor`]'s job).
-/// An empty history has positions ([`earliest`](History::earliest),
-/// [`never`](History::never)) but no cursors.
+/// A position is the gap *between* (or at the boundary of) items — never an
+/// item itself. The natural lower bound (analogous to "before any item") is
+/// the type's own `Default` value when that makes sense; sources document
+/// their own convention (e.g. EVM uses `EvmPosition { block: 0, log_index:
+/// 0 }`).
 ///
-/// Positions are **not globally ordered**. During reorgs, positions on
-/// different branches are incomparable. Use [`History::is_equiv`] and
-/// [`History::lca`] for comparison.
-///
-/// Positions are bound to the [`History`] that created them — using a
-/// position from one history on another is undefined.
-pub trait Position: Clone + Send + Sync + 'static {
-    /// Identifies which source (chain, exchange, etc.) this position belongs to.
-    fn source_id(&self) -> u64;
-
+/// **Source-local.** Positions from different sources are not comparable
+/// and the trait does not provide source identity — that concern lives on
+/// [`HistStore`]. Heterogeneous merge (planned) wraps per-source positions
+/// in a keyed structure, never compares them directly.
+pub trait Position:
+    Clone + Eq + Ord + std::fmt::Debug + Send + Sync + 'static
+{
     /// Serialize for persistence. Reconstruct with [`unmarshal`](Self::unmarshal).
     fn marshal(&self) -> Vec<u8>;
 
     /// Deserialize a previously marshalled position. Returns `None` on
     /// invalid data.
-    fn unmarshal(data: &[u8]) -> Option<Self>;
+    fn unmarshal(bytes: &[u8]) -> Option<Self>
+    where
+        Self: Sized;
+}
 
-    /// Which side of an event coordinate this position sits on.
-    fn side(&self) -> Side;
+// ============================================================
+// Positioned<T, P>
+// ============================================================
 
-    /// Same coordinates, different side.
-    fn with_side(&self, side: Side) -> Self;
+/// An item paired with its position in the source stream.
+///
+/// Yielded by [`Hist::iter`]. The position is the *post-cut* of the item:
+/// `hist.split(item.pos)` yields `(prefix_including_item, rest)`.
+#[derive(Clone, Debug)]
+pub struct Positioned<T, P: Position> {
+    pub item: T,
+    pub pos: P,
+}
+
+impl<T, P: Position> Positioned<T, P> {
+    pub fn new(item: T, pos: P) -> Self {
+        Self { item, pos }
+    }
 }
 
 // ============================================================
@@ -137,7 +135,7 @@ impl<T: Clone + Send + Sync> Clone for Store<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> Store<T> {
-    pub(crate) fn new(rx: tokio::sync::watch::Receiver<T>) -> Self {
+    pub fn new(rx: tokio::sync::watch::Receiver<T>) -> Self {
         Self { rx }
     }
 
@@ -166,489 +164,388 @@ impl<T: Clone + Send + Sync + 'static> Store<T> {
 }
 
 // ============================================================
-// Cursor
+// AsyncDisposable
 // ============================================================
 
-/// Points to a specific item in a [`History`].
+/// Handle that cancels a background task on drop.
 ///
-/// Each cursor has two bounding positions: [`before`](Self::before) and
-/// [`after`](Self::after). Navigate with [`prev`](Self::prev) /
-/// [`next`](Self::next).
-///
-/// ```text
-///   ... ─ [cursor_prev] ─ (before) ─ [THIS CURSOR] ─ (after) ─ [cursor_next] ─ ...
-/// ```
-pub struct Cursor<T, P: Position> {
-    value: Arc<T>,
-    before: P,
-    after: P,
-    backend: Arc<dyn HistoryBackend<T, P>>,
+/// Returned by [`HistStore::subscribe`] and similar push-based APIs.
+pub struct AsyncDisposable {
+    cancel: tokio_util::sync::CancellationToken,
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl<T, P: Position> Clone for Cursor<T, P> {
+impl AsyncDisposable {
+    pub fn new(
+        cancel: tokio_util::sync::CancellationToken,
+        handle: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            cancel,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for AsyncDisposable {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(h) = self.handle.take() {
+            h.abort();
+        }
+    }
+}
+
+// ============================================================
+// Hist
+// ============================================================
+
+/// Finite, immutable snapshot of a source's stream.
+///
+/// Iterates items in `(start, end]`. The snapshot is fixed at construction
+/// — even if new items arrive at the source, this `Hist` continues to
+/// reflect the same window. Get a fresh window via
+/// [`HistStore::next`]/[`HistStore::gen`].
+pub struct Hist<T, P: Position> {
+    backend: Arc<dyn HistBackend<T, P>>,
+    start: P,
+    end: P,
+}
+
+impl<T, P: Position> Clone for Hist<T, P> {
     fn clone(&self) -> Self {
         Self {
-            value: self.value.clone(),
-            before: self.before.clone(),
-            after: self.after.clone(),
             backend: self.backend.clone(),
+            start: self.start.clone(),
+            end: self.end.clone(),
         }
     }
 }
 
-impl<T: Send + Sync + 'static, P: Position> Cursor<T, P> {
-    pub(crate) fn new(
-        value: T,
-        before: P,
-        after: P,
-        backend: Arc<dyn HistoryBackend<T, P>>,
-    ) -> Self {
-        Self {
-            value: Arc::new(value),
-            before,
-            after,
-            backend,
-        }
+impl<T: Send + Sync + 'static, P: Position> Hist<T, P> {
+    pub fn new(backend: Arc<dyn HistBackend<T, P>>, start: P, end: P) -> Self {
+        debug_assert!(start <= end, "Hist::new: start must be <= end");
+        Self { backend, start, end }
     }
 
-    /// Re-wrap this cursor to point at a different backend.
+    /// Exclusive lower bound — items in this Hist are at positions `> start`.
+    pub fn start(&self) -> &P {
+        &self.start
+    }
+
+    /// Inclusive upper bound — the most recent item's position (or `start`
+    /// for an empty Hist).
+    pub fn end(&self) -> &P {
+        &self.end
+    }
+
+    /// True if `start == end` (no items in this snapshot).
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// Stream items in `(start, end]` in ascending position order.
     ///
-    /// Used by MergedHistory to make source cursors navigate via the
-    /// merged backend instead of the original source.
-    pub(crate) fn with_backend(self, backend: Arc<dyn HistoryBackend<T, P>>) -> Self {
-        Self { backend, ..self }
+    /// Item gaps cached by the backend are returned immediately; uncached
+    /// gaps are filled on demand. Drop the stream to cancel any in-flight
+    /// fetches.
+    pub fn iter(&self) -> ItemStream<T, P> {
+        self.backend.iter(self.start.clone(), self.end.clone())
     }
 
-    /// The event or state at this position.
-    pub fn value(&self) -> &T {
-        &self.value
-    }
-
-    /// Position just before this item.
+    /// Split into `(head, tail)` at position `p`.
     ///
-    /// `history.after(cursor.before(), None)` returns a cursor pointing
-    /// to the same item.
-    pub fn before(&self) -> &P {
-        &self.before
+    /// * `head` iterates `(start, min(p, end)]`.
+    /// * `tail` iterates `(max(p, start), end]`.
+    ///
+    /// If `p < start` the head is empty and tail == self. If `p > end` the
+    /// head == self and tail is empty. Always returns two valid (possibly
+    /// empty) snapshots; never widens the window.
+    pub fn split(&self, p: P) -> (Self, Self) {
+        let clamped = if p < self.start {
+            self.start.clone()
+        } else if p > self.end {
+            self.end.clone()
+        } else {
+            p
+        };
+        let head = Self {
+            backend: self.backend.clone(),
+            start: self.start.clone(),
+            end: clamped.clone(),
+        };
+        let tail = Self {
+            backend: self.backend.clone(),
+            start: clamped,
+            end: self.end.clone(),
+        };
+        (head, tail)
     }
 
-    /// Position just after this item.
+    /// Position just after the last item in `items`, or `None` if empty.
     ///
-    /// `history.before(cursor.after(), None)` returns a cursor pointing
-    /// to the same item.
-    pub fn after(&self) -> &P {
-        &self.after
-    }
-
-    /// Previous item in the history.
-    ///
-    /// Shorthand for `history.before(self.before(), None)`.
-    /// Returns `None` at the beginning of history.
-    pub async fn prev(&self) -> Result<Option<Cursor<T, P>>, HistoryError> {
-        self.backend.before(&self.before, None).await
-    }
-
-    /// Next item in the history.
-    ///
-    /// Shorthand for `history.after(self.after(), None)`.
-    /// **Blocks at the tip** waiting for new events on live histories.
-    /// Returns `None` only for static/closed histories.
-    pub async fn next(&self) -> Result<Option<Cursor<T, P>>, HistoryError> {
-        self.backend.after(&self.after, None).await
-    }
-
-    /// True if this cursor comes after position `p` on the canonical chain.
-    ///
-    /// Returns `false` if `p` is on a different branch.
-    pub async fn is_after(&self, p: &P) -> Result<bool, HistoryError> {
-        self.backend.is_after(&self.after, p).await
-    }
-
-    /// True if this cursor comes before position `p` on the canonical chain.
-    ///
-    /// Returns `false` if `p` is on a different branch.
-    pub async fn is_before(&self, p: &P) -> Result<bool, HistoryError> {
-        self.backend.is_before(&self.before, p).await
+    /// Convenience for the "save resume anchor after a batch" pattern.
+    pub fn pos_after(items: &[Positioned<T, P>]) -> Option<P> {
+        items.last().map(|p| p.pos.clone())
     }
 }
 
 // ============================================================
-// History
+// HistStore
 // ============================================================
 
-/// Lazy, cached, bidirectional stream of events or states.
+/// Reactive sequence of [`Hist`] snapshots — the live "current view" of a
+/// source's stream.
 ///
-/// The central abstraction of chainfold. All variants — source-backed,
-/// reduced, merged — share this interface.
-///
-/// ```ignore
-/// // Reorg-safe processing loop (see arch.md for full example):
-/// let pos = transfers.unmarshal(&load_anchor())?;
-/// let lca = transfers.lca(&pos, &transfers.safe().get()).await?;
-///
-/// // Rollback reorged cursors
-/// let mut curs = transfers.before(&pos, None).await?;
-/// while let Some(c) = curs {
-///     if transfers.is_equiv(c.before(), &lca).await? { break; }
-///     revert(c.value());
-///     curs = c.prev().await?;
-/// }
-///
-/// // Replay forward
-/// let mut curs = transfers.after(&lca, None).await?;
-/// while let Some(c) = curs {
-///     process(c.value());
-///     save_anchor(&c.after().marshal());
-///     curs = c.next().await?;
-/// }
-/// ```
-pub struct History<T, P: Position> {
-    inner: Arc<dyn HistoryBackend<T, P>>,
+/// Yields a fresh [`Hist`] whenever the source's tip advances. Each new
+/// snapshot's `end` is the latest known position; consumers process
+/// `(saved_anchor, new_end]` and save the new anchor.
+pub struct HistStore<T, P: Position> {
+    backend: Arc<dyn HistStoreBackend<T, P>>,
 }
 
-impl<T, P: Position> Clone for History<T, P> {
+impl<T, P: Position> Clone for HistStore<T, P> {
     fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
+        Self { backend: self.backend.clone() }
     }
 }
 
-impl<T: Send + Sync + 'static, P: Position> History<T, P> {
-    pub(crate) fn new(backend: Arc<dyn HistoryBackend<T, P>>) -> Self {
-        Self { inner: backend }
+impl<T: Send + Sync + 'static, P: Position> HistStore<T, P> {
+    pub fn new(backend: Arc<dyn HistStoreBackend<T, P>>) -> Self {
+        Self { backend }
     }
 
-    // -- Reactive tip positions --------------------------------
+    /// Stream of snapshots: first item is the current snapshot, subsequent
+    /// items are emitted as the tip advances.
+    pub fn snapshots(&self) -> HistStream<T, P> {
+        self.backend.snapshots()
+    }
 
-    /// Updates as new events arrive (includes mempool/unconfirmed).
+    /// Current snapshot, snapped to the latest known tip.
+    pub async fn next(&self) -> Hist<T, P> {
+        self.backend.next().await
+    }
+
+    /// Push-based variant of [`snapshots`](Self::snapshots) — invokes `cb`
+    /// with each new snapshot. Drop the returned handle to cancel.
+    pub fn subscribe(
+        &self,
+        cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>,
+    ) -> AsyncDisposable {
+        self.backend.subscribe(cb)
+    }
+
+    /// Estimate a position at a wall-clock time. Used as a cut point in
+    /// [`Hist::split`] when resuming from a time instead of an anchor.
+    pub async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {
+        self.backend.time_pos(time).await
+    }
+
+    /// Reactive tip stores (best-effort; sources without finality wiring
+    /// fall back to `latest`).
     pub fn latest(&self) -> &Store<P> {
-        self.inner.latest()
+        self.backend.latest()
     }
-
-    /// Updates as events are mined into blocks.
     pub fn best(&self) -> &Store<P> {
-        self.inner.best()
+        self.backend.best()
     }
-
-    /// Updates as blocks finalize (no further reorgs possible).
     pub fn safe(&self) -> &Store<P> {
-        self.inner.safe()
-    }
-
-    // -- Source identity ----------------------------------------
-
-    /// Identifies which source this history belongs to.
-    pub fn source_id(&self) -> u64 {
-        self.inner.source_id()
-    }
-
-    // -- Sentinel positions ------------------------------------
-
-    /// Beginning-of-time sentinel.
-    ///
-    /// `history.after(&history.earliest(), None)` returns the first cursor.
-    pub fn earliest(&self) -> P {
-        self.inner.earliest()
-    }
-
-    /// Past-the-end sentinel. No cursor ever comes after this position.
-    pub fn never(&self) -> P {
-        self.inner.never()
-    }
-
-    // -- Position creation -------------------------------------
-
-    /// Approximate position at a wall-clock time on the canonical chain.
-    ///
-    /// Useful as a cutoff for [`after`](Self::after) / [`before`](Self::before).
-    /// Does not need to be exact — navigation resolves against actual data.
-    pub fn at(&self, time: Timestamp) -> P {
-        self.inner.at(time)
-    }
-
-    // -- Comparison --------------------------------------------
-
-    /// True if `a` and `b` are equivalent positions.
-    ///
-    /// Two positions are equivalent when they sit in the same gap:
-    /// navigating forward or backward from either yields the same cursor
-    /// (or `None` at boundaries).
-    pub async fn is_equiv(&self, a: &P, b: &P) -> Result<bool, HistoryError> {
-        self.inner.is_equiv(a, b).await
-    }
-
-    /// Latest common ancestor of two positions.
-    ///
-    /// Always exists because [`earliest`](Self::earliest) is an ancestor of
-    /// every position. Useful for reorg recovery: roll back to the LCA,
-    /// then replay forward on the canonical chain.
-    pub async fn lca(&self, a: &P, b: &P) -> Result<P, HistoryError> {
-        self.inner.lca(a, b).await
-    }
-
-    // -- Navigation --------------------------------------------
-
-    /// Progressive forward search stream.
-    ///
-    /// Emits [`SearchEvent::Scanned`] as chunks are scanned, then
-    /// [`SearchEvent::Found`] when an event is located. Drop the stream
-    /// to cancel.
-    pub fn search_after(&self, position: &P, cutoff: Option<&P>) -> SearchStream<T, P> {
-        self.inner.search_after(position, cutoff)
-    }
-
-    /// Progressive backward search stream.
-    pub fn search_before(&self, position: &P, cutoff: Option<&P>) -> SearchStream<T, P> {
-        self.inner.search_before(position, cutoff)
-    }
-
-    /// First cursor after `position`, or `None` if none exists before `cutoff`.
-    ///
-    /// `cutoff = None` means unbounded — **blocks at the tip** for live
-    /// histories, waiting for new events.
-    pub async fn after(
-        &self,
-        position: &P,
-        cutoff: Option<&P>,
-    ) -> Result<Option<Cursor<T, P>>, HistoryError> {
-        self.inner.after(position, cutoff).await
-    }
-
-    /// Last cursor before `position`, or `None` if none exists after `cutoff`.
-    ///
-    /// `cutoff = None` means unbounded (back to [`earliest`](Self::earliest)).
-    pub async fn before(
-        &self,
-        position: &P,
-        cutoff: Option<&P>,
-    ) -> Result<Option<Cursor<T, P>>, HistoryError> {
-        self.inner.before(position, cutoff).await
-    }
-
-    // -- Combinators -------------------------------------------
-
-    /// Merge N histories (same event and position type) into one
-    /// interleaved history ordered by `pos_cmp`.
-    ///
-    /// Events from all sources appear in the merged output. Duplicates
-    /// (same position in multiple sources) are naturally deduplicated
-    /// because all sources share the same position space.
-    ///
-    /// ```ignore
-    /// let merged = History::merge(vec![incoming, outgoing], |a, b| {
-    ///     (a.block_number, a.log_index).cmp(&(b.block_number, b.log_index))
-    /// });
-    /// ```
-    pub fn merge(
-        sources: Vec<Self>,
-        pos_cmp: fn(&P, &P) -> std::cmp::Ordering,
-    ) -> Self {
-        crate::merge::MergedHistory::into_history(sources, pos_cmp)
-    }
-
-    // -- Cost estimation ----------------------------------------
-
-    /// Minimum number of scan RPCs to cover [from, to], accounting for cached ranges.
-    pub fn estimate_scan_count(&self, from: &P, to: &P) -> u64 {
-        self.inner.estimate_scan_count(from, to)
-    }
-
-    /// Position one scan-chunk before `target`. Used for the fetch-and-scan fallback.
-    pub fn scan_chunk_before(&self, target: &P) -> P {
-        self.inner.scan_chunk_before(target)
-    }
-
-    // -- Serialization -----------------------------------------
-
-    /// Deserialize a position previously saved with [`Position::marshal`].
-    pub fn unmarshal(&self, data: &[u8]) -> Result<P, HistoryError> {
-        P::unmarshal(data).ok_or_else(|| HistoryError::internal("invalid position data"))
+        self.backend.safe()
     }
 }
 
 // ============================================================
-// HistoryBackend (internal)
+// Backend traits (implemented per source)
 // ============================================================
 
-/// Internal trait backing [`History`] and [`Cursor`] operations.
-///
-/// Not part of the public API. Implemented by source-backed histories,
-/// reducer-derived histories, and merged histories.
-///
-/// ## Required: `search_after` / `search_before`
-///
-/// These return a [`SearchStream`] that progressively reports scanning
-/// progress and eventually yields a result. They are **not** async —
-/// they synchronously return a stream. The actual work happens when
-/// the stream is polled.
-///
-/// ## Provided: `after` / `before`
-///
-/// Default implementations that consume the search stream to completion,
-/// returning only the final `Found` cursor (or `None`).
+/// Backing implementation for [`Hist`]. Implemented per source.
+pub trait HistBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
+    /// Stream items in `(start, end]` ascending.
+    fn iter(&self, start: P, end: P) -> ItemStream<T, P>;
+}
+
+/// Backing implementation for [`HistStore`]. Implemented per source.
 #[async_trait::async_trait]
-pub(crate) trait HistoryBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
-    fn source_id(&self) -> u64;
-    fn earliest(&self) -> P;
-    fn never(&self) -> P;
+pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>:
+    Send + Sync
+{
+    /// Yield a fresh [`Hist`] each time the source's tip advances; first
+    /// yield is the current snapshot.
+    fn snapshots(&self) -> HistStream<T, P>;
+
+    /// Current snapshot.
+    async fn next(&self) -> Hist<T, P>;
+
+    /// Push-based variant of [`snapshots`](Self::snapshots).
+    fn subscribe(
+        &self,
+        cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>,
+    ) -> AsyncDisposable;
+
+    /// Estimate a position at a wall-clock time.
+    async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;
 
     fn latest(&self) -> &Store<P>;
     fn best(&self) -> &Store<P>;
     fn safe(&self) -> &Store<P>;
-
-    fn at(&self, time: Timestamp) -> P;
-
-    async fn is_equiv(&self, a: &P, b: &P) -> Result<bool, HistoryError>;
-    async fn lca(&self, a: &P, b: &P) -> Result<P, HistoryError>;
-
-    /// Progressive forward search. Returns a stream of [`SearchEvent`]s.
-    ///
-    /// The stream emits `Scanned(pos)` as each chunk is scanned, then
-    /// `Found(cursor)` when the first matching event is located. The stream
-    /// ends after `Found` or when the search space is exhausted.
-    ///
-    /// `cutoff = None` means unbounded — the stream should block at the
-    /// tip waiting for new events (for live histories).
-    fn search_after(&self, position: &P, cutoff: Option<&P>) -> SearchStream<T, P>;
-
-    /// Progressive backward search. Same contract as [`search_after`] but
-    /// scans in reverse.
-    fn search_before(&self, position: &P, cutoff: Option<&P>) -> SearchStream<T, P>;
-
-    /// First cursor after `position`. Default impl consumes [`search_after`].
-    async fn after(
-        &self,
-        position: &P,
-        cutoff: Option<&P>,
-    ) -> Result<Option<Cursor<T, P>>, HistoryError> {
-        let mut stream = self.search_after(position, cutoff);
-        while let Some(event) = stream.next().await {
-            match event? {
-                SearchEvent::Scanned(_) => continue,
-                SearchEvent::Found(cursor) => return Ok(Some(cursor)),
-            }
-        }
-        Ok(None)
-    }
-
-    /// Last cursor before `position`. Default impl consumes [`search_before`].
-    async fn before(
-        &self,
-        position: &P,
-        cutoff: Option<&P>,
-    ) -> Result<Option<Cursor<T, P>>, HistoryError> {
-        let mut stream = self.search_before(position, cutoff);
-        while let Some(event) = stream.next().await {
-            match event? {
-                SearchEvent::Scanned(_) => continue,
-                SearchEvent::Found(cursor) => return Ok(Some(cursor)),
-            }
-        }
-        Ok(None)
-    }
-
-    async fn is_after(&self, cursor_pos: &P, p: &P) -> Result<bool, HistoryError>;
-    async fn is_before(&self, cursor_pos: &P, p: &P) -> Result<bool, HistoryError>;
-
-    /// Minimum number of scan RPCs to cover [from, to], accounting for cached ranges.
-    fn estimate_scan_count(&self, _from: &P, _to: &P) -> u64 {
-        0
-    }
-
-    /// Position one scan-chunk before `target`. Used for the fetch-and-scan fallback.
-    fn scan_chunk_before(&self, target: &P) -> P {
-        target.clone()
-    }
 }
 
 // ============================================================
-// EVM types
+// watch_hist / act_and_wait
+// ============================================================
+
+/// Yield every item arriving after `start`, across snapshot boundaries.
+///
+/// Each fresh snapshot from `store.snapshots()` is split at the running anchor;
+/// only the tail (post-anchor items) is iterated. The anchor advances as
+/// items are emitted, so a snapshot that arrives during iteration just
+/// extends the window — items are never duplicated.
+pub fn watch_hist<T: Send + Sync + 'static, P: Position>(
+    store: &HistStore<T, P>,
+    start: P,
+) -> ItemStream<T, P> {
+    let snapshots = store.snapshots();
+    Box::pin(futures_util::stream::unfold(
+        WatchState {
+            snapshots,
+            anchor: start,
+            current: None,
+        },
+        watch_step,
+    ))
+}
+
+struct WatchState<T: Send + Sync + 'static, P: Position> {
+    snapshots: HistStream<T, P>,
+    anchor: P,
+    current: Option<ItemStream<T, P>>,
+}
+
+async fn watch_step<T: Send + Sync + 'static, P: Position>(
+    mut state: WatchState<T, P>,
+) -> Option<(Result<Positioned<T, P>, HistoryError>, WatchState<T, P>)> {
+    loop {
+        if state.current.is_none() {
+            let hist = state.snapshots.next().await?;
+            let (_, tail) = hist.split(state.anchor.clone());
+            state.current = Some(tail.iter());
+        }
+        let stream = state.current.as_mut().unwrap();
+        match stream.next().await {
+            Some(Ok(item)) => {
+                state.anchor = item.pos.clone();
+                return Some((Ok(item), state));
+            }
+            Some(Err(e)) => return Some((Err(e), state)),
+            None => {
+                state.current = None;
+            }
+        }
+    }
+}
+
+/// Snapshot the tip, run `op`, then wait for the first item satisfying
+/// `predicate` that arrives at-or-after the snapshot.
+///
+/// Race-safe: items that appeared between snapshot and op-completion are
+/// still observed because the snapshot defines the lower bound, not the
+/// op's start time.
+pub async fn act_and_wait<T, P, R, OpFut, OpFn, Pred>(
+    store: &HistStore<T, P>,
+    op: OpFn,
+    predicate: Pred,
+) -> Result<(Positioned<T, P>, R), HistoryError>
+where
+    T: Send + Sync + 'static,
+    P: Position,
+    OpFn: FnOnce() -> OpFut,
+    OpFut: std::future::Future<Output = R>,
+    Pred: Fn(&T, &R) -> bool + Send + Sync,
+{
+    let snapshot = store.next().await;
+    let anchor = snapshot.end().clone();
+    let result = op().await;
+
+    let mut stream = watch_hist(store, anchor);
+    while let Some(next) = stream.next().await {
+        let item = next?;
+        if predicate(&item.item, &result) {
+            return Ok((item, result));
+        }
+    }
+    Err(HistoryError::internal("act_and_wait: stream ended without match"))
+}
+
+// ============================================================
+// EVM types (concrete source — see src/evm/* for impl)
 // ============================================================
 
 pub mod evm {
     use super::*;
 
     // --------------------------------------------------------
-    // EvmPosition
+    // EvmPosition — totally ordered (block, log_index)
     // --------------------------------------------------------
 
-    /// Position in an EVM event stream.
+    /// Position in an EVM log stream. Totally ordered: `(block, log_index)`
+    /// lexicographically.
     ///
-    /// `block_hash` disambiguates forks (same `block_number` + `log_index`
-    /// can exist on different chains during a reorg). `timestamp` is
-    /// carried for convenience ([`time()`](Self::time)).
-    #[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+    /// Items in a [`Hist<_, EvmPosition>`](super::Hist) are at positions in
+    /// `(start, end]`. The lower-bound sentinel for "before all logs on
+    /// this chain" is `EvmPosition { block: 0, log_index: 0 }` — no real
+    /// EVM chain has a log at genesis-block / index-0 (genesis carries no
+    /// transactions on any production chain).
+    ///
+    /// Layer note: this struct carries *only* the coordinates needed to
+    /// totally-order events on one chain. Chain identity lives on the
+    /// [`EvmLogHistory`](crate::evm::EvmLogHistory) producing the stream;
+    /// block hashes live in [`LogStore`](crate::evm::LogStore); timestamps
+    /// live on [`EvmEvent`].
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        Eq,
+        PartialEq,
+        Ord,
+        PartialOrd,
+        Hash,
+        Default,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
     pub struct EvmPosition {
-        pub chain_id: u64,
-        pub block_number: u64,
+        pub block: u64,
         pub log_index: u32,
-        pub block_hash: [u8; 32],
-        pub timestamp: Timestamp,
-        pub side: Side,
     }
 
     impl EvmPosition {
-        /// Block timestamp at this position.
-        pub fn time(&self) -> Timestamp {
-            self.timestamp
+        pub const fn new(block: u64, log_index: u32) -> Self {
+            Self { block, log_index }
         }
 
-        /// Beginning-of-time sentinel for this chain.
-        pub fn earliest(chain_id: u64) -> Self {
-            Self {
-                chain_id,
-                block_number: 0,
-                log_index: 0,
-                block_hash: [0; 32],
-                timestamp: 0,
-                side: Side::Before,
-            }
-        }
-
-        /// Past-the-end sentinel for this chain.
-        pub fn never(chain_id: u64) -> Self {
-            Self {
-                chain_id,
-                block_number: u64::MAX,
-                log_index: u32::MAX,
-                block_hash: [0xff; 32],
-                timestamp: u64::MAX,
-                side: Side::After,
-            }
+        /// Lower-bound sentinel: strictly less than every real log position.
+        pub const fn earliest() -> Self {
+            Self { block: 0, log_index: 0 }
         }
     }
 
     impl Position for EvmPosition {
-        fn source_id(&self) -> u64 {
-            self.chain_id
-        }
-
         fn marshal(&self) -> Vec<u8> {
             postcard::to_allocvec(self).expect("EvmPosition serialization cannot fail")
         }
 
-        fn unmarshal(data: &[u8]) -> Option<Self> {
-            postcard::from_bytes(data).ok()
-        }
-
-        fn side(&self) -> Side {
-            self.side
-        }
-
-        fn with_side(&self, side: Side) -> Self {
-            Self { side, ..self.clone() }
+        fn unmarshal(bytes: &[u8]) -> Option<Self> {
+            postcard::from_bytes(bytes).ok()
         }
     }
-
-    /// Convenience aliases.
-    pub type EvmCursor<T> = Cursor<T, EvmPosition>;
-    pub type EvmHistory<T> = History<T, EvmPosition>;
 
     // --------------------------------------------------------
     // Raw EVM event
     // --------------------------------------------------------
 
+    /// A single log event. Carries its own (block, log_index, block_hash,
+    /// timestamp) so consumers don't need to round-trip the store for them.
     #[derive(Debug, Clone)]
     pub struct EvmEvent {
         pub contract_address: [u8; 20],
@@ -659,6 +556,12 @@ pub mod evm {
         pub tx_hash: [u8; 32],
         pub topics: Vec<[u8; 32]>,
         pub data: Vec<u8>,
+    }
+
+    impl EvmEvent {
+        pub fn position(&self) -> EvmPosition {
+            EvmPosition { block: self.block_number, log_index: self.log_index }
+        }
     }
 
     // --------------------------------------------------------
@@ -682,63 +585,6 @@ pub mod evm {
     }
 
     // --------------------------------------------------------
-    // EvmChain
-    // --------------------------------------------------------
-
-    /// Entry point for an EVM-compatible blockchain.
-    pub struct EvmChain {
-        _private: (),
-    }
-
-    impl EvmChain {
-        pub fn blocks(&self) -> &EvmHistory<EvmBlock> {
-            todo!()
-        }
-
-        pub fn transactions(&self) -> &EvmHistory<EvmTransaction> {
-            todo!()
-        }
-
-        pub async fn contract(
-            &self,
-            _address: [u8; 20],
-        ) -> Result<Arc<EvmContract>, HistoryError> {
-            todo!()
-        }
-
-        pub async fn erc20(&self, _address: [u8; 20]) -> Result<Arc<Erc20>, HistoryError> {
-            todo!()
-        }
-    }
-
-    // --------------------------------------------------------
-    // EvmContract
-    // --------------------------------------------------------
-
-    pub struct EvmContract {
-        pub address: [u8; 20],
-        _chain: Arc<EvmChain>,
-    }
-
-    impl std::fmt::Debug for EvmContract {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("EvmContract")
-                .field("address", &self.address)
-                .finish()
-        }
-    }
-
-    impl EvmContract {
-        pub fn states(&self) -> &EvmHistory<Vec<u8>> {
-            todo!()
-        }
-
-        pub fn created_at(&self) -> &EvmPosition {
-            todo!()
-        }
-    }
-
-    // --------------------------------------------------------
     // Asset / Amount
     // --------------------------------------------------------
 
@@ -748,9 +594,6 @@ pub mod evm {
     }
 
     /// Asset-aware fixed-point amount.
-    ///
-    /// Carries an [`Asset`] reference so that arithmetic can enforce
-    /// same-asset operations at runtime.
     #[derive(Clone)]
     pub struct Amount {
         pub raw: u128,
@@ -779,50 +622,6 @@ pub mod evm {
                 frac,
                 width = self.decimals as usize
             )
-        }
-    }
-
-    // --------------------------------------------------------
-    // Erc20
-    // --------------------------------------------------------
-
-    #[derive(Debug)]
-    pub struct Erc20 {
-        pub contract: EvmContract,
-        pub symbol: String,
-        pub name: String,
-        pub decimals: u8,
-    }
-
-    impl Asset for Erc20 {
-        fn symbol(&self) -> &str {
-            &self.symbol
-        }
-        fn name(&self) -> &str {
-            &self.name
-        }
-    }
-
-    impl Erc20 {
-        pub fn transfers(
-            &self,
-            _from: Option<[u8; 20]>,
-            _to: Option<[u8; 20]>,
-        ) -> EvmHistory<Erc20Transfer> {
-            todo!()
-        }
-
-        pub fn mints(&self, _to: [u8; 20]) -> EvmHistory<Erc20Mint> {
-            todo!()
-        }
-
-        pub fn burns(&self, _from: [u8; 20]) -> EvmHistory<Erc20Burn> {
-            todo!()
-        }
-
-        /// Returns the singleton `OwnedErc20` for this owner.
-        pub fn owned_by(self: &Arc<Self>, _owner: [u8; 20]) -> OwnedErc20 {
-            todo!()
         }
     }
 
@@ -856,39 +655,27 @@ pub mod evm {
     }
 
     // --------------------------------------------------------
-    // OwnedErc20
+    // Erc20 / OwnedErc20 (metadata only — backends live in src/evm)
     // --------------------------------------------------------
 
-    /// ERC20 events and states scoped to a specific account.
-    pub struct OwnedErc20 {
-        pub token: Arc<Erc20>,
-        pub owner: [u8; 20],
+    #[derive(Debug)]
+    pub struct Erc20 {
+        pub address: [u8; 20],
+        pub symbol: String,
+        pub name: String,
+        pub decimals: u8,
     }
 
-    impl OwnedErc20 {
-        /// All transfers involving this account (in + out combined).
-        pub fn transfers(&self) -> EvmHistory<Erc20Transfer> {
-            todo!()
+    impl Asset for Erc20 {
+        fn symbol(&self) -> &str {
+            &self.symbol
         }
-
-        pub fn mints(&self) -> EvmHistory<Erc20Mint> {
-            todo!()
-        }
-
-        pub fn burns(&self) -> EvmHistory<Erc20Burn> {
-            todo!()
-        }
-
-        /// Balance history — reduced from transfer/mint/burn events.
-        pub fn balances(&self) -> EvmHistory<Erc20Balance> {
-            todo!()
+        fn name(&self) -> &str {
+            &self.name
         }
     }
 
-    // --------------------------------------------------------
-    // Erc20Balance (reduced state)
-    // --------------------------------------------------------
-
+    /// Reduced state: a running account balance.
     #[derive(Clone)]
     pub struct Erc20Balance {
         pub token: Arc<Erc20>,

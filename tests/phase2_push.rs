@@ -95,14 +95,14 @@ async fn live_event_latency_ws() {
     let latency = start.elapsed();
 
     assert!(
-        observed.block_number > 0,
+        observed.block > 0,
         "tip advanced past block 0 (got {})",
-        observed.block_number
+        observed.block
     );
     println!(
         "WS push latency: {} ms (tip now {})",
         latency.as_millis(),
-        observed.block_number
+        observed.block
     );
     // WS over localhost is typically <50 ms. Generous 500ms bound to
     // absorb CI noise; tighten later once the soak metrics are in place.
@@ -143,7 +143,7 @@ async fn poll_drain_populates_scanned_ranges() {
         .await
         .expect("subscribe Poll");
 
-    let tip_before = history.latest_store().get().block_number;
+    let tip_before = history.latest_store().get().block;
 
     // Mine blocks while subscribed. Each batch yields a page on the next
     // poll cycle, which the drain persists.
@@ -152,7 +152,7 @@ async fn poll_drain_populates_scanned_ranges() {
     // Wait for poll cycle + drain flush.
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    let final_tip = history.latest_store().get().block_number;
+    let final_tip = history.latest_store().get().block;
     assert!(
         final_tip >= tip_before + 5,
         "tip advanced (before={tip_before} final={final_tip})",
@@ -202,7 +202,7 @@ async fn resume_seeds_from_current_tip() {
         .expect("subscribe sub1");
     mine_blocks(&provider, 2).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let tip_at_disconnect = history.latest_store().get().block_number;
+    let tip_at_disconnect = history.latest_store().get().block;
     drop(sub1);
 
     // Mine while no subscriber is active.
@@ -219,7 +219,7 @@ async fn resume_seeds_from_current_tip() {
 
     // subscribe() already called poll_tip before returning, so the seed
     // has already happened. Read the store directly.
-    let seeded_tip = history.latest_store().get().block_number;
+    let seeded_tip = history.latest_store().get().block;
     assert!(
         seeded_tip >= tip_at_disconnect + 4,
         "fresh subscribe() seeds the current tip past the disconnect (seeded={seeded_tip} disconnect={tip_at_disconnect})",
@@ -228,7 +228,7 @@ async fn resume_seeds_from_current_tip() {
     // Newly mined block after resume should still flow through.
     mine_blocks(&provider, 1).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let after_one_more = history.latest_store().get().block_number;
+    let after_one_more = history.latest_store().get().block;
     assert!(
         after_one_more > seeded_tip,
         "post-resume mines still observed (after={after_one_more} seeded={seeded_tip})",

@@ -1,20 +1,21 @@
-//! Dedicated ERC20 transfer explorer with running balance.
+//! ERC20 transfer explorer with running balance, over the new
+//! `Hist` / `HistStore` API.
 //!
-//! Auto-fetches token metadata (name, symbol, decimals) from the contract.
-//! Shows decoded transfers for a specific owner address with a running balance
-//! column powered by ReducedHistory. Supports multiple tokens.
+//! Phase 3 trade-off: prior version used `merge` + `ReducedHistory` to
+//! interleave IN/OUT histories and fold balance reactively. Both pieces
+//! were deleted in Phase 3. This rewrite scans the full Transfer history
+//! for the token contract, filters for the owner client-side, and folds
+//! [`apply_transfer`] inline. Phase 5 brings the per-topic IN/OUT split
+//! back via `merge_hist_stores`; Phase 6 will rebuild a proper `Reducer`.
+//!
+//! Multi-token support: each `--address` is processed independently and
+//! its transfers print in its own section. No cross-token merge yet.
 //!
 //! Usage:
 //!   cargo run --features evm --example erc20_explorer -- \
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --owner 0xYourAddress \
 //!     --from 2025-01-15 --to 2025-01-16
-//!
-//!   # Multiple tokens (USDC + WETH):
-//!   cargo run --features evm --example erc20_explorer -- \
-//!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-//!     --address 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 \
-//!     --owner 0xYourAddress --from-block 22000000 --num-blocks 100
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,21 +23,18 @@ use std::sync::Arc;
 use alloy::primitives::U256;
 use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::{Cursor, History, Side};
+use chainfold::arch::{watch_hist, Hist, HistBackend, Positioned};
 use chainfold::evm::{
-    decode_transfer, evm_pos_cmp, fetch_erc20_metadata, Erc20BalanceReducer, Erc20Metadata,
-    EvmLogHistory, LogStore, TRANSFER_TOPIC,
+    apply_transfer, decode_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory,
+    LogStore, TRANSFER_TOPIC,
 };
-use chainfold::reduce::{ReducedEvent, ReducedHistory};
 use chrono::NaiveDate;
 use clap::Parser;
-
-type BalanceEvent = ReducedEvent<EvmEvent, U256>;
+use futures_util::StreamExt;
 
 #[derive(Parser)]
 #[command(name = "erc20_explorer", about = "Explore ERC20 transfers for an owner")]
 struct Args {
-    /// Ethereum RPC endpoint
     #[arg(long, default_value = "https://eth.llamarpc.com")]
     rpc_url: String,
 
@@ -48,111 +46,79 @@ struct Args {
     #[arg(long)]
     owner: String,
 
-    /// Starting block (use --from/--to for date-based ranges instead)
     #[arg(long)]
     from_block: Option<u64>,
 
-    /// Number of blocks to scan (used with --from-block)
     #[arg(long, default_value = "100")]
     num_blocks: u64,
 
-    /// Start date, UTC (e.g. 2025-01-15 or 2025-01-15T12:00:00)
     #[arg(long, value_name = "DATE")]
     from: Option<String>,
 
-    /// End date, UTC (e.g. 2025-01-16 or 2025-01-16T12:00:00)
     #[arg(long, value_name = "DATE")]
     to: Option<String>,
 
-    /// Max transfers to print
     #[arg(long, default_value = "20")]
     limit: usize,
 
-    /// SQLite cache path
     #[arg(long, default_value = "./history_explorer.db")]
     db: String,
 
-    /// Block chunk size for eth_getLogs
     #[arg(long, default_value = "1000")]
     chunk_size: u64,
 
-    /// Navigate backwards instead of forwards
-    #[arg(long)]
-    reverse: bool,
-
-    /// Follow (block at tip for new events)
     #[arg(long)]
     follow: bool,
 }
 
 fn parse_datetime(s: &str) -> Result<u64, String> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| {
-            NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-        })
+        .or_else(|_| NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap()))
         .map(|dt| dt.and_utc().timestamp() as u64)
         .map_err(|e| format!("invalid date: {e}"))
-}
-
-fn resolve_range(
-    args: &Args,
-    history: &History<BalanceEvent, EvmPosition>,
-    chain_id: u64,
-) -> Result<(EvmPosition, EvmPosition), String> {
-    match (&args.from, &args.to, args.from_block) {
-        (Some(from_str), Some(to_str), None) => {
-            let from_ts = parse_datetime(from_str)?;
-            let to_ts = parse_datetime(to_str)?;
-            let start = history.at(from_ts);
-            let end = history.at(to_ts);
-            println!("  Date range: {} → {}", from_str, to_str);
-            println!("  Estimated blocks: {} → {}", start.block_number, end.block_number);
-            let cutoff = EvmPosition {
-                chain_id, block_number: end.block_number, log_index: u32::MAX,
-                block_hash: [0; 32], timestamp: to_ts, side: Side::After,
-            };
-            let start = EvmPosition {
-                chain_id, block_number: start.block_number, log_index: 0,
-                block_hash: [0; 32], timestamp: from_ts, side: Side::Before,
-            };
-            Ok((start, cutoff))
-        }
-        (None, None, Some(from_block)) => {
-            let to_block = from_block + args.num_blocks - 1;
-            let cutoff = EvmPosition {
-                chain_id, block_number: to_block, log_index: u32::MAX,
-                block_hash: [0; 32], timestamp: 0, side: Side::After,
-            };
-            let start = EvmPosition {
-                chain_id, block_number: from_block, log_index: 0,
-                block_hash: [0; 32], timestamp: 0, side: Side::Before,
-            };
-            Ok((start, cutoff))
-        }
-        (None, None, None) => {
-            let from_block = 22000000u64;
-            let to_block = from_block + args.num_blocks - 1;
-            let cutoff = EvmPosition {
-                chain_id, block_number: to_block, log_index: u32::MAX,
-                block_hash: [0; 32], timestamp: 0, side: Side::After,
-            };
-            let start = EvmPosition {
-                chain_id, block_number: from_block, log_index: 0,
-                block_hash: [0; 32], timestamp: 0, side: Side::Before,
-            };
-            Ok((start, cutoff))
-        }
-        _ => Err("provide either --from + --to (dates) or --from-block (with optional --num-blocks), not both".into()),
-    }
 }
 
 fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "address must be 20 bytes".into())
+    bytes.try_into().map_err(|_| "address must be 20 bytes".into())
+}
+
+async fn resolve_range<P: Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>(
+    args: &Args,
+    backend: &Arc<EvmLogHistory<P>>,
+) -> Result<(EvmPosition, EvmPosition), Box<dyn std::error::Error>> {
+    let hs = backend.hist_store();
+    match (&args.from, &args.to, args.from_block) {
+        (Some(from_str), Some(to_str), None) => {
+            let from_ts = parse_datetime(from_str)?;
+            let to_ts = parse_datetime(to_str)?;
+            let start = hs.time_pos(from_ts).await?;
+            let end = hs.time_pos(to_ts).await?;
+            println!("  Date range: {} → {}", from_str, to_str);
+            println!("  Estimated blocks: {} → {}", start.block + 1, end.block + 1);
+            let end_inclusive = EvmPosition::new(end.block.saturating_add(1), u32::MAX);
+            Ok((start, end_inclusive))
+        }
+        (None, None, Some(from_block)) => {
+            let to_block = from_block + args.num_blocks - 1;
+            let start = if from_block == 0 {
+                EvmPosition::earliest()
+            } else {
+                EvmPosition::new(from_block - 1, u32::MAX)
+            };
+            Ok((start, EvmPosition::new(to_block, u32::MAX)))
+        }
+        (None, None, None) => {
+            let from_block = 22_000_000u64;
+            let to_block = from_block + args.num_blocks - 1;
+            Ok((
+                EvmPosition::new(from_block - 1, u32::MAX),
+                EvmPosition::new(to_block, u32::MAX),
+            ))
+        }
+        _ => Err("provide either --from + --to or --from-block, not both".into()),
+    }
 }
 
 fn explorer_base_url(chain_id: u64) -> &'static str {
@@ -175,19 +141,11 @@ fn osc8_link(url: &str, text: &str) -> String {
 }
 
 fn abbrev_addr(addr: &[u8; 20]) -> String {
-    format!(
-        "0x{}…{}",
-        hex::encode(&addr[..3]),
-        hex::encode(&addr[18..])
-    )
+    format!("0x{}…{}", hex::encode(&addr[..3]), hex::encode(&addr[18..]))
 }
 
 fn abbrev_tx_hash(hash: &[u8; 32]) -> String {
-    format!(
-        "0x{}…{}",
-        hex::encode(&hash[..4]),
-        hex::encode(&hash[30..])
-    )
+    format!("0x{}…{}", hex::encode(&hash[..4]), hex::encode(&hash[30..]))
 }
 
 fn linked_addr(addr: &[u8; 20], base_url: &str) -> String {
@@ -215,58 +173,58 @@ fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: usize)
     let frac = raw % divisor;
 
     let whole_str = format!("{:>width$}", whole, width = whole_width);
-
     if frac_width == 0 {
         return whole_str;
     }
-
     let frac_str = format!("{:0>width$}", frac, width = decimals as usize);
     let trimmed = frac_str.trim_end_matches('0');
     if trimmed.is_empty() {
-        // No fractional part — pad with spaces where digits would be
         format!("{}{}", whole_str, " ".repeat(frac_width + 1))
     } else {
-        // Show fractional, pad trimmed portion to frac_width
         let trailing_pad = frac_width - trimmed.len();
         format!("{}.{}{}", whole_str, trimmed, " ".repeat(trailing_pad))
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_transfer(
-    cursor: &Cursor<BalanceEvent, EvmPosition>,
+    item: &Positioned<EvmEvent, EvmPosition>,
+    balance: U256,
     index: usize,
     owner: &[u8; 20],
-    metadata: &HashMap<[u8; 20], Erc20Metadata>,
+    meta: &Erc20Metadata,
     max_sym_width: usize,
     max_decimals: usize,
     base_url: &str,
 ) {
-    let reduced = cursor.value();
-    let e = &reduced.event;
-    if let Some(t) = decode_transfer(e) {
-        let meta = match metadata.get(&e.contract_address) {
-            Some(m) => m,
-            None => return,
-        };
-        let direction = if &t.to == owner { " IN" } else { "OUT" };
-        let counterparty = if &t.to == owner { &t.from } else { &t.to };
-        let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, max_decimals);
-        let balance = format_amount(reduced.state, meta.decimals, BALANCE_WHOLE_WIDTH, max_decimals);
-        let sym = format!("{:<width$}", meta.symbol, width = max_sym_width);
+    let e = &item.item;
+    let Some(t) = decode_transfer(e) else {
+        return;
+    };
+    let direction = if &t.to == owner { " IN" } else { "OUT" };
+    let counterparty = if &t.to == owner { &t.from } else { &t.to };
+    let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, max_decimals);
+    let balance_str = format_amount(balance, meta.decimals, BALANCE_WHOLE_WIDTH, max_decimals);
+    let sym = format!("{:<width$}", meta.symbol, width = max_sym_width);
 
-        println!(
-            "[{:>4}] {:<10} {}  {}  {:>3}  {}  {} {} = {}",
-            index,
-            e.block_number,
-            format_timestamp(e.timestamp),
-            linked_tx_hash(&e.tx_hash, base_url),
-            direction,
-            linked_addr(counterparty, base_url),
-            amount,
-            sym,
-            balance,
-        );
-    }
+    println!(
+        "[{:>4}] {:<10} {}  {}  {:>3}  {}  {} {} = {}",
+        index,
+        e.block_number,
+        format_timestamp(e.timestamp),
+        linked_tx_hash(&e.tx_hash, base_url),
+        direction,
+        linked_addr(counterparty, base_url),
+        amount,
+        sym,
+        balance_str,
+    );
+}
+
+fn involves_owner(event: &EvmEvent, owner: &[u8; 20]) -> bool {
+    decode_transfer(event)
+        .map(|t| t.from == *owner || t.to == *owner)
+        .unwrap_or(false)
 }
 
 #[tokio::main]
@@ -292,8 +250,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = chainfold::evm::versioned_path(&args.db);
     let cache = Arc::new(LogStore::open(&db_path)?);
 
-    // Fetch token metadata for all addresses (cached in SQLite, Multicall3 on first run)
     let chain_id = provider.get_chain_id().await?;
+    let base_url = explorer_base_url(chain_id);
     println!("Fetching token metadata...");
     let meta_futures = addresses
         .iter()
@@ -303,144 +261,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
     for (addr, result) in addresses.iter().zip(meta_results) {
         let meta = result?;
-        println!(
-            "  {} ({}) — {} decimals",
-            meta.symbol, meta.name, meta.decimals
-        );
+        println!("  {} ({}) — {} decimals", meta.symbol, meta.name, meta.decimals);
         metadata.insert(*addr, meta);
     }
     let max_sym_width = metadata.values().map(|m| m.symbol.len()).max().unwrap_or(0);
     let max_decimals = metadata.values().map(|m| m.decimals as usize).max().unwrap_or(0);
     println!();
 
-    // Build per-token reduced histories: merge(IN, OUT) → ReducedHistory(balance)
-    let mut padded_owner = [0u8; 32];
-    padded_owner[12..32].copy_from_slice(&owner);
-
-    let mut all_histories: Vec<History<BalanceEvent, EvmPosition>> = Vec::new();
-    // Keep backends alive for the duration
-    let mut _log_backends: Vec<Arc<EvmLogHistory<_>>> = Vec::new();
-    let mut _reduced_backends: Vec<Arc<ReducedHistory<Erc20BalanceReducer<_>, EvmPosition>>> = Vec::new();
-
-    for &address in &addresses {
-        // Outgoing: Transfer(from=owner, *, *)
-        let topics_out: [Option<[u8; 32]>; 4] =
-            [Some(TRANSFER_TOPIC), Some(padded_owner), None, None];
-        let h_out = EvmLogHistory::with_options(
-            provider.clone(),
-            cache.clone(),
-            address,
-            topics_out,
-            args.chunk_size,
-            12,
-        )
-        .await?;
-
-        // Incoming: Transfer(*, to=owner, *)
-        let topics_in: [Option<[u8; 32]>; 4] =
-            [Some(TRANSFER_TOPIC), None, Some(padded_owner), None];
-        let h_in = EvmLogHistory::with_options(
-            provider.clone(),
-            cache.clone(),
-            address,
-            topics_in,
-            args.chunk_size,
-            12,
-        )
-        .await?;
-
-        // Merge IN + OUT per token
-        let per_token = History::merge(vec![h_out.history(), h_in.history()], evm_pos_cmp);
-
-        // Wrap with balance reducer
-        let reducer = Erc20BalanceReducer::new(
-            owner,
-            address,
-            chain_id,
-            provider.clone(),
-            cache.clone(),
-        );
-        let reduced = ReducedHistory::new(per_token, reducer, evm_pos_cmp, 1, 1);
-
-        all_histories.push(reduced.history());
-        _reduced_backends.push(reduced);
-        _log_backends.push(h_out);
-        _log_backends.push(h_in);
-    }
-
-    // Merge all reduced histories across tokens
-    let history = History::merge(all_histories, evm_pos_cmp);
-
-    let chain_id = history.source_id();
-    let base_url = explorer_base_url(chain_id);
-
     println!("  Owner:    0x{}", hex::encode(owner));
     println!("  Tokens:   {}", addresses.len());
     println!("  Chain:    {}", chain_id);
-
-    // Resolve range: either --from/--to (dates) or --from-block/--num-blocks
-    let (start, cutoff) = resolve_range(&args, &history, chain_id)?;
-
-    println!("  Range:    block {} .. {}", start.block_number, cutoff.block_number);
     println!("  DB:       {}", db_path);
     println!();
 
-    if args.follow {
-        println!("Following new events (Ctrl+C to stop)...\n");
-        let mut _subscribers = Vec::new();
-        for backend in &_log_backends {
-            _subscribers.push(
-                backend
-                    .subscribe(chainfold::evm::SubscribeTransport::Poll {
-                        interval: std::time::Duration::from_secs(2),
-                    })
-                    .await?,
-            );
-        }
+    for address in &addresses {
+        let topics: [Option<[u8; 32]>; 4] = [Some(TRANSFER_TOPIC), None, None, None];
+        let backend = EvmLogHistory::with_options(
+            provider.clone(),
+            cache.clone(),
+            *address,
+            topics,
+            args.chunk_size,
+            12,
+        )
+        .await?;
+        let meta = metadata.get(address).expect("metadata fetched above");
 
-        let mut count = 0;
-        let mut maybe_cursor = history.after(&start, None).await?;
-        while let Some(cursor) = maybe_cursor {
-            print_transfer(&cursor, count, &owner, &metadata, max_sym_width, max_decimals, base_url);
-            count += 1;
-            maybe_cursor = history.after(cursor.after(), None).await?;
-        }
-        println!("\nHistory closed ({count} events).");
-    } else if args.reverse {
-        println!("Navigating backwards from block {}:\n", cutoff.block_number);
-        let mut maybe_cursor = history.before(&cutoff, Some(&start)).await?;
-        let mut count = 0;
-        while let Some(cursor) = maybe_cursor {
-            if count >= args.limit {
-                println!("... (limit reached, use --limit to show more)");
-                break;
+        let (start, end) = resolve_range(&args, &backend).await?;
+        println!(
+            "── {} transfers, block {}..{} ──",
+            meta.symbol, start.block, end.block
+        );
+
+        let mut balance = U256::ZERO;
+
+        if args.follow {
+            let _subscriber = backend
+                .subscribe(chainfold::evm::SubscribeTransport::Poll {
+                    interval: std::time::Duration::from_secs(2),
+                })
+                .await?;
+            let hs = backend.hist_store();
+            let mut stream = watch_hist(&hs, start);
+            let mut count = 0;
+            while let Some(item) = stream.next().await {
+                let item = item?;
+                balance = apply_transfer(owner, balance, &item.item);
+                if involves_owner(&item.item, &owner) {
+                    print_transfer(
+                        &item,
+                        balance,
+                        count,
+                        &owner,
+                        meta,
+                        max_sym_width,
+                        max_decimals,
+                        base_url,
+                    );
+                    count += 1;
+                }
             }
-            print_transfer(&cursor, count, &owner, &metadata, max_sym_width, max_decimals, base_url);
-            count += 1;
-            maybe_cursor = history.before(cursor.before(), Some(&start)).await?;
-        }
-        if count == 0 {
-            println!("No transfers found.");
         } else {
-            println!("\n{count} transfers shown.");
-        }
-    } else {
-        println!("Navigating forward from block {}:\n", start.block_number);
-        let mut maybe_cursor = history.after(&start, Some(&cutoff)).await?;
-        let mut count = 0;
-        while let Some(cursor) = maybe_cursor {
-            if count >= args.limit {
-                println!("... (limit reached, use --limit to show more)");
-                break;
+            let backend_dyn: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
+            let hist = Hist::new(backend_dyn, start, end);
+            let mut stream = hist.iter();
+            let mut count = 0;
+            while let Some(item) = stream.next().await {
+                let item = item?;
+                balance = apply_transfer(owner, balance, &item.item);
+                if involves_owner(&item.item, &owner) {
+                    if count >= args.limit {
+                        println!("... (limit reached, use --limit to show more)");
+                        break;
+                    }
+                    print_transfer(
+                        &item,
+                        balance,
+                        count,
+                        &owner,
+                        meta,
+                        max_sym_width,
+                        max_decimals,
+                        base_url,
+                    );
+                    count += 1;
+                }
             }
-            print_transfer(&cursor, count, &owner, &metadata, max_sym_width, max_decimals, base_url);
-            count += 1;
-            maybe_cursor = history.after(cursor.after(), Some(&cutoff)).await?;
-        }
-        if count == 0 {
-            println!("No transfers found.");
-        } else {
-            println!("\n{count} transfers shown.");
+            if count == 0 {
+                println!("No transfers involving owner.");
+            } else {
+                println!("{count} transfers shown.\n");
+            }
         }
     }
 

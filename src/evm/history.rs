@@ -1,47 +1,46 @@
-//! Concrete `HistoryBackend<EvmEvent, EvmPosition>` backed by an alloy
-//! Provider, [`LogStore`], and [`LogIndex`].
+//! `EvmLogHistory` — [`HistStoreBackend`] over an alloy [`Provider`],
+//! [`LogStore`], and [`LogIndex`].
 //!
-//! This is the first concrete history implementation. It fetches EVM logs
-//! from an RPC provider via the [`LogIndex`] fetcher closure, persists
-//! them in SQLite via [`LogStore`], and serves navigation queries from
-//! the in-memory range tree.
+//! Each instance is scoped to a single log filter (address + topics) on a
+//! single chain. The chain identity stays on the history (`chain_id()`) —
+//! [`EvmPosition`] itself carries only `(block, log_index)` so that
+//! generic combinators (`Hist::split`, future `MergedHistStore`, etc.) can
+//! reason about cuts without knowing anything EVM-specific.
 //!
-//! Phase 1c (refactor.md) replaced the prior `LogCache`-direct surface
-//! with `LogStore` + `LogIndex` so SQLite no longer sits on the navigation
-//! hot path. The four `first_log_*` / `last_log_*` queries that used to
-//! hit `cached_logs` directly now hit the `BTreeMap` in `LogIndex`.
+//! ## Tip tracking and live events
 //!
-//! ## Tip tracking
+//! Construction does not start any background work. Call
+//! [`subscribe`](EvmLogHistory::subscribe) to spawn a background task that
+//! delivers fresh log pages and tip updates:
 //!
-//! Call [`subscribe`](EvmLogHistory::subscribe) to spawn a background
-//! task that delivers fresh log pages and tip updates. With the WS
-//! transport (`SubscribeTransport::Ws`) events arrive sub-second; with
-//! the Poll transport they arrive at the configured interval. Without an
-//! active subscription, `after()` with no cutoff returns `None` at the
-//! tip instead of blocking.
+//! * Each delivered page is fed to [`LogIndex::insert_page`] (in-memory
+//!   tree update synchronous) and drained asynchronously to [`LogStore`].
+//! * Tip advances bump `latest_store`, which drives
+//!   [`HistStore::gen`](crate::arch::HistStore::gen).
+//! * On reconnect after a transport error the subscriber fills the gap via
+//!   [`LogIndex::ensure_cached`]; duplicates are absorbed by the late-item
+//!   rules.
 //!
-//! The deprecated `start_tip_tracking` / `poll_tip` helpers remain for
-//! one release as a thin polling-only path; new code should use
-//! `subscribe()`.
+//! Without an active subscription, [`HistStore::gen`] still yields the
+//! current snapshot but will not advance until a tip update arrives —
+//! callers can also drive the tip manually via [`Self::poll_tip`].
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::Duration;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
-use tokio::task::JoinHandle;
+use futures_util::StreamExt;
 
 use crate::arch::evm::{EvmEvent, EvmPosition};
 use crate::arch::{
-    Cursor, HistoryBackend, HistoryError, SearchEvent, SearchStream, Side, Store,
-    Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
+    HistoryError, ItemStream, Positioned, Store, Timestamp,
 };
-use crate::evm::log_index::{Fetcher, LogIndex, LogPage};
-use crate::evm::log_store::{compute_filter_hash, compute_gaps, BlockHeader, LogStore};
+use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
+use crate::evm::log_store::{compute_filter_hash, BlockHeader, LogStore};
 use crate::evm::subscriber::{
     EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks,
 };
@@ -49,17 +48,13 @@ use crate::evm::subscriber::{
 /// Default chunk size for `eth_getLogs` calls (in blocks).
 const DEFAULT_CHUNK_SIZE: u64 = 1000;
 
-/// Assumed block time in seconds for `at(time)` estimation.
+/// Assumed block time in seconds for [`HistStore::time_pos`] estimation.
 const DEFAULT_BLOCK_TIME: u64 = 12;
 
 // ============================================================
 // EvmLogHistory
 // ============================================================
 
-/// A [`HistoryBackend`] for EVM log events.
-///
-/// Generic over `P`: any alloy provider (direct RPC, CachingProvider, etc.).
-/// Each instance is scoped to a single log filter (address + topics).
 pub struct EvmLogHistory<P> {
     provider: P,
     store: Arc<LogStore>,
@@ -70,41 +65,45 @@ pub struct EvmLogHistory<P> {
     chunk_size: u64,
     chain_id: u64,
 
-    // Reactive tip stores
+    // Reactive tip stores. `best`/`safe` are stubs that mirror `latest`
+    // until Phase 7 wires confirmation depth + finality polling.
     latest_store: Store<EvmPosition>,
     best_store: Store<EvmPosition>,
     safe_store: Store<EvmPosition>,
-
-    // Senders to update tip stores
     latest_tx: tokio::sync::watch::Sender<EvmPosition>,
+    #[allow(dead_code)]
     best_tx: tokio::sync::watch::Sender<EvmPosition>,
+    #[allow(dead_code)]
     safe_tx: tokio::sync::watch::Sender<EvmPosition>,
 
-    // For at(time) estimation — uses a recent anchor block instead of genesis
-    // because some chains (e.g. Ethereum mainnet) have genesis timestamp 0.
+    // Wall-clock → block-number estimation. Anchored at a recent block
+    // rather than genesis because some chains use timestamp 0 at genesis.
     anchor_block: u64,
     anchor_timestamp: u64,
     block_time: u64,
 
-    // Self-reference so Cursors can hold Arc<dyn HistoryBackend>
+    // Self-reference so we can hand out Arc<dyn HistBackend>.
     self_ref: OnceLock<Weak<Self>>,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
-    /// Create a new history. Returns `Arc<Self>` because cursors need a
-    /// backend reference.
-    ///
-    /// Fetches genesis block timestamp from RPC for `at(time)` estimation.
     pub async fn new(
         provider: P,
         store: Arc<LogStore>,
         address: [u8; 20],
         topics: [Option<[u8; 32]>; 4],
     ) -> Result<Arc<Self>, HistoryError> {
-        Self::with_options(provider, store, address, topics, DEFAULT_CHUNK_SIZE, DEFAULT_BLOCK_TIME).await
+        Self::with_options(
+            provider,
+            store,
+            address,
+            topics,
+            DEFAULT_CHUNK_SIZE,
+            DEFAULT_BLOCK_TIME,
+        )
+        .await
     }
 
-    /// Create with explicit chunk size and block time.
     pub async fn with_options(
         provider: P,
         store: Arc<LogStore>,
@@ -115,16 +114,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     ) -> Result<Arc<Self>, HistoryError> {
         let filter_hash = compute_filter_hash(&address, &topics);
 
-        // Fetch chain_id and a recent anchor block for at() estimation.
-        let chain_id = provider.get_chain_id().await
+        let chain_id = provider
+            .get_chain_id()
+            .await
             .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
-        let anchor_block = provider.get_block_number().await
+        let anchor_block = provider
+            .get_block_number()
+            .await
             .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))?;
-        let anchor_timestamp = Self::fetch_block_timestamp(&provider, &store, anchor_block).await?;
+        let anchor_timestamp =
+            ensure_block_header_via(&provider, &store, anchor_block).await?.timestamp;
 
-        let (latest_tx, latest_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
-        let (best_tx, best_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
-        let (safe_tx, safe_rx) = tokio::sync::watch::channel(EvmPosition::earliest(chain_id));
+        let earliest = EvmPosition::earliest();
+        let (latest_tx, latest_rx) = tokio::sync::watch::channel(earliest);
+        let (best_tx, best_rx) = tokio::sync::watch::channel(earliest);
+        let (safe_tx, safe_rx) = tokio::sync::watch::channel(earliest);
 
         let fetcher = build_fetcher(provider.clone(), store.clone(), address, topics);
         let index = Arc::new(LogIndex::with_chunk_size(
@@ -154,8 +158,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             block_time,
             self_ref: OnceLock::new(),
         });
-
-        // Store weak self-reference for cursor creation.
         let _ = history.self_ref.set(Arc::downgrade(&history));
 
         fn fmt_topic(t: &Option<[u8; 32]>) -> String {
@@ -179,25 +181,39 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         Ok(history)
     }
 
-    /// Create a [`History`](crate::arch::History) wrapping this backend.
-    pub fn history(self: &Arc<Self>) -> crate::arch::History<EvmEvent, EvmPosition> {
-        crate::arch::History::new(Arc::clone(self) as Arc<dyn HistoryBackend<EvmEvent, EvmPosition>>)
+    /// Wrap this history as a public [`HistStore`].
+    pub fn hist_store(
+        self: &Arc<Self>,
+    ) -> HistStore<EvmEvent, EvmPosition> {
+        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<_, _>>)
     }
 
-    /// Reactive store of the current chain head as an [`EvmPosition`].
-    /// Updates as the subscriber observes new heads.
-    pub fn latest_store(&self) -> &Store<EvmPosition> {
-        &self.latest_store
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 
-    /// 32-byte blake3 hash identifying the (address, topics) filter this
-    /// history is scoped to. Stable across processes; used as the join
-    /// key into [`LogStore`] tables.
     pub fn filter_hash(&self) -> &[u8; 32] {
         &self.filter_hash
     }
 
-    /// Get a strong Arc<Self> from the stored weak ref.
+    pub fn chunk_size(&self) -> u64 {
+        self.chunk_size
+    }
+
+    pub fn latest_store(&self) -> &Store<EvmPosition> {
+        &self.latest_store
+    }
+
+    /// Underlying [`LogStore`]. Used by erc20 metadata/balance helpers.
+    pub fn store(&self) -> &Arc<LogStore> {
+        &self.store
+    }
+
+    /// Underlying [`LogIndex`]. Tests + manual cache-priming callers.
+    pub fn index(&self) -> &Arc<LogIndex> {
+        &self.index
+    }
+
     fn arc_self(&self) -> Arc<Self> {
         self.self_ref
             .get()
@@ -210,103 +226,46 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     // Tip tracking
     // --------------------------------------------------------
 
-    /// Fetch the latest block from RPC and update the `latest` store.
-    ///
-    /// Returns the new tip block number.
+    /// Fetch the latest block from RPC and bump `latest_store`. Returns
+    /// the new tip block number.
     pub async fn poll_tip(&self) -> Result<u64, HistoryError> {
         let block_number = self.latest_block_number().await?;
-        let header = self.ensure_block_header(block_number).await?;
+        self.update_tip_to(block_number).await?;
+        Ok(block_number)
+    }
 
-        let pos = EvmPosition {
-            chain_id: self.chain_id,
-            block_number,
-            log_index: u32::MAX, // after all logs in this block
-            block_hash: header.hash,
-            timestamp: header.timestamp,
-            side: Side::After,
-        };
-
-        let prev = self.latest_store.get().block_number;
+    /// Internal: bump the latest tip store to `block_number`. The position
+    /// records the *end-of-block* cut (`log_index = u32::MAX`) so a `Hist`
+    /// with this end iterates every log up to and including the last one
+    /// in that block.
+    async fn update_tip_to(&self, block_number: u64) -> Result<(), HistoryError> {
+        // We don't need the header here — chain identity and timestamps
+        // live elsewhere — but we touch the cache so later iter() calls
+        // for the tip block don't have to round-trip.
+        let _ = ensure_block_header_via(&self.provider, &self.store, block_number).await?;
+        let pos = EvmPosition::new(block_number, u32::MAX);
+        let prev = self.latest_store.get().block;
         let _ = self.latest_tx.send(pos);
         if block_number != prev {
             tracing::debug!(block_number, prev, "tip updated");
         }
-        Ok(block_number)
+        Ok(())
     }
 
-    /// Spawn a background task that polls the chain head at `interval`
-    /// and updates the `latest` store. Returns a `JoinHandle`.
-    ///
-    /// Deprecated: prefer [`Self::subscribe`] with
-    /// [`SubscribeTransport::Poll`] or [`SubscribeTransport::Ws`]. The new
-    /// path also persists log pages to [`LogStore`] via the index drain
-    /// and supports reconnect gap-fill; this helper does neither.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use subscribe(SubscribeTransport::Poll { interval }) instead"
-    )]
-    pub fn start_tip_tracking(self: &Arc<Self>, interval: Duration) -> JoinHandle<()> {
-        #[allow(deprecated)]
-        self.start_tip_tracking_with_cancel(interval, tokio_util::sync::CancellationToken::new())
-    }
-
-    /// Cancellation-aware variant of the deprecated [`Self::start_tip_tracking`].
-    #[deprecated(since = "0.2.0", note = "use subscribe() instead")]
-    pub fn start_tip_tracking_with_cancel(
-        self: &Arc<Self>,
-        interval: Duration,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> JoinHandle<()> {
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tokio::time::sleep(interval) => {
-                        if let Err(e) = this.poll_tip().await {
-                            tracing::warn!("tip poll failed: {e}");
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    /// Start a push-based subscription to fresh log pages and tip updates.
-    ///
-    /// Replaces the deprecated `start_tip_tracking` polling loop. Returns
-    /// an [`EvmLogSubscriber`] handle that cancels the background task on
-    /// drop. With the WS transport, new events propagate sub-second; with
-    /// the Poll transport, they arrive every `interval` (HTTP fallback).
-    ///
-    /// Wiring:
-    /// * Each delivered page is fed to [`LogIndex::insert_page`] for the
-    ///   in-memory tree update, then drained asynchronously into
-    ///   [`LogStore`] via [`LogIndex::attach_drain`].
-    /// * Tip advances bump the `latest` reactive store and unblock any
-    ///   navigation calls waiting on [`Self::wait_for_tip_advance`].
-    /// * On reconnect after a transport error, the subscriber calls
-    ///   [`LogIndex::ensure_cached`] for the gap between the last-seen
-    ///   tip and the current tip — duplicates are absorbed by the
-    ///   late-item rules.
+    /// Subscribe to push-based tip + log delivery. See module-level docs.
     pub async fn subscribe(
         self: &Arc<Self>,
         transport: SubscribeTransport,
     ) -> Result<EvmLogSubscriber, HistoryError> {
-        // Ensure subscriber-delivered pages get persisted to LogStore.
-        // Idempotent: a second call is a no-op.
         self.index.attach_drain();
 
-        // Seed `latest` with the current tip so wait_for_tip_advance has a
-        // baseline and reconnect knows where the gap-fill starts.
         let start_block = self.poll_tip().await?;
 
         let filter = self.build_filter(None, None);
 
         let index = self.index.clone();
-        let on_page: Arc<dyn Fn(LogPage) + Send + Sync> = Arc::new(move |page: LogPage| {
-            index.insert_page(&page);
-        });
+        let on_page: Arc<dyn Fn(LogPage) + Send + Sync> =
+            Arc::new(move |page: LogPage| index.insert_page(&page));
 
         let history = Arc::clone(self);
         let on_tip = Arc::new(move |bn: u64| {
@@ -315,7 +274,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
                 if let Err(e) = history.update_tip_to(bn).await {
                     tracing::warn!(block_number = bn, error = %e, "update_tip");
                 }
-            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         });
 
         let history = Arc::clone(self);
@@ -325,7 +284,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
                 if let Err(e) = history.gap_fill_after_reconnect(last_tip).await {
                     tracing::warn!(last_tip, error = %e, "reconnect gap-fill");
                 }
-            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            })
+                as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         });
 
         let callbacks = SubscriberCallbacks {
@@ -343,42 +303,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         ))
     }
 
-    /// Internal: bump the `latest` tip store to `block_number`. Fetches the
-    /// header (cache-first) for hash + timestamp. Used by [`Self::subscribe`].
-    async fn update_tip_to(&self, block_number: u64) -> Result<(), HistoryError> {
-        let header = self.ensure_block_header(block_number).await?;
-        let pos = EvmPosition {
-            chain_id: self.chain_id,
-            block_number,
-            log_index: u32::MAX,
-            block_hash: header.hash,
-            timestamp: header.timestamp,
-            side: Side::After,
-        };
-        let _ = self.latest_tx.send(pos);
-        Ok(())
-    }
-
-    /// Internal: after a transport reconnect, fill the gap between
-    /// `last_tip` and the current chain head via [`LogIndex::ensure_cached`].
-    /// Duplicate logs (already delivered before disconnect) are absorbed by
-    /// the late-item insertion rules.
     async fn gap_fill_after_reconnect(&self, last_tip: u64) -> Result<(), HistoryError> {
         let current = self.latest_block_number().await?;
         if current <= last_tip {
             return Ok(());
         }
-        tracing::info!(
-            from = last_tip + 1,
-            to = current,
-            "reconnect gap-fill"
-        );
+        tracing::info!(from = last_tip + 1, to = current, "reconnect gap-fill");
         self.index.ensure_cached(last_tip + 1, current).await
     }
 
-    /// Build an alloy [`Filter`] from the configured address + topics for
-    /// a given block window. `from` and `to` are optional — `None` leaves
-    /// the field unset (used for subscriptions).
     fn build_filter(&self, from: Option<u64>, to: Option<u64>) -> Filter {
         let mut filter = Filter::new().address(alloy::primitives::Address::from(self.address));
         if let Some(f) = from {
@@ -402,100 +335,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         filter
     }
 
-    /// Wait for the latest store to advance past `current_block`.
-    async fn wait_for_tip_advance(&self, current_block: u64) -> Result<u64, HistoryError> {
-        let mut rx = self.latest_tx.subscribe();
-        loop {
-            rx.changed().await.map_err(|_| {
-                HistoryError::internal("tip channel closed — call subscribe() before tip-blocking navigation")
-            })?;
-            let pos = rx.borrow_and_update().clone();
-            if pos.block_number > current_block {
-                return Ok(pos.block_number);
-            }
-        }
-    }
-
-    // --------------------------------------------------------
-    // Cache management
-    // --------------------------------------------------------
-
-    /// Get a block header — cache-first with RPC fallback, persisted on miss.
-    async fn ensure_block_header(&self, block_number: u64) -> Result<BlockHeader, HistoryError> {
-        ensure_block_header_static(&self.provider, &self.store, block_number).await
-    }
-
-    /// Static variant for use by the `LogIndex` fetcher closure (which
-    /// captures `provider` and `store` independently of `&self`).
-    async fn fetch_block_timestamp(
-        provider: &P,
-        store: &LogStore,
-        block_number: u64,
-    ) -> Result<u64, HistoryError> {
-        let header =
-            ensure_block_header_via(provider, store, block_number).await?;
-        Ok(header.timestamp)
-    }
-
-    // --------------------------------------------------------
-    // Log → domain type conversions
-    // --------------------------------------------------------
-
-    fn log_to_evm_event(log: &alloy::rpc::types::Log) -> EvmEvent {
-        let addr: [u8; 20] = log.address().0 .0;
-        let block_hash: [u8; 32] = log.block_hash.map(|h| h.0).unwrap_or([0; 32]);
-        let tx_hash: [u8; 32] = log.transaction_hash.map(|h| h.0).unwrap_or([0; 32]);
-
-        EvmEvent {
-            contract_address: addr,
-            block_number: log.block_number.unwrap_or(0),
-            timestamp: 0, // filled in by caller
-            block_hash,
-            log_index: log.log_index.unwrap_or(0) as u32,
-            tx_hash,
-            topics: log.topics().iter().map(|t| t.0).collect(),
-            data: log.data().data.to_vec(),
-        }
-    }
-
-    async fn log_to_position(
-        &self,
-        log: &alloy::rpc::types::Log,
-        side: Side,
-    ) -> Result<EvmPosition, HistoryError> {
-        let block_number = log.block_number.unwrap_or(0);
-        let header = self.ensure_block_header(block_number).await?;
-
-        Ok(EvmPosition {
-            chain_id: self.chain_id,
-            block_number,
-            log_index: log.log_index.unwrap_or(0) as u32,
-            block_hash: header.hash,
-            timestamp: header.timestamp,
-            side,
-        })
-    }
-
-    async fn log_to_cursor(
-        &self,
-        log: &alloy::rpc::types::Log,
-    ) -> Result<Cursor<EvmEvent, EvmPosition>, HistoryError> {
-        let before = self.log_to_position(log, Side::Before).await?;
-        let after = self.log_to_position(log, Side::After).await?;
-
-        let mut event = Self::log_to_evm_event(log);
-        event.timestamp = before.timestamp;
-
-        Ok(Cursor::new(event, before, after, self.arc_self()))
-    }
-
-    // --------------------------------------------------------
-    // Navigation helpers
-    // --------------------------------------------------------
-
     async fn latest_block_number(&self) -> Result<u64, HistoryError> {
         tracing::debug!("eth_blockNumber");
-        let n = self.provider
+        let n = self
+            .provider
             .get_block_number()
             .await
             .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))?;
@@ -513,385 +356,166 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             self.anchor_block.saturating_sub(delta_blocks)
         }
     }
+}
 
-    fn pos_before(a: &EvmPosition, b: &EvmPosition) -> bool {
-        (a.block_number, a.log_index) < (b.block_number, b.log_index)
-    }
+// ============================================================
+// Position <-> BlockPos bridging
+// ============================================================
 
-    fn pos_equiv(a: &EvmPosition, b: &EvmPosition) -> bool {
-        // earliest sentinels
-        if a.block_number == 0 && a.log_index == 0 && a.side == Side::Before
-            && b.block_number == 0 && b.log_index == 0 && b.side == Side::Before
-        {
-            return true;
-        }
-        // never sentinels
-        if a.block_number == u64::MAX && b.block_number == u64::MAX {
-            return true;
-        }
-        // Same coordinate, same side
-        a.block_number == b.block_number && a.log_index == b.log_index && a.side == b.side
-    }
-
-    fn search_coords(pos: &EvmPosition) -> (u64, u32) {
-        (pos.block_number, pos.log_index)
-    }
-
-    /// Search forward for first matching log starting from `position`,
-    /// up to `end_block`. Pure in-memory tree lookup — assumes the index
-    /// already covers `[start_block, end_block]` (caller arranges this
-    /// via [`LogIndex::ensure_cached`]).
-    fn search_index_forward(
-        &self,
-        position: &EvmPosition,
-        start_block: u64,
-        end_block: u64,
-        is_first_chunk: bool,
-    ) -> Result<Option<alloy::rpc::types::Log>, HistoryError> {
-        let log = if is_first_chunk {
-            let (block, idx) = Self::search_coords(position);
-            match position.side {
-                Side::Before => self.index.first_at_or_after(block, idx)?,
-                Side::After => self.index.first_after(block, idx)?,
-            }
-        } else {
-            self.index.first_at_or_after(start_block, 0)?
-        };
-        // Discard results beyond the current cached chunk — the range
-        // (end_block+1..) may not have been fetched yet.
-        Ok(log.filter(|l| l.block_number.unwrap_or(0) <= end_block))
-    }
-
-    // --------------------------------------------------------
-    // Search stream tasks
-    // --------------------------------------------------------
-
-    /// Type-annotated Ok for search event channel sends.
-    fn search_ok(
-        event: SearchEvent<EvmEvent, EvmPosition>,
-    ) -> Result<SearchEvent<EvmEvent, EvmPosition>, HistoryError> {
-        Ok(event)
-    }
-
-    /// Wrap an mpsc receiver as a [`SearchStream`].
-    fn rx_to_stream(
-        rx: tokio::sync::mpsc::Receiver<
-            Result<SearchEvent<EvmEvent, EvmPosition>, HistoryError>,
-        >,
-    ) -> SearchStream<EvmEvent, EvmPosition> {
-        Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        }))
-    }
-
-    /// Forward search task. Sends [`SearchEvent`]s to `tx`.
-    ///
-    /// Returns `Ok(())` on completion or cancellation. Returns `Err` on
-    /// RPC/cache errors — caller sends the error to the channel.
-    async fn run_search_after(
-        &self,
-        position: &EvmPosition,
-        cutoff: Option<&EvmPosition>,
-        tx: &tokio::sync::mpsc::Sender<Result<SearchEvent<EvmEvent, EvmPosition>, HistoryError>>,
-    ) -> Result<(), HistoryError> {
-        let (start_block, _) = Self::search_coords(position);
-        let has_cutoff = cutoff.is_some();
-
-        let mut max_block = match cutoff {
-            Some(c) => c.block_number,
-            None => self.latest_block_number().await?,
-        };
-
-        let mut search_from = start_block;
-
-        loop {
-            let mut chunk_start = search_from;
-            while chunk_start <= max_block {
-                let chunk_end = (chunk_start + self.chunk_size - 1).min(max_block);
-                self.index.ensure_cached(chunk_start, chunk_end).await?;
-
-                let is_first = chunk_start == start_block;
-                if let Some(log) = self.search_index_forward(position, chunk_start, chunk_end, is_first)? {
-                    let (lb, li) = (
-                        log.block_number.unwrap_or(0),
-                        log.log_index.unwrap_or(0) as u32,
-                    );
-                    if let Some(c) = cutoff {
-                        if (lb, li) > (c.block_number, c.log_index) {
-                            return Ok(()); // Past cutoff
-                        }
-                    }
-                    let cursor = self.log_to_cursor(&log).await?;
-                    let _ = tx.send(Self::search_ok(SearchEvent::Found(cursor))).await;
-                    return Ok(());
-                }
-
-                // Chunk scanned, nothing found — report progress
-                let scanned = EvmPosition {
-                    chain_id: self.chain_id,
-                    block_number: chunk_end,
-                    log_index: u32::MAX,
-                    block_hash: [0; 32],
-                    timestamp: 0,
-                    side: Side::After,
-                };
-                if tx.send(Self::search_ok(SearchEvent::Scanned(scanned))).await.is_err() {
-                    return Ok(()); // Receiver dropped = cancelled
-                }
-
-                chunk_start = chunk_end + 1;
-            }
-
-            // Don't re-scan on next tip advance
-            search_from = max_block + 1;
-
-            if has_cutoff {
-                return Ok(()); // Bounded search complete
-            }
-
-            // Unbounded — wait for new blocks
-            max_block = self.wait_for_tip_advance(max_block).await?;
-        }
-    }
-
-    /// Backward search task. Sends [`SearchEvent`]s to `tx`.
-    async fn run_search_before(
-        &self,
-        position: &EvmPosition,
-        cutoff: Option<&EvmPosition>,
-        tx: &tokio::sync::mpsc::Sender<Result<SearchEvent<EvmEvent, EvmPosition>, HistoryError>>,
-    ) -> Result<(), HistoryError> {
-        let (block, idx) = Self::search_coords(position);
-        let min_block = match cutoff {
-            Some(c) => c.block_number,
-            None => 0,
-        };
-
-        if block == 0 && idx == 0 && position.side == Side::Before {
-            return Ok(()); // At earliest
-        }
-
-        // Cap search_end: u64::MAX (never sentinel) overflows SQL i64 casts.
-        let mut search_end = if block == u64::MAX {
-            let tip = self.latest_store.get();
-            if tip.block_number > 0 && tip.block_number < u64::MAX {
-                tip.block_number
-            } else {
-                let ranges = self.store.get_scanned_ranges(&self.filter_hash)
-                    .map_err(|e| HistoryError::internal(e.to_string()))?;
-                match ranges.last() {
-                    Some(r) => r.1,
-                    None => return Ok(()),
-                }
-            }
-        } else {
-            block
-        };
-
-        loop {
-            let search_start = if search_end > self.chunk_size {
-                (search_end - self.chunk_size + 1).max(min_block)
-            } else {
-                min_block
-            };
-
-            self.index.ensure_cached(search_start, search_end).await?;
-
-            let log = if search_end == block {
-                match position.side {
-                    Side::After => self.index.last_at_or_before(block, idx)?,
-                    Side::Before => self.index.last_before(block, idx)?,
-                }
-            } else {
-                self.index.last_at_or_before(search_end, u32::MAX)?
-            };
-            // Discard results before the current cached chunk.
-            let log = log.filter(|l| l.block_number.unwrap_or(0) >= search_start);
-
-            if let Some(log) = log {
-                let (lb, li) = (
-                    log.block_number.unwrap_or(0),
-                    log.log_index.unwrap_or(0) as u32,
-                );
-                if let Some(c) = cutoff {
-                    if (lb, li) < (c.block_number, c.log_index) {
-                        return Ok(());
-                    }
-                }
-                let cursor = self.log_to_cursor(&log).await?;
-                let _ = tx.send(Self::search_ok(SearchEvent::Found(cursor))).await;
-                return Ok(());
-            }
-
-            // Chunk scanned backward, nothing found — report progress
-            let scanned = EvmPosition {
-                chain_id: self.chain_id,
-                block_number: search_start,
-                log_index: 0,
-                block_hash: [0; 32],
-                timestamp: 0,
-                side: Side::Before,
-            };
-            if tx.send(Self::search_ok(SearchEvent::Scanned(scanned))).await.is_err() {
-                return Ok(()); // Cancelled
-            }
-
-            if search_start <= min_block {
-                return Ok(()); // Reached the beginning
-            }
-            search_end = search_start - 1;
+fn evm_to_block_pos(p: EvmPosition) -> BlockPos {
+    if p == EvmPosition::earliest() {
+        BlockPos::Bottom
+    } else {
+        BlockPos::At {
+            block: p.block,
+            log_index: p.log_index,
         }
     }
 }
 
 // ============================================================
-// HistoryBackend implementation
+// HistBackend impl
+// ============================================================
+
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static>
+    HistBackend<EvmEvent, EvmPosition> for EvmLogHistory<P>
+{
+    fn iter(
+        &self,
+        start: EvmPosition,
+        end: EvmPosition,
+    ) -> ItemStream<EvmEvent, EvmPosition> {
+        if end <= start {
+            return Box::pin(futures_util::stream::empty());
+        }
+
+        // Materialize any persisted scanned ranges covering this window
+        // into the in-memory tree, so items() can answer from cache
+        // instead of falling through to the fetcher.
+        let from_block = start.block;
+        let to_block = end.block;
+        if let Err(e) = self.index.ensure_window_loaded(from_block, to_block) {
+            return Box::pin(futures_util::stream::once(async move { Err(e) }));
+        }
+
+        let start_pos = evm_to_block_pos(start);
+        let end_pos = evm_to_block_pos(end);
+        let log_stream = self.index.clone().items(start_pos, end_pos);
+        let provider = self.provider.clone();
+        let store = self.store.clone();
+
+        Box::pin(log_stream.then(move |result| {
+            let provider = provider.clone();
+            let store = store.clone();
+            async move {
+                match result {
+                    Ok(log) => {
+                        let bn = log.block_number.unwrap_or(0);
+                        let header = ensure_block_header_via(&provider, &store, bn).await?;
+                        let mut event = log_to_evm_event(&log);
+                        event.timestamp = header.timestamp;
+                        let pos = event.position();
+                        Ok(Positioned::new(event, pos))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }))
+    }
+}
+
+// ============================================================
+// HistStoreBackend impl
 // ============================================================
 
 #[async_trait::async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistoryBackend<EvmEvent, EvmPosition>
-    for EvmLogHistory<P>
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static>
+    HistStoreBackend<EvmEvent, EvmPosition> for EvmLogHistory<P>
 {
+    fn snapshots(&self) -> HistStream<EvmEvent, EvmPosition> {
+        let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
+        let mut latest_sub = self.latest_store.subscribe();
+        Box::pin(futures_util::stream::poll_fn(move |cx| {
+            latest_sub.as_mut().poll_next(cx).map(|tip_opt| {
+                tip_opt.map(|tip| Hist::new(backend.clone(), EvmPosition::earliest(), tip))
+            })
+        }))
+    }
+
+    async fn next(&self) -> Hist<EvmEvent, EvmPosition> {
+        let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
+        let tip = self.latest_store.get();
+        Hist::new(backend, EvmPosition::earliest(), tip)
+    }
+
+    fn subscribe(
+        &self,
+        cb: Box<dyn Fn(Hist<EvmEvent, EvmPosition>) + Send + Sync>,
+    ) -> AsyncDisposable {
+        let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
+        let mut stream = self.latest_store.subscribe();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel2.cancelled() => break,
+                    tip = stream.next() => {
+                        let Some(tip) = tip else { break };
+                        let hist = Hist::new(backend.clone(), EvmPosition::earliest(), tip);
+                        cb(hist);
+                    }
+                }
+            }
+        });
+        AsyncDisposable::new(cancel, handle)
+    }
+
+    async fn time_pos(&self, time: Timestamp) -> Result<EvmPosition, HistoryError> {
+        let block = self.estimate_block_from_time(time);
+        // Return the cut "just before block B" — items iterated after this
+        // anchor start with the first log in block B.
+        if block == 0 {
+            Ok(EvmPosition::earliest())
+        } else {
+            Ok(EvmPosition::new(block - 1, u32::MAX))
+        }
+    }
+
     fn latest(&self) -> &Store<EvmPosition> {
         &self.latest_store
     }
-
     fn best(&self) -> &Store<EvmPosition> {
         &self.best_store
     }
-
     fn safe(&self) -> &Store<EvmPosition> {
         &self.safe_store
-    }
-
-    fn source_id(&self) -> u64 {
-        self.chain_id
-    }
-
-    fn earliest(&self) -> EvmPosition {
-        EvmPosition::earliest(self.chain_id)
-    }
-
-    fn never(&self) -> EvmPosition {
-        EvmPosition::never(self.chain_id)
-    }
-
-    fn at(&self, time: Timestamp) -> EvmPosition {
-        let block = self.estimate_block_from_time(time);
-        EvmPosition {
-            chain_id: self.chain_id,
-            block_number: block,
-            log_index: 0,
-            block_hash: [0; 32],
-            timestamp: time,
-            side: Side::Before,
-        }
-    }
-
-    async fn is_equiv(
-        &self,
-        a: &EvmPosition,
-        b: &EvmPosition,
-    ) -> Result<bool, HistoryError> {
-        Ok(Self::pos_equiv(a, b))
-    }
-
-    async fn lca(
-        &self,
-        a: &EvmPosition,
-        b: &EvmPosition,
-    ) -> Result<EvmPosition, HistoryError> {
-        if Self::pos_before(a, b) || Self::pos_equiv(a, b) {
-            Ok(a.clone())
-        } else {
-            Ok(b.clone())
-        }
-    }
-
-    fn search_after(
-        &self,
-        position: &EvmPosition,
-        cutoff: Option<&EvmPosition>,
-    ) -> SearchStream<EvmEvent, EvmPosition> {
-        let pos = position.clone();
-        let cut = cutoff.cloned();
-        let this = self.arc_self();
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-
-        tokio::spawn(async move {
-            if let Err(e) = this.run_search_after(&pos, cut.as_ref(), &tx).await {
-                let _ = tx.send(Err(e)).await;
-            }
-        });
-
-        Self::rx_to_stream(rx)
-    }
-
-    fn search_before(
-        &self,
-        position: &EvmPosition,
-        cutoff: Option<&EvmPosition>,
-    ) -> SearchStream<EvmEvent, EvmPosition> {
-        let pos = position.clone();
-        let cut = cutoff.cloned();
-        let this = self.arc_self();
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-
-        tokio::spawn(async move {
-            if let Err(e) = this.run_search_before(&pos, cut.as_ref(), &tx).await {
-                let _ = tx.send(Err(e)).await;
-            }
-        });
-
-        Self::rx_to_stream(rx)
-    }
-
-    async fn is_after(
-        &self,
-        cursor_pos: &EvmPosition,
-        p: &EvmPosition,
-    ) -> Result<bool, HistoryError> {
-        Ok((cursor_pos.block_number, cursor_pos.log_index) > (p.block_number, p.log_index))
-    }
-
-    async fn is_before(
-        &self,
-        cursor_pos: &EvmPosition,
-        p: &EvmPosition,
-    ) -> Result<bool, HistoryError> {
-        Ok((cursor_pos.block_number, cursor_pos.log_index) < (p.block_number, p.log_index))
-    }
-
-    fn estimate_scan_count(&self, from: &EvmPosition, to: &EvmPosition) -> u64 {
-        if from.block_number >= to.block_number {
-            return 0;
-        }
-        let scanned = self
-            .store
-            .get_scanned_ranges(&self.filter_hash)
-            .unwrap_or_default();
-        let gaps = compute_gaps((from.block_number, to.block_number), &scanned);
-        gaps.iter()
-            .map(|&(s, e)| (e - s) / self.chunk_size + 1)
-            .sum()
-    }
-
-    fn scan_chunk_before(&self, target: &EvmPosition) -> EvmPosition {
-        EvmPosition {
-            block_number: target.block_number.saturating_sub(self.chunk_size),
-            log_index: 0,
-            side: Side::Before,
-            ..target.clone()
-        }
     }
 }
 
 // ============================================================
-// Free helpers (block header fetch + LogIndex fetcher builder)
+// Free helpers
 // ============================================================
 
+fn log_to_evm_event(log: &alloy::rpc::types::Log) -> EvmEvent {
+    let addr: [u8; 20] = log.address().0.0;
+    let block_hash: [u8; 32] = log.block_hash.map(|h| h.0).unwrap_or([0; 32]);
+    let tx_hash: [u8; 32] = log.transaction_hash.map(|h| h.0).unwrap_or([0; 32]);
+
+    EvmEvent {
+        contract_address: addr,
+        block_number: log.block_number.unwrap_or(0),
+        timestamp: 0,
+        block_hash,
+        log_index: log.log_index.unwrap_or(0) as u32,
+        tx_hash,
+        topics: log.topics().iter().map(|t| t.0).collect(),
+        data: log.data().data.to_vec(),
+    }
+}
+
 /// Cache-first block-header lookup. Falls back to RPC and persists.
-async fn ensure_block_header_via<P>(
+pub(crate) async fn ensure_block_header_via<P>(
     provider: &P,
     store: &LogStore,
     block_number: u64,
@@ -931,23 +555,6 @@ where
     })
 }
 
-/// Static variant of [`EvmLogHistory::ensure_block_header`] that doesn't
-/// require `&self`. Used inside the [`LogIndex`] fetcher closure.
-async fn ensure_block_header_static<P>(
-    provider: &P,
-    store: &LogStore,
-    block_number: u64,
-) -> Result<BlockHeader, HistoryError>
-where
-    P: Provider<Ethereum>,
-{
-    ensure_block_header_via(provider, store, block_number).await
-}
-
-/// Build a [`Fetcher`] closure that issues `eth_getLogs` for the
-/// `(address, topics)` filter and returns the resulting [`LogPage`].
-/// Pre-fetches block headers for every block that hit a log so the
-/// `log_to_cursor` path stays cache-resident.
 fn build_fetcher<P>(
     provider: P,
     store: Arc<LogStore>,
@@ -985,8 +592,6 @@ where
             tracing::debug!(from, to, num_logs = logs.len(), "eth_getLogs returned");
 
             let end_header = ensure_block_header_via(&provider, &store, to).await?;
-            // Pre-cache headers for blocks that hit a log so cursor
-            // construction never round-trips to RPC mid-stream.
             for log in &logs {
                 if let Some(bn) = log.block_number {
                     let _ = ensure_block_header_via(&provider, &store, bn).await;
@@ -1015,6 +620,7 @@ mod tests {
     use alloy::providers::ProviderBuilder;
     use alloy::rpc::types::Log;
     use alloy::transports::mock::Asserter;
+    use futures_util::TryStreamExt;
 
     const ADDR: [u8; 20] = [0x42; 20];
     const TOPICS: [Option<[u8; 32]>; 4] = [None; 4];
@@ -1046,508 +652,166 @@ mod tests {
         }
     }
 
-    /// Pre-populate cache with genesis + test blocks/logs, scanned ranges.
-    /// Returns (cache, filter_hash).
     fn warm_cache() -> (Arc<LogStore>, [u8; 32]) {
         let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 
-        // Block headers
         cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
-        cache.insert_block_header(100, &BH_100, &BH_0, GENESIS_TS + 1200).unwrap();
-        cache.insert_block_header(101, &BH_101, &BH_100, GENESIS_TS + 1212).unwrap();
-        cache.insert_block_header(200, &BH_200, &BH_101, GENESIS_TS + 2400).unwrap();
+        cache
+            .insert_block_header(100, &BH_100, &BH_0, GENESIS_TS + 1200)
+            .unwrap();
+        cache
+            .insert_block_header(101, &BH_101, &BH_100, GENESIS_TS + 1212)
+            .unwrap();
+        cache
+            .insert_block_header(200, &BH_200, &BH_101, GENESIS_TS + 2400)
+            .unwrap();
 
-        // Logs: block 100 has 2 logs (idx 0,1), block 101 has 1 log (idx 0)
         let logs = vec![
             make_log(100, 0, BH_100),
             make_log(100, 1, BH_100),
             make_log(101, 0, BH_101),
         ];
         cache.insert_logs(&fh, &logs).unwrap();
-
-        // Mark range as fully scanned
         cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();
-
         (cache, fh)
     }
 
-    /// Build an EvmLogHistory backed by the warm cache. No RPC calls needed
-    /// for construction (genesis header is in cache) or bounded queries
-    /// (scanned ranges cover [0, 200]).
     async fn make_history(
         store: Arc<LogStore>,
     ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + Send + Sync + 'static>> {
         let asserter = Asserter::new();
-        // Constructor calls: get_chain_id(), get_block_number() (anchor)
+        // get_chain_id, get_block_number for anchor
         asserter.push_success(&alloy::primitives::U64::from(TEST_CHAIN));
         asserter.push_success(&alloy::primitives::U64::from(200u64));
-        // fetch_block_timestamp(200) hits cache (warm_cache has block 200 header)
+        // anchor block-header lookup hits the cache (warm_cache has block 200).
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
         EvmLogHistory::with_options(provider, store, ADDR, TOPICS, 100, 12)
             .await
             .unwrap()
     }
 
-    /// Cutoff at block 200 — keeps all queries within the warm cache.
-    fn cutoff_200() -> EvmPosition {
-        EvmPosition {
-            chain_id: TEST_CHAIN,
-            block_number: 200,
-            log_index: u32::MAX,
-            block_hash: BH_200,
-            timestamp: 0,
-            side: Side::After,
-        }
-    }
-
-    // -- Navigation: after() --
-
-    #[tokio::test]
-    async fn after_earliest_returns_first_log() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-        let cutoff = cutoff_200();
-
-        let c = h.after(&EvmPosition::earliest(TEST_CHAIN), Some(&cutoff)).await.unwrap().unwrap();
-        assert_eq!(c.value().block_number, 100);
-        assert_eq!(c.value().log_index, 0);
+    /// Iterate a Hist into a Vec<Positioned> with no in-flight fetcher.
+    async fn collect(
+        hist: Hist<EvmEvent, EvmPosition>,
+    ) -> Vec<Positioned<EvmEvent, EvmPosition>> {
+        hist.iter().try_collect().await.unwrap()
     }
 
     #[tokio::test]
-    async fn after_side_before_is_inclusive() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-        let cutoff = cutoff_200();
+    async fn iter_walks_all_logs_in_window() {
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        let backend: Arc<dyn HistBackend<_, _>> = history.clone();
+        let end = EvmPosition::new(200, u32::MAX);
+        let hist = Hist::new(backend, EvmPosition::earliest(), end);
 
-        // Position Before (100, 0) → should return the log at (100, 0)
-        let pos = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 100, log_index: 0,
-            block_hash: BH_100, timestamp: 0, side: Side::Before,
-        };
-        let c = h.after(&pos, Some(&cutoff)).await.unwrap().unwrap();
-        assert_eq!(c.value().block_number, 100);
-        assert_eq!(c.value().log_index, 0);
+        let items = collect(hist).await;
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].item.position(), EvmPosition::new(100, 0));
+        assert_eq!(items[1].item.position(), EvmPosition::new(100, 1));
+        assert_eq!(items[2].item.position(), EvmPosition::new(101, 0));
     }
 
     #[tokio::test]
-    async fn after_side_after_is_exclusive() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-        let cutoff = cutoff_200();
+    async fn split_clamps_anchor_to_window() {
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        let backend: Arc<dyn HistBackend<_, _>> = history.clone();
+        let end = EvmPosition::new(200, u32::MAX);
+        let hist = Hist::new(backend, EvmPosition::earliest(), end);
 
-        // Position After (100, 0) → should skip (100, 0), return (100, 1)
-        let pos = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 100, log_index: 0,
-            block_hash: BH_100, timestamp: 0, side: Side::After,
-        };
-        let c = h.after(&pos, Some(&cutoff)).await.unwrap().unwrap();
-        assert_eq!(c.value().block_number, 100);
-        assert_eq!(c.value().log_index, 1);
+        // Split past end ⇒ head = full, tail = empty.
+        let (head, tail) = hist.split(EvmPosition::new(9999, 0));
+        assert_eq!(collect(head).await.len(), 3);
+        assert!(tail.is_empty());
+
+        // Split before start ⇒ head = empty, tail = full.
+        let (head, tail) = hist.split(EvmPosition::new(0, 0));
+        assert!(head.is_empty());
+        assert_eq!(collect(tail).await.len(), 3);
+
+        // Split between logs.
+        let (head, tail) = hist.split(EvmPosition::new(100, 0));
+        let head_items = collect(head).await;
+        let tail_items = collect(tail).await;
+        assert_eq!(head_items.len(), 1);
+        assert_eq!(head_items[0].item.position(), EvmPosition::new(100, 0));
+        assert_eq!(tail_items.len(), 2);
+        assert_eq!(tail_items[0].item.position(), EvmPosition::new(100, 1));
     }
 
     #[tokio::test]
-    async fn after_returns_none_past_last_log() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-        let cutoff = cutoff_200();
-
-        // After the last log (101, 0)
-        let pos = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 101, log_index: 0,
-            block_hash: BH_101, timestamp: 0, side: Side::After,
-        };
-        assert!(h.after(&pos, Some(&cutoff)).await.unwrap().is_none());
-    }
-
-    // -- Navigation: before() --
-
-    #[tokio::test]
-    async fn before_never_returns_last_log() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        let c = h.before(&EvmPosition::never(TEST_CHAIN), None).await.unwrap().unwrap();
-        assert_eq!(c.value().block_number, 101);
-        assert_eq!(c.value().log_index, 0);
+    async fn iter_empty_window_yields_nothing() {
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        let backend: Arc<dyn HistBackend<_, _>> = history.clone();
+        let pos = EvmPosition::new(150, 0);
+        let hist = Hist::new(backend, pos, pos);
+        assert!(hist.is_empty());
+        assert!(collect(hist).await.is_empty());
     }
 
     #[tokio::test]
-    async fn before_side_after_is_inclusive() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        // Position After (100, 1) → should return the log at (100, 1)
-        let pos = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 100, log_index: 1,
-            block_hash: BH_100, timestamp: 0, side: Side::After,
-        };
-        let c = h.before(&pos, None).await.unwrap().unwrap();
-        assert_eq!(c.value().block_number, 100);
-        assert_eq!(c.value().log_index, 1);
+    async fn iter_picks_up_timestamp_from_store() {
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        let backend: Arc<dyn HistBackend<_, _>> = history.clone();
+        let end = EvmPosition::new(200, u32::MAX);
+        let hist = Hist::new(backend, EvmPosition::earliest(), end);
+        let items = collect(hist).await;
+        // block 100 header inserted with GENESIS_TS + 1200
+        assert_eq!(items[0].item.timestamp, GENESIS_TS + 1200);
+        assert_eq!(items[2].item.timestamp, GENESIS_TS + 1212);
     }
-
-    #[tokio::test]
-    async fn before_side_before_is_exclusive() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        // Position Before (100, 1) → should return (100, 0)
-        let pos = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 100, log_index: 1,
-            block_hash: BH_100, timestamp: 0, side: Side::Before,
-        };
-        let c = h.before(&pos, None).await.unwrap().unwrap();
-        assert_eq!(c.value().block_number, 100);
-        assert_eq!(c.value().log_index, 0);
-    }
-
-    #[tokio::test]
-    async fn before_earliest_returns_none() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        assert!(h.before(&EvmPosition::earliest(TEST_CHAIN), None).await.unwrap().is_none());
-    }
-
-    // -- Cursor navigation --
-
-    #[tokio::test]
-    async fn cursor_next_walks_forward() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-        let cutoff = cutoff_200();
-
-        let c0 = h.after(&EvmPosition::earliest(TEST_CHAIN), Some(&cutoff)).await.unwrap().unwrap();
-        assert_eq!((c0.value().block_number, c0.value().log_index), (100, 0));
-
-        // next() calls backend.after(c.after, None) — use cutoff variant via direct call
-        let c1 = h.after(c0.after(), Some(&cutoff)).await.unwrap().unwrap();
-        assert_eq!((c1.value().block_number, c1.value().log_index), (100, 1));
-
-        let c2 = h.after(c1.after(), Some(&cutoff)).await.unwrap().unwrap();
-        assert_eq!((c2.value().block_number, c2.value().log_index), (101, 0));
-
-        assert!(h.after(c2.after(), Some(&cutoff)).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn cursor_prev_walks_backward() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        let c2 = h.before(&EvmPosition::never(TEST_CHAIN), None).await.unwrap().unwrap();
-        assert_eq!((c2.value().block_number, c2.value().log_index), (101, 0));
-
-        let c1 = h.before(c2.before(), None).await.unwrap().unwrap();
-        assert_eq!((c1.value().block_number, c1.value().log_index), (100, 1));
-
-        let c0 = h.before(c1.before(), None).await.unwrap().unwrap();
-        assert_eq!((c0.value().block_number, c0.value().log_index), (100, 0));
-
-        assert!(h.before(c0.before(), None).await.unwrap().is_none());
-    }
-
-    // -- Position ops --
-
-    #[tokio::test]
-    async fn is_equiv_same_position() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        let a = EvmPosition::earliest(TEST_CHAIN);
-        assert!(h.is_equiv(&a, &a).await.unwrap());
-
-        let b = EvmPosition::never(TEST_CHAIN);
-        assert!(h.is_equiv(&b, &b).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn lca_returns_earlier() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        let a = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 100, log_index: 0,
-            block_hash: BH_100, timestamp: 0, side: Side::After,
-        };
-        let b = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 101, log_index: 0,
-            block_hash: BH_101, timestamp: 0, side: Side::After,
-        };
-        let lca = h.lca(&a, &b).await.unwrap();
-        assert_eq!(lca.block_number, 100);
-    }
-
-    #[tokio::test]
-    async fn at_estimates_block_from_time() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-
-        // anchor = block 200 @ GENESIS_TS + 2400, block_time = 12
-        // GENESIS_TS + 1200 is 1200s before anchor → 100 blocks before → block 100
-        let pos = h.at(GENESIS_TS + 1200);
-        assert_eq!(pos.block_number, 100);
-
-        // GENESIS_TS + 3600 is 1200s after anchor → 100 blocks after → block 300
-        let pos = h.at(GENESIS_TS + 3600);
-        assert_eq!(pos.block_number, 300);
-    }
-
-    // -- Marshal round-trip --
 
     #[tokio::test]
     async fn position_marshal_round_trip() {
-        let (cache, _) = warm_cache();
-        let h = make_history(cache).await;
-        let cutoff = cutoff_200();
-
-        let c = h.after(&EvmPosition::earliest(TEST_CHAIN), Some(&cutoff)).await.unwrap().unwrap();
-        let bytes = c.before().marshal();
+        let p = EvmPosition::new(123_456_789, 42);
+        let bytes = p.marshal();
         let restored = EvmPosition::unmarshal(&bytes).unwrap();
-        assert_eq!(restored.block_number, c.before().block_number);
-        assert_eq!(restored.log_index, c.before().log_index);
-        assert_eq!(restored.side, c.before().side);
-    }
-
-    // -- Tip tracking --
-
-    #[tokio::test]
-    async fn tip_tracking_blocks_then_resolves() {
-        let (cache, fh) = warm_cache();
-
-        // Add a log at block 300 that will be "discovered" after tip advance
-        let bh_300: [u8; 32] = [0xA3; 32];
-        cache.insert_block_header(300, &bh_300, &BH_200, GENESIS_TS + 3600).unwrap();
-        cache.insert_logs(&fh, &[make_log(300, 0, bh_300)]).unwrap();
-        cache.record_scanned_range(&fh, 201, 300, &bh_300).unwrap();
-
-        // Build history with a mock that returns chain_id, anchor block, then block 200 for after()
-        let asserter = Asserter::new();
-        // Constructor calls: get_chain_id(), get_block_number() (anchor)
-        asserter.push_success(&alloy::primitives::U64::from(TEST_CHAIN));
-        asserter.push_success(&alloy::primitives::U64::from(200u64));
-        // fetch_block_timestamp(200) hits cache (warm_cache has block 200 header)
-        // after() without cutoff calls get_block_number() — push response
-        asserter.push_success(&alloy::primitives::U64::from(200u64));
-        let provider = ProviderBuilder::default().connect_mocked_client(asserter);
-        let h = EvmLogHistory::with_options(provider, cache, ADDR, TOPICS, 100, 12)
-            .await
-            .unwrap();
-
-        let cutoff = cutoff_200();
-
-        // Verify nothing after (101, 0) within cutoff
-        let last = h.after(&EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 101, log_index: 0,
-            block_hash: BH_101, timestamp: 0, side: Side::After,
-        }, Some(&cutoff)).await.unwrap();
-        assert!(last.is_none());
-
-        // Call after() without cutoff — first searches up to block 200 (from
-        // mock get_block_number), finds nothing, then blocks waiting for tip.
-        let h2 = h.clone();
-        let pos = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 101, log_index: 0,
-            block_hash: BH_101, timestamp: 0, side: Side::After,
-        };
-
-        let handle = tokio::spawn(async move {
-            h2.after(&pos, None).await
-        });
-
-        // Let spawned task reach the wait point
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Simulate tip advance
-        let _ = h.latest_tx.send(EvmPosition {
-            chain_id: TEST_CHAIN,
-            block_number: 300,
-            log_index: u32::MAX,
-            block_hash: bh_300,
-            timestamp: GENESIS_TS + 3600,
-            side: Side::After,
-        });
-
-        let result = tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("timed out waiting for after()")
-            .expect("task panicked");
-
-        let cursor = result.unwrap().unwrap();
-        assert_eq!(cursor.value().block_number, 300);
-        assert_eq!(cursor.value().log_index, 0);
-    }
-
-    // -- Stale cache does not skip uncached ranges --
-
-    #[tokio::test]
-    async fn stale_cached_log_beyond_chunk_not_returned() {
-        // Regression: search_cache_forward was unbounded — a log cached by a
-        // previous session far beyond chunk_end was returned as Found, causing
-        // the search to skip uncached intermediate blocks and miss events.
-        //
-        // Setup: blocks 0-200 fully scanned (no RPC needed), NO logs in that
-        // range. A stale log at block 500 from a previous session. Search
-        // from 0 with cutoff at 200.
-        //
-        // Before the fix: chunk [0,99] unbounded query finds 500. Since
-        // 500 > cutoff 200, the search reports "past cutoff" and returns
-        // None — without ever scanning chunks [100,199].
-        //
-        // After the fix: chunk [0,99] bounded query finds nothing (500 > 99).
-        // The search continues through [100,199], finds nothing, and
-        // correctly returns None.
-        let cache = Arc::new(LogStore::open_in_memory().unwrap());
-        let fh = compute_filter_hash(&ADDR, &TOPICS);
-
-        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
-        cache.insert_block_header(200, &BH_200, &BH_0, GENESIS_TS + 2400).unwrap();
-        let bh_500: [u8; 32] = [0x55; 32];
-        cache.insert_block_header(500, &bh_500, &BH_200, GENESIS_TS + 6000).unwrap();
-
-        // Fully scanned 0-200 with no logs.
-        cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();
-
-        // Stale log at 500 from a previous session.
-        cache.insert_logs(&fh, &[make_log(500, 0, bh_500)]).unwrap();
-        cache.record_scanned_range(&fh, 500, 500, &bh_500).unwrap();
-
-        let h = make_history(cache).await;
-        let history = h.history();
-
-        let cutoff = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 200, log_index: u32::MAX,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-
-        // Collect all Scanned events from the search stream to verify the
-        // search actually walks through all chunks instead of short-circuiting.
-        let mut scanned_blocks = vec![];
-        let mut stream = history.search_after(
-            &EvmPosition::earliest(TEST_CHAIN), Some(&cutoff),
-        );
-        use futures_util::StreamExt;
-        while let Some(event) = stream.next().await {
-            match event.unwrap() {
-                SearchEvent::Scanned(pos) => scanned_blocks.push(pos.block_number),
-                SearchEvent::Found(_) => panic!("should not find stale log at 500"),
-            }
-        }
-
-        // With chunk_size=100 and range 0-200, we expect chunks [0,99], [100,199],
-        // and [200,200] (the cutoff block itself).
-        assert_eq!(scanned_blocks, vec![99, 199, 200],
-            "search must scan all chunks, not short-circuit on stale log at 500");
+        assert_eq!(restored, p);
     }
 
     #[tokio::test]
-    async fn stale_cached_log_before_chunk_not_returned_in_reverse() {
-        // Same bug in reverse: last_log_at_or_before was unbounded and could
-        // find a stale log from far before the current chunk's lower bound.
-        //
-        // Setup: blocks 0-200 fully scanned. Log at 150. Stale log at block
-        // 10 from a different scanned range. Search backward from 200.
-        //
-        // First backward chunk is [101,200]. The log at 150 is within it.
-        // Before the fix, the unbounded backward query from search_end=200
-        // could return 10 (if 150 didn't exist) skipping uncached ranges.
-        // We test the simpler case: log at 150 should be found, not 10.
-        let cache = Arc::new(LogStore::open_in_memory().unwrap());
-        let fh = compute_filter_hash(&ADDR, &TOPICS);
-
-        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
-        let bh_10: [u8; 32] = [0x10; 32];
-        cache.insert_block_header(10, &bh_10, &BH_0, GENESIS_TS + 120).unwrap();
-        let bh_150: [u8; 32] = [0x15; 32];
-        cache.insert_block_header(150, &bh_150, &bh_10, GENESIS_TS + 1800).unwrap();
-        cache.insert_block_header(200, &BH_200, &bh_150, GENESIS_TS + 2400).unwrap();
-
-        // Fully scanned 0-200.
-        cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();
-        cache.insert_logs(&fh, &[make_log(150, 0, bh_150)]).unwrap();
-
-        let h = make_history(cache).await;
-        let history = h.history();
-
-        let cursor = history.before(&EvmPosition::never(TEST_CHAIN), None)
-            .await.unwrap().unwrap();
-        assert_eq!(cursor.value().block_number, 150,
-            "should find log at 150, not jump to stale cached log at 10");
-    }
-
-    // -- Empty history --
-
-    #[tokio::test]
-    async fn empty_history_returns_none() {
-        let cache = Arc::new(LogStore::open_in_memory().unwrap());
-        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
-        cache.insert_block_header(200, &BH_200, &BH_0, GENESIS_TS + 2400).unwrap();
-
-        let fh = compute_filter_hash(&ADDR, &TOPICS);
-        // Scanned but no logs
-        cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();
-
-        let h = make_history(cache).await;
-        let cutoff = cutoff_200();
-
-        assert!(h.after(&EvmPosition::earliest(TEST_CHAIN), Some(&cutoff)).await.unwrap().is_none());
-        assert!(h.before(&EvmPosition::never(TEST_CHAIN), None).await.unwrap().is_none());
-    }
-
-    // -- estimate_scan_count --
-
-    #[tokio::test]
-    async fn estimate_scan_count_cached() {
-        // Fully scanned range → 0 scans needed
-        let (cache, _) = warm_cache(); // scanned [0, 200]
-        let h = make_history(cache).await;
-        let from = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 0, log_index: 0,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-        let to = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 200, log_index: 0,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-        assert_eq!(h.estimate_scan_count(&from, &to), 0);
+    async fn time_pos_estimates_block() {
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        let hs = history.hist_store();
+        // anchor block 200 @ GENESIS_TS + 2400; block_time = 12
+        // 100 blocks before anchor → block 100 → time_pos returns cut "just before 100"
+        let pos = hs.time_pos(GENESIS_TS + 1200).await.unwrap();
+        assert_eq!(pos.block, 99);
+        assert_eq!(pos.log_index, u32::MAX);
     }
 
     #[tokio::test]
-    async fn estimate_scan_count_uncached() {
-        // No scanned ranges → ceil(range/chunk)
-        let cache = Arc::new(LogStore::open_in_memory().unwrap());
-        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
-        cache.insert_block_header(200, &BH_200, &BH_0, GENESIS_TS + 2400).unwrap();
-
-        let h = make_history(cache).await;
-        // chunk_size is 100 (make_history uses with_options(..., 100, 12))
-        // range is 0..2000 → one gap (0, 2000), (2000-0)/100 + 1 = 21
-        let from = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 0, log_index: 0,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-        let to = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 2000, log_index: 0,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-        assert_eq!(h.estimate_scan_count(&from, &to), 21);
+    async fn hist_store_next_uses_current_tip() {
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        // Bootstrap latest_store by simulating a tip update.
+        let _ = history.latest_tx.send(EvmPosition::new(200, u32::MAX));
+        let hs = history.hist_store();
+        let hist = hs.next().await;
+        assert_eq!(*hist.start(), EvmPosition::earliest());
+        assert_eq!(*hist.end(), EvmPosition::new(200, u32::MAX));
     }
 
+    /// chain_id stays on EvmLogHistory, never on positions.
     #[tokio::test]
-    async fn estimate_scan_count_gaps() {
-        // Partial coverage: scanned [0,200], gap [201, 1500]
-        let (cache, _fh) = warm_cache(); // scanned [0, 200]
-        let h = make_history(cache).await;
-        let from = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 0, log_index: 0,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-        let to = EvmPosition {
-            chain_id: TEST_CHAIN, block_number: 1500, log_index: 0,
-            block_hash: [0; 32], timestamp: 0, side: Side::After,
-        };
-        // Gap: (201, 1500), width = 1299, chunk_size=100 → 1299/100 + 1 = 13
-        assert_eq!(h.estimate_scan_count(&from, &to), 13);
+    async fn chain_id_is_on_history_not_position() {
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        assert_eq!(history.chain_id(), TEST_CHAIN);
+        // EvmPosition has only block + log_index — no chain field.
+        let p = EvmPosition::new(100, 0);
+        let s = format!("{p:?}");
+        assert!(!s.contains("chain"), "EvmPosition Debug should not mention chain: {s}");
+    }
+
+    // Suppress dead-code warnings on unused fixtures during phase work.
+    #[allow(dead_code)]
+    fn _unused_warmup() {
+        let _ = (BH_0, BH_100, BH_101, BH_200);
     }
 }

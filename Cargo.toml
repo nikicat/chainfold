@@ -63,6 +63,9 @@ required-features = ["evm"]
 name = "phase2_push"
 required-features = ["evm"]
 
+[[test]]
+name = "phase3_hist_store"
+
 [[example]]
 name = "history_explorer"
 required-features = ["evm"]

@@ -261,13 +261,6 @@ impl LogStore {
         })
     }
 
-    /// Shared mutex over the underlying connection. Crate-internal so the
-    /// legacy facade can run its remaining navigation queries without
-    /// duplicating the table; outside callers go through the typed methods.
-    pub(crate) fn connection(&self) -> &Mutex<Connection> {
-        &self.conn
-    }
-
     // --------------------------------------------------------
     // Logs
     // --------------------------------------------------------

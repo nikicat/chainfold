@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use alloy::primitives::U256;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::Cursor;
+use chainfold::arch::Positioned;
 use chainfold::evm::{decode_transfer, Erc20Metadata};
-use chainfold::reduce::ReducedEvent;
 
 pub fn explorer_base_url(chain_id: u64) -> &'static str {
     match chain_id {
@@ -73,7 +72,6 @@ pub fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: us
     }
 }
 
-/// Format context shared by both transfers and balances commands.
 pub struct FmtContext<'a> {
     pub owner: &'a [u8; 20],
     pub metadata: &'a HashMap<[u8; 20], Erc20Metadata>,
@@ -82,12 +80,8 @@ pub struct FmtContext<'a> {
     pub base_url: &'static str,
 }
 
-pub fn print_transfer(
-    cursor: &Cursor<EvmEvent, EvmPosition>,
-    index: usize,
-    ctx: &FmtContext,
-) {
-    let e = cursor.value();
+pub fn print_transfer(item: &Positioned<EvmEvent, EvmPosition>, index: usize, ctx: &FmtContext) {
+    let e = &item.item;
     if let Some(t) = decode_transfer(e) {
         let meta = match ctx.metadata.get(&e.contract_address) {
             Some(m) => m,
@@ -113,12 +107,12 @@ pub fn print_transfer(
 }
 
 pub fn print_balance(
-    cursor: &Cursor<ReducedEvent<EvmEvent, U256>, EvmPosition>,
+    item: &Positioned<EvmEvent, EvmPosition>,
+    balance: U256,
     index: usize,
     ctx: &FmtContext,
 ) {
-    let reduced = cursor.value();
-    let e = &reduced.event;
+    let e = &item.item;
     if let Some(t) = decode_transfer(e) {
         let meta = match ctx.metadata.get(&e.contract_address) {
             Some(m) => m,
@@ -127,7 +121,7 @@ pub fn print_balance(
         let direction = if &t.to == ctx.owner { " IN" } else { "OUT" };
         let counterparty = if &t.to == ctx.owner { &t.from } else { &t.to };
         let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, ctx.max_decimals);
-        let balance = format_amount(reduced.state, meta.decimals, BALANCE_WHOLE_WIDTH, ctx.max_decimals);
+        let balance_str = format_amount(balance, meta.decimals, BALANCE_WHOLE_WIDTH, ctx.max_decimals);
         let sym = format!("{:<width$}", meta.symbol, width = ctx.max_sym_width);
 
         println!(
@@ -140,7 +134,7 @@ pub fn print_balance(
             linked_addr(counterparty, ctx.base_url),
             amount,
             sym,
-            balance,
+            balance_str,
         );
     }
 }
