@@ -119,9 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, key) in args.chain.iter().enumerate() {
         println!("Setting up '{}' from {}...", key, args.rpc_url[i]);
         let url: Url = args.rpc_url[i].parse()?;
-        let client = ClientBuilder::default()
-            .layer(rpc_retry_layer())
-            .http(url);
+        let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
         let provider = ProviderBuilder::new().connect_client(client);
         let address = parse_hex_address(&args.address[i])?;
 
@@ -183,11 +181,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(item) = stream.next().await {
         let item = item?;
         let m = &item.item;
-        let topic0_hex = m
-            .item
-            .topics
-            .first().map_or_else(|| "(none)".into(), |t| format!("0x{}", hex::encode(&t[..4])));
-        let ts = chrono::DateTime::from_timestamp(m.item.timestamp as i64, 0).map_or_else(|| "----------T--:--:--Z".into(), |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        let topic0_hex = m.item.topics.first().map_or_else(
+            || "(none)".into(),
+            |t| format!("0x{}", hex::encode(&t[..4])),
+        );
+        let ts = chrono::DateTime::from_timestamp(m.item.timestamp as i64, 0).map_or_else(
+            || "----------T--:--:--Z".into(),
+            |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        );
         println!(
             "[{:>4}] {:<10} [{}:{:>9}:{:>3}]  topic0={}  tx=0x{}",
             count,

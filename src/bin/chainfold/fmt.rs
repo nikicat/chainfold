@@ -42,7 +42,10 @@ fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
 }
 
 pub fn format_timestamp(ts: u64) -> String {
-    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(|| "----------T--:--:--Z".into(), |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(
+        || "----------T--:--:--Z".into(),
+        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
 }
 
 const AMOUNT_WHOLE_WIDTH: usize = 6;

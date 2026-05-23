@@ -175,8 +175,7 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
 // Bridge-id match fn
 // ============================================================
 
-fn bridge_match_fn(
-) -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
+fn bridge_match_fn() -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
     match_fn(|input: MatchInput<Ev, Ev, MockPos, MockPos>| {
         let mut dst_by_id: std::collections::HashMap<u64, Vec<Ev>> =
             std::collections::HashMap::new();

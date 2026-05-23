@@ -142,7 +142,10 @@ where
     }
 }
 
-fn wrap_hist<Item, P>(upstream: &Hist<Item, P>, pred: Predicate<Item>) -> Hist<FilteredItem<Item>, P>
+fn wrap_hist<Item, P>(
+    upstream: &Hist<Item, P>,
+    pred: Predicate<Item>,
+) -> Hist<FilteredItem<Item>, P>
 where
     Item: Clone + Send + Sync + 'static,
     P: Position,
@@ -164,8 +167,7 @@ mod tests {
     use crate::combinators::tests_common::{collect, MockEvent, MockPos, MockSource};
 
     fn even(e: &MockEvent) -> bool {
-        e.0.parse::<u64>()
-            .is_ok_and(|n| n.is_multiple_of(2))
+        e.0.parse::<u64>().is_ok_and(|n| n.is_multiple_of(2))
     }
 
     fn mk(i: u64) -> MockEvent {

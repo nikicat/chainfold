@@ -607,7 +607,9 @@ where
     // Fill heads.
     for s in &mut state.streams {
         if s.head.is_none() && !s.exhausted {
-            if let Some(item) = s.stream.next().await { s.head = Some(item) } else {
+            if let Some(item) = s.stream.next().await {
+                s.head = Some(item);
+            } else {
                 s.exhausted = true;
                 // Source exhausted within (start, end] — advance the
                 // vector clock to end[k] so resumes know we've consumed

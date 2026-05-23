@@ -133,19 +133,11 @@ fn extract_key(e: &EvmEvent, on: MatchOn) -> Option<Vec<u8>> {
 
 fn make_match_fn(
     on: MatchOn,
-) -> Arc<
-    dyn MatchFn<
-        EvmEvent,
-        EvmEvent,
-        MatchOutput<EvmEvent, EvmEvent>,
-        EvmPosition,
-        EvmPosition,
-    >,
-> {
+) -> Arc<dyn MatchFn<EvmEvent, EvmEvent, MatchOutput<EvmEvent, EvmEvent>, EvmPosition, EvmPosition>>
+{
     match_fn(
         move |input: MatchInput<EvmEvent, EvmEvent, EvmPosition, EvmPosition>| {
-            let mut dst_by_key: HashMap<Vec<u8>, Vec<EvmEvent>> =
-                HashMap::new();
+            let mut dst_by_key: HashMap<Vec<u8>, Vec<EvmEvent>> = HashMap::new();
             for d in &input.dst_items {
                 if let Some(k) = extract_key(&d.item, on) {
                     dst_by_key.entry(k).or_default().push(d.item.clone());
@@ -186,14 +178,10 @@ async fn open_history(
     topic0: [u8; 32],
     db_subdir: &str,
     chunk_size: u64,
-) -> Result<
-    Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>>, Box<dyn std::error::Error>>
+{
     let url: Url = rpc_url.parse()?;
-    let client = ClientBuilder::default()
-        .layer(rpc_retry_layer())
-        .http(url);
+    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);
     std::fs::create_dir_all(db_subdir).ok();
     let db_path = versioned_path(&format!("{db_subdir}/log_store.db"));

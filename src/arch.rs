@@ -152,19 +152,16 @@ impl<T: Clone + Send + Sync + 'static> Store<T> {
     /// Stream of value changes. The first item is always the current value.
     pub fn subscribe(&self) -> Subscription<T> {
         let rx = self.rx.clone();
-        Box::pin(unfold(
-            (rx, true),
-            |(mut rx, first)| async move {
-                if first {
-                    let val = rx.borrow_and_update().clone();
-                    Some((val, (rx, false)))
-                } else {
-                    rx.changed().await.ok()?;
-                    let val = rx.borrow_and_update().clone();
-                    Some((val, (rx, false)))
-                }
-            },
-        ))
+        Box::pin(unfold((rx, true), |(mut rx, first)| async move {
+            if first {
+                let val = rx.borrow_and_update().clone();
+                Some((val, (rx, false)))
+            } else {
+                rx.changed().await.ok()?;
+                let val = rx.borrow_and_update().clone();
+                Some((val, (rx, false)))
+            }
+        }))
     }
 }
 
@@ -181,10 +178,7 @@ pub struct AsyncDisposable {
 }
 
 impl AsyncDisposable {
-    pub fn new(
-        cancel: CancellationToken,
-        handle: JoinHandle<()>,
-    ) -> Self {
+    pub fn new(cancel: CancellationToken, handle: JoinHandle<()>) -> Self {
         Self {
             cancel,
             handle: Some(handle),
@@ -506,7 +500,7 @@ where
 // ============================================================
 
 pub mod evm {
-    use super::{Position, Timestamp, Arc};
+    use super::{Arc, Position, Timestamp};
 
     // --------------------------------------------------------
     // EvmPosition — totally ordered (block, log_index)

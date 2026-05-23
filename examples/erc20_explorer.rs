@@ -180,7 +180,10 @@ fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
 }
 
 fn format_timestamp(ts: u64) -> String {
-    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(|| "----------T--:--:--Z".into(), |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(
+        || "----------T--:--:--Z".into(),
+        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
 }
 
 const AMOUNT_WHOLE_WIDTH: usize = 6;
@@ -271,9 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let owner = parse_hex_address(&args.owner)?;
 
     let url: Url = args.rpc_url.parse()?;
-    let client = ClientBuilder::default()
-        .layer(rpc_retry_layer())
-        .http(url);
+    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);
     let db_path = versioned_path(&args.db);
     let cache = Arc::new(LogStore::open(&db_path)?);

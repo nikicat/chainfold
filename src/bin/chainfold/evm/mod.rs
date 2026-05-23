@@ -20,9 +20,7 @@ pub async fn run(
     let rpc_url = config.rpc_url(args.rpc_url.as_deref(), args.chain_id)?;
 
     let url: Url = rpc_url.parse()?;
-    let client = ClientBuilder::default()
-        .layer(rpc_retry_layer())
-        .http(url);
+    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);
 
     let db_path = versioned_path(&args.db);

@@ -592,16 +592,13 @@ where
     pub fn iter(self: &Arc<Self>) -> MatcherStateStream<Src, Dst, Output, SP, DP> {
         let matcher = self.clone();
         let sub = self.base.changes().subscribe();
-        Box::pin(unfold(
-            (matcher, sub),
-            |(matcher, mut sub)| async move {
-                // Wait for a change tick (first tick is the current value,
-                // delivered immediately).
-                sub.next().await?;
-                let state = matcher.current_state().await;
-                Some((state, (matcher, sub)))
-            },
-        ))
+        Box::pin(unfold((matcher, sub), |(matcher, mut sub)| async move {
+            // Wait for a change tick (first tick is the current value,
+            // delivered immediately).
+            sub.next().await?;
+            let state = matcher.current_state().await;
+            Some((state, (matcher, sub)))
+        }))
     }
 }
 
@@ -783,8 +780,7 @@ mod tests {
     /// src match.
     fn bridge_match_fn() -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
         match_fn(|input: MatchInput<Ev, Ev, MockPos, MockPos>| {
-            let mut dst_by_id: HashMap<u64, Vec<Ev>> =
-                HashMap::new();
+            let mut dst_by_id: HashMap<u64, Vec<Ev>> = HashMap::new();
             for d in &input.dst_items {
                 dst_by_id
                     .entry(d.item.bridge_id)

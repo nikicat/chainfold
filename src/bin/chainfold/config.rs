@@ -12,10 +12,7 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     #[error("parsing {path}: {source}")]
-    Parse {
-        path: PathBuf,
-        source: TomlError,
-    },
+    Parse { path: PathBuf, source: TomlError },
     #[error("env var ${var} referenced in config is not set")]
     MissingEnvVar { var: String },
     #[error("unsupported chain id {0} for Alchemy")]

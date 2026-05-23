@@ -22,7 +22,9 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Hist, HistBackend, HistStore, HistoryError, Positioned};
-use chainfold::evm::{rpc_retry_layer, versioned_path, EvmLogHistory, LogStore, SubscribeTransport};
+use chainfold::evm::{
+    rpc_retry_layer, versioned_path, EvmLogHistory, LogStore, SubscribeTransport,
+};
 use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
@@ -102,7 +104,8 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
     let e = &item.item;
     let topic0_hex = e
         .topics
-        .first().map_or_else(|| "(none)".into(), |t| format!("0x{}", hex::encode(t)));
+        .first()
+        .map_or_else(|| "(none)".into(), |t| format!("0x{}", hex::encode(t)));
 
     println!(
         "[{:>4}] block={} log_idx={} tx=0x{}..{} topic0={}..{}",
@@ -170,9 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topics: [Option<[u8; 32]>; 4] = [topic0, None, None, None];
 
     let url: Url = args.rpc_url.parse()?;
-    let client = ClientBuilder::default()
-        .layer(rpc_retry_layer())
-        .http(url);
+    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);
     let db_path = versioned_path(&args.db);
     let store = Arc::new(LogStore::open(&db_path)?);
@@ -199,13 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::time::Instant;
 
         async fn walk_window(
-            backend: &Arc<
-                EvmLogHistory<
-                    impl Provider<Ethereum>
-                        + Clone
-                        + 'static,
-                >,
-            >,
+            backend: &Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>>,
             start: EvmPosition,
             end: EvmPosition,
         ) -> Result<usize, HistoryError> {
@@ -230,9 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         drop(backend);
         let store2 = Arc::new(LogStore::open(&db_path)?);
         let url2: Url = args.rpc_url.parse()?;
-        let client2 = ClientBuilder::default()
-            .layer(rpc_retry_layer())
-            .http(url2);
+        let client2 = ClientBuilder::default().layer(rpc_retry_layer()).http(url2);
         let provider2 = ProviderBuilder::new().connect_client(client2);
         let backend2 =
             EvmLogHistory::with_options(provider2, store2, address, topics, args.chunk_size, 12)
