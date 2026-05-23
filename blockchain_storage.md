@@ -1,3 +1,26 @@
+> **Historical brainstorm doc.** Written during the initial design phase
+> before the Phase 0–6 refactor landed. **Some of this is superseded** —
+> e.g. "Apply(state, event)" + "Go-first" reflect a pre-Rust plan. See
+> [`arch.md`](./arch.md) for the *shipped* design.
+>
+> What still holds: the **use-case motivation** (state reconstruction +
+> cross-chain history comparison), the **layering principle** ("SQLite
+> is cache, not transport"; "hot path is in-process"; "forward replay
+> only"), the **source-agnostic interface idea** (now implemented as the
+> `HistStoreBackend` trait), and the **per-source cursor model**
+> (`(blockNumber, logIndex)` for EVM is now `EvmPosition`).
+>
+> What changed: the implementation language is Rust, the "reduced
+> state" abstraction is currently provided by app-level folds (Reducer
+> rebuild deferred), and the "snapshot/anchor/coverage" tables are now
+> `cached_logs` / `scanned_ranges` / `cached_block_headers` /
+> `reorged_blocks` in `LogStore` (Phase 1).
+>
+> Kept here as design context — the use-case section in particular is
+> the cleanest articulation of *why* the library exists.
+
+---
+
 Usage scenarios for blockchain event store.
 
 1. State reconstruction.

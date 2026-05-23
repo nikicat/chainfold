@@ -1,497 +1,425 @@
-chainfold allows it's clients to:
- - read history of chain/cex events with caching - i.e. given time range first time it fetches events from source (EVM RPC or CEX API), and afterward the same time range is read from cache only - no new remote requests.
- - automatically updates caches - if requested range is only partially cached then it deduces what ranges are missing and fetches them only
- - handles connections/reconnections - client just receives events sooner or later, all connection-related stuff is handled by chainfold. No network errors is ever returned to client.
- - allows to read event histories incrementally - when client requests range (2020-01-01; 2026-01-01) it doesn't wait a month until the lib fetches gazillion of events, it returns an object that represents the history of requested events in the specified range. Client can iterate over it, obtain positions while iterating, compare positions across histories, etc.
- - allows to subscribe to new events and receive them instantly - i.e. within 1-2 ms - since the moment they are received through RPC/API. Live events are delivered from an in-memory range index without going through the persistent cache on the critical path.
- - allows to subscribe to events beginning at some point in the past, like from (2026-01-01; unbounded). That means the library returns an iterator that yields events starting at some point in the past, and then, when it yielded the last existing event, it waits until upstream (RPC or API) notifies about a new event and then yields it to the client.
- - allows to specify ranges for histories not only as timestamps but as chain-specific Positions, like (block_number, log_index) for EVM, or (block_number, tx_index, input_index) for BTC. These Positions are exposed on items, can be persisted, and used later to request other Hist ranges. This allows resumption from where processing last stopped.
- - allows not only to obtain event Hists but also StateHists. States are like events - have a Position and some data - but they are constructed (reduced) from events. Typical examples of States are Balances (e.g. History of Balances of owner of ERC20 token), or Transfers (e.g. History of Transfers — each item is a pointer into the linked list of all past Transfers for a specified account). To avoid huge memory copying on each new event, each Transfers object is just a pointer to a linked list of Transfer objects, so the History effectively is a list of such pointers. The linked list is virtual - pointers may target States or Events that have not yet been fetched and will be lazy-loaded from the event source.
- - States are cached too, much like Events.
+# Chainfold — Architecture
 
-In the end this library should allow clients to work with chains like they work with a local full-node, but without the need to download the full blockchain, because usually an app needs to work only with a small set of accounts/contracts/bitcoin addresses and a full local blockchain would be overkill for that.
+> Status: post-refactor (Phases 0–6 shipped, OwnedErc20 follow-up shipped). Phase 7 (pruning + best/safe finality wiring) is the next eligible chunk. See [refactor.md](./refactor.md) for the phased plan and `~/.claude-personal/projects/-home-nb-src-chainfold/memory/` for per-phase notes.
 
-# Core abstractions
+## What chainfold is
 
-The API rests on five shapes:
+A Rust library that lets a process work with blockchain (and CEX) event histories like a local full node — without ever downloading the chain. Concretely it gives clients:
 
-- **Position** — a separator dividing a history into "before" and "after". Carries a `side` (Before/After) so two distinct positions can sit on either side of the same item. Positions are bound to the history that produced them and are serializable for persistence (a Position doubles as an `Anchor`).
-- **Hist<T, P>** — a *finite, immutable* snapshot of a history segment. Has a `start` Position and an `end` Position. Iterable forward; splittable at a Position into two adjacent Hists. Iteration is lazy — items are fetched on demand and cached.
-- **HistStore<T, P>** — a reactive stream of `Hist` snapshots. Each time the tip advances (a new event arrives, a new block mines, finalization advances), the store yields a fresh `Hist` whose `end` reflects the new tip. The store owns the live subscription; consumers drive iteration off snapshots.
-- **Store<T>** — a reactive value with `subscribe()` semantics (inspired by Svelte/Zustand). `HistStore` exposes three of them: `latest` (mempool), `best` (mined), `safe` (finalized).
-- **Reducer / Matcher** — combinators that build derived histories from one or more source HistStores. Reducer is for monotonic folds (running balance, cumulative volume); Matcher is for stateless src↔dst correlation (bridge tracking, deposit/withdraw pairing). Both ship.
+- **Caching backfill.** Ask for a time/block range once; subsequent reads of the same range hit local SQLite, never the RPC. Partial overlaps fetch only the missing slice.
+- **Incremental, lazy iteration.** A request for `(2020-01-01, 2026-01-01)` does not block for a month. It returns a snapshot object; the consumer iterates and pulls items on demand.
+- **Resumable positions.** Each item carries a position (`(block, log_index)` for EVM). Persist the position, restart, resume from where you stopped.
+- **Live subscriptions.** New events surface in <10 ms (measured ~3 ms on local anvil over WebSocket) from the in-memory range index — never blocked on SQLite writes.
+- **Subscribe-from-the-past.** Iterate from an old position, transparently fall through into the live tip, never see network errors. Reconnect gap-fill is invisible to the consumer.
+- **Cross-source merge + correlation.** Combine events from different chains (or different filters on the same chain) into one chronological stream; correlate src ⇄ dst tails into a matched/pending/orphan view.
 
-The library used to also have a `Cursor` type for navigation. It's superseded: items expose their Position directly (`item.pos`), and "next item" / "previous item" is just `hist.split(pos)` plus forward iteration.
+This document describes the **shipped** architecture (commit `f661955` and later). For the vision-document version with not-yet-built bits like `Reducer` and reorg-aware `lca()`, scroll to [Future work](#future-work).
 
-Typescript-like pseudocode:
+## Component map
 
-```lang=typescript
+```mermaid
+flowchart TB
+    subgraph CONSUMER["Consumer (your app)"]
+        UserCode["Hist::iter · watch_hist · act_and_wait<br/>HistStore::snapshots · AnchoredMatcher::iter"]
+    end
 
-// Each history/chain implements its own Position.
-// Position is a separator of a Hist - it does not point to a specific event or state,
-// and it's not equivalent to any item handle (e.g. an empty Hist can have no items but still has positions).
-// A Position divides a Hist into two parts - before and after - that can be iterated.
-// Either part can be empty - in that case the Position points to the beginning or the end.
-// Implementations usually store positions as pointers to an event plus a Side field indicating
-// whether the position sits just before or just after that event.
-// That means that between two adjacent items there always are 2 equivalent positions:
-// one just after the former and one just before the latter.
-// This allows callers to include/exclude an event when querying by position.
-// Positions are bound to the Hist - using a position from one Hist on another Hist is undefined.
-// Positions are not always linearly ordered (because of reorgs); generally they can only be compared
-// for equivalence via isEquiv().
-// A Position also serves as an Anchor - it is serializable for persistence.
-interface Position {
-  // Bytes for persistence. Pair with HistStore.load() to reconstruct.
-  marshal(): bytes
+    subgraph CORE["Source-agnostic core"]
+        direction LR
+        arch["src/arch.rs<br/>Position · Hist · HistStore · Store"]
+        combinators["src/combinators<br/>map · filter · since"]
+        merge["src/merge<br/>MergedPos · ErasedHistStore<br/>merge_hist_stores"]
+        matcher["src/matcher<br/>BaseMatcher · AnchoredMatcher<br/>AnchorStore"]
+    end
 
-  // Which side of the underlying event coordinate this position sits on.
-  side: "before" | "after"
-  withSide(s: "before" | "after"): Position
-}
+    subgraph EVM["EVM source (cfg(feature = evm))"]
+        direction TB
+        EvmLogHistory["EvmLogHistory&lt;P&gt;<br/>(impl HistStoreBackend)"]
+        OwnedErc20["OwnedErc20<br/>(2 narrow filters + merge)"]
+        LogIndex["LogIndex<br/>(in-memory BTreeMap range tree)"]
+        LogStore["LogStore<br/>(SQLite — logs · scanned ranges · headers)"]
+        EvmLogSubscriber["EvmLogSubscriber<br/>(WS or Poll, reconnect-with-backoff)"]
+    end
 
-// Item-level type. Each event/state carries its own Position - the position just after it
-// (i.e. between this item and the next). To get the position just before, use pos.withSide("before").
-interface Positioned<P extends Position> {
-  readonly pos: P
-}
+    subgraph TRANSPORT["Transport / persistence"]
+        Alloy["alloy Provider<br/>(HTTP · WebSocket · pubsub)"]
+        SQLiteFile[("SQLite file<br/>(rusqlite, bundled)")]
+    end
 
-// Reactive value - inspired by Svelte/Zustand stores, but minimal.
-class Store<T> {
-  subscribe(): AsyncGenerator<T>
-  get(): T
-}
+    UserCode --> arch
+    UserCode --> matcher
+    combinators --> arch
+    merge --> arch
+    matcher --> arch
+    OwnedErc20 --> merge
+    OwnedErc20 --> EvmLogHistory
+    EvmLogHistory --> LogIndex
+    EvmLogHistory --> EvmLogSubscriber
+    LogIndex --> LogStore
+    EvmLogHistory -.HTTP backfill.-> Alloy
+    EvmLogSubscriber -.WS push / HTTP poll.-> Alloy
+    LogStore --> SQLiteFile
 
-// A finite, immutable history segment. Lazy: iter() fetches items on demand,
-// caching them in the underlying LogIndex. start..end bound the segment.
-class Hist<T extends Positioned<P>, P extends Position> {
-  readonly start: P
-  readonly end: P
-
-  // Yield items in forward order from start to end.
-  iter(): AsyncGenerator<T>
-
-  // Split this Hist at position `a` into (notAfter, after).
-  // Clamps `a` to [start, end] - splitting outside the window yields one empty
-  // side and one identical side. This is important when composing combinators
-  // over a previously-narrowed Hist.
-  split(a: P): readonly [Hist<T, P>, Hist<T, P>]
-
-  // Return a Position such that splitting on it skips exactly `items` from the head.
-  // Returns undefined if `items` does not form a valid prefix of this Hist.
-  // Used by combinators (Filtered, Mapped) and Matcher to advance anchors past
-  // a processed batch.
-  posAfter(items: readonly T[]): Promise<P | undefined>
-}
-
-// Reactive stream of Hist snapshots. Owns the live subscription to the upstream source.
-// The first snapshot is yielded as soon as the store is initialized; subsequent snapshots
-// are yielded whenever the tip advances.
-class HistStore<T extends Positioned<P>, P extends Position> {
-  // Yields a fresh Hist each time the tip advances. Never ends.
-  gen(): AsyncGenerator<Hist<T, P>, never>
-  // Promise of the current or next available Hist.
-  next(): Promise<Hist<T, P>>
-  // Subscribe via callback. Returns a disposable to cancel.
-  subscribe(cb: (h: Hist<T, P>) => void): AsyncDisposable
-
-  // Reactive tip positions.
-  // `latest` updates as new events arrive (may include mempool/unconfirmed).
-  // `best` updates as events are mined into blocks.
-  // `safe` updates as blocks finalize (no further reorgs possible).
-  // For CEX sources all three may collapse to the same store.
-  readonly latest: Store<P>
-  readonly best: Store<P>
-  readonly safe: Store<P>
-
-  // Sentinel positions. earliest.before() is always null; never.after() is always null.
-  readonly earliest: P
-  readonly never: P
-
-  // Approximate position at a wall-clock time on the canonical chain.
-  // Useful as an anchor for time-bounded queries; does not need to be exact.
-  at(time: Timestamp): Promise<P>
-
-  // Deserialize a Position previously persisted via pos.marshal().
-  load(data: bytes): P
-
-  // True iff a and b are equivalent positions - i.e. they sit in the same gap
-  // between two adjacent items (or at the same boundary).
-  isEquiv(a: P, b: P): Promise<boolean>
-
-  // Latest common ancestor on the canonical chain. Always exists because
-  // `earliest` is an ancestor of every position. Use this to roll back from a
-  // stale (reorged) position to a canonical one, then replay forward.
-  lca(a: P, b: P): Promise<P>
-}
-
-// Convenience: yield all items from `store` strictly after `start`. Never ends.
-// If `start` is omitted, begins from the current tip. Centralizes the
-// "snapshot + split + iter tail" loop most consumers want.
-async function* watchHist<T extends Positioned<P>, P extends Position>(
-  store: HistStore<T, P>,
-  start?: P,
-): AsyncGenerator<T, never> { /* ... */ }
-
-// Convenience: snapshot the tip, run `op`, await the first item matching `predicate`.
-// The snapshot happens BEFORE op so a fast op surfacing in history immediately
-// doesn't race the watcher.
-async function actAndWait<T extends Positioned<P>, P extends Position, R>(
-  store: HistStore<T, P>,
-  op: () => Promise<R>,
-  predicate: (item: T, result: R) => boolean,
-): Promise<T> { /* ... */ }
-
-// Represents an EVM chain. Constructed by users with an RPC endpoint.
-class EvmChain {
-  readonly blocks: HistStore<EvmBlock, EvmPosition>
-  readonly transactions: HistStore<EvmTransaction, EvmPosition>
-  contract(address: Address): Promise<EvmContract>
-  erc20(address: Address): Promise<Erc20>
-}
-
-class EvmPosition implements Position {
-  blockNumber: bigint
-  logIndex: number       // index of event inside the block (or -1 for block-level positions)
-  blockHash: Hash        // disambiguates forks during reorgs
-  timestamp: Timestamp   // block timestamp; convenience for at()
-  side: "before" | "after"
-}
-
-type EvmHist<T> = Hist<T, EvmPosition>
-type EvmHistStore<T> = HistStore<T, EvmPosition>
-
-type ContractState = bytes
-
-class EvmContract {
-  address: Address
-  chain: EvmChain
-
-  // Generic contract states - plain bytes derived from on-chain reads.
-  states: EvmHistStore<ContractStateItem>
-
-  // The block at which the contract was created. Useful as a default start position.
-  createdAt: EvmPosition
-}
-
-interface Asset {
-  symbol: string         // USDC, USDT, WBTC, ...
-  name: string
-}
-
-class Erc20 extends EvmContract implements Asset {
-  symbol: string
-  name: string
-  decimals: number
-
-  // ERC20 event histories.
-  transfers(from?: Address, to?: Address): EvmHistStore<Erc20Transfer>
-  mints(to: Address): EvmHistStore<Erc20Mint>
-  burns(from: Address): EvmHistStore<Erc20Burn>
-
-  // Memoized per owner.
-  ownedBy(owner: Address): OwnedErc20
-}
-
-class EvmEvent implements Positioned<EvmPosition> {
-  contract: EvmContract
-  blockNumber: bigint
-  timestamp: Timestamp
-  blockHash: Hash
-  logIndex: number
-  txId: TxId
-  args: EvmEventArgs
-  pos: EvmPosition       // position just after this event
-}
-
-class Erc20Transfer implements Positioned<EvmPosition> {
-  event: EvmEvent
-  token: Erc20
-  from: Address
-  to: Address
-  amount: Amount
-  pos: EvmPosition
-}
-
-// ERC20 events + states scoped to a single owner.
-// Built from combinators - no bespoke implementation.
-class OwnedErc20 {
-  token: Erc20
-  owner: Address
-
-  // Internally: merge of two filtered transfer stores (from=owner ∪ to=owner).
-  // Each underlying source fetches only its slice at the RPC level - this is not
-  // a post-filter over all transfers.
-  transfers: EvmHistStore<Erc20Transfer>
-
-  mints: EvmHistStore<Erc20Mint>
-  burns: EvmHistStore<Erc20Burn>
-
-  // Reduced state stream. When iterating forward it's enough to obtain a state
-  // once and apply transfer/mint/burn events. When iterating backward the
-  // implementation fetches state from some blocks ago and reconstructs the range
-  // forward - this avoids an eth_call per item. Reduced states are cached.
-  balances: EvmHistStore<Erc20Balance>
-}
-
-// Reduced state - reconstructible from a past state + events. For Erc20 the
-// reducer applies Transfer/Mint/Burn events. For complex contracts (AMM pools,
-// lending protocols) the reducer can be arbitrarily expensive but still doable.
-// Can be configured to periodically refetch on-chain state as a verification.
-class Erc20Balance implements Positioned<EvmPosition> {
-  erc20: Erc20
-  owner: Address
-  balance: Amount
-  pos: EvmPosition
-}
-
-// Asset-aware fixed-point amount. Ensures same-asset operations only.
-class Amount {
-  raw: bigint
-  decimals: number
-  asset: Asset
-  toString(): string
-}
-
-
-// ----- Examples -----
-
-// Reorg-safe processing loop. Persists an anchor between runs.
-async function processTransfersLoop(token: Erc20, owner: Address) {
-  const transfers = token.ownedBy(owner).transfers
-  const anchor: EvmPosition = loadAnchor() ?? transfers.earliest
-  // Roll back reorged tail to the latest common ancestor on the canonical chain.
-  const lca = await transfers.lca(anchor, transfers.safe.get())
-  const head = await transfers.next()
-  const [_, stale] = head.split(lca)
-  for await (const t of stale.iter()) revertTransfer(t)
-  // Replay forward, persisting the anchor as we go.
-  for await (const t of watchHist(transfers, lca)) {
-    await processTransfer(t)
-    storeAnchor(t.pos.marshal())
-  }
-}
-
-// Send a transfer on the source chain, wait for the corresponding bridge-in
-// on the destination chain. Returns the destination transfer.
-async function bridgeToken(
-  source: Erc20, destination: Erc20, owner: Address, amount: Amount,
-): Promise<Erc20Transfer> {
-  const arrivals = destination.transfers({ to: owner })
-  return actAndWait(
-    arrivals,
-    () => source.transfer({ from: owner, to: BRIDGE_ADDR, amount }),
-    (t) => t.from === BRIDGE_ADDR && t.amount === amount,
-  )
-}
-
-// Live balances across multiple tokens.
-async function liveBalances(tokens: Erc20[], owner: Address) {
-  const stores = tokens.map((t) => t.ownedBy(owner).balances)
-  // mergeStores combines reactive stores into one stream of latest snapshots.
-  for await (const balances of mergeStores(stores)) {
-    for (const [token, b] of zip(tokens, balances)) {
-      console.log(`${owner} ${token.name}: ${b.amount} ${token.symbol}`)
-    }
-  }
-}
+    classDef core fill:#e8f0fe,stroke:#4477cc
+    classDef evm fill:#fef3e8,stroke:#cc7744
+    classDef transport fill:#eee,stroke:#888
+    class arch,combinators,merge,matcher core
+    class EvmLogHistory,OwnedErc20,LogIndex,LogStore,EvmLogSubscriber evm
+    class Alloy,SQLiteFile transport
 ```
 
-# Implementation layering
+**Layering rule.** Everything in `src/arch.rs`, `src/combinators`, `src/merge`, and `src/matcher` is source-agnostic: it must not reference EVM (or Solana, Lighter, …). Tests for these modules use a synthetic `MockPos`, never `EvmPosition`. Source-specific concrete impls live behind feature flags (`evm` today; `solana`, `bitcoin`, … later).
 
-Live events must reach consumers in <10ms. Persistence runs behind that on its own schedule. Three layers:
+## Core abstractions
 
-```
-┌──────────────────────────────────────────────────┐
-│ consumer                                         │
-│   for await item of watchHist(store, anchor)     │
-├──────────────────────────────────────────────────┤
-│ in-memory range index (LogIndex / per filter)    │
-│   - BTreeMap<Position, Range>                    │
-│   - Ranges hold either items or empty tombstones │
-│   - fetchPromise per range = singleflight        │
-│   - subscribe() inserts here synchronously       │
-├──────────────────────────────────────────────────┤
-│ durable backfill cache (LogStore / shared)       │
-│   - SQLite: cached_logs, scanned_ranges,         │
-│     reorged_blocks, block headers, erc20 meta    │
-│   - consulted on cold miss + restart only        │
-│   - written from a background drain task         │
-├──────────────────────────────────────────────────┤
-│ source (alloy Provider / CEX API)                │
-│   - log filter watcher (websocket or poll)       │
-│   - eth_getLogs for backfill                     │
-└──────────────────────────────────────────────────┘
-```
+Five public types in `src/arch.rs`. They compose into everything else.
 
-Key properties:
+### `Position`
 
-- **SQLite is never on the live-event path.** A subscribed log goes: watcher → LogIndex (synchronous BTree insert) → consumer wakeup. SQLite write is enqueued and drained asynchronously.
-- **Scanned-ness is a first-class invariant.** Empty ranges (we scanned, found nothing) live alongside filled ranges in the same BTree. Iterating into an empty range yields nothing; iterating into a *missing* range triggers RPC. Pruning the in-memory index drops items but keeps the empty-range tombstone, so the gap-fill invariant survives memory pressure.
-- **Aligned chunks.** RPC ranges are snapped to `batchSize` boundaries before being cached. Two consumers asking slightly different ranges hit the same cache entries; restart picks up cleanly.
-- **Singleflight.** Each Range carries an optional `fetchPromise`. The first consumer hitting a cold gap inserts a placeholder and fires the RPC; concurrent consumers await the placeholder instead of firing duplicate RPCs.
-- **Reorgs.** Logs are append-only. Reorged block hashes go into a side table; queries filter them out. Scanned ranges whose end_block_hash is reorged become invalid and get refetched. Compaction of scanned ranges only runs below the `safe` tip so a tip reorg can't invalidate a huge merged range.
+A serializable, totally-ordered cut point in a single source's stream. A position is the *gap between* (or at the boundary of) items — never an item itself. It is **source-local**: positions from different sources are not comparable.
 
-Late-item insertion (a reconnect dump that overlaps cached history) follows four cases:
-1. Item position in unscanned gap → insert filled range.
-2. Item position equals existing empty range end → upgrade range to filled.
-3. Item position inside existing range → split the range around the item.
-4. Item position equals existing filled range end → duplicate, ignore.
-
-These rules let a reconnection that overlaps with cached history glue back cleanly without losing or duplicating events.
-
-# Combinators
-
-Hists and HistStores compose. Each combinator preserves the `Hist`/`HistStore` interface, so layers stack arbitrarily.
-
-```typescript
-// Project each item through a transform. The wrapper preserves the source
-// item internally so posAfter can reconstruct the upstream prefix.
-function mapHistStore<Src, Dst, P extends Position>(
-  store: HistStore<Src, P>,
-  f: (item: Src) => Dst | Promise<Dst>,
-): HistStore<MappedItem<Src, Dst>, P>
-
-// Keep only items matching `pred`. Each yielded item carries the run of
-// preceding filtered-out items on `.skipped`, so posAfter can reconstruct
-// the upstream prefix.
-function filterHistStore<T extends Positioned<P>, P extends Position>(
-  store: HistStore<T, P>,
-  pred: (item: T) => boolean,
-): HistStore<FilteredItem<T>, P>
-
-// Yield only items at or after `cut`. Implemented by pre-splitting every
-// emitted Hist at the upstream level - this is what makes wrapping
-// expensive mappers between sinceHistStore and source efficient: the mapper
-// never sees pre-cut items.
-function sinceHistStore<T extends Positioned<P>, P extends Position>(
-  store: HistStore<T, P>,
-  cut: P,
-): HistStore<T, P>
-
-// Merge N HistStores of the same item/position type into one.
-// Items are interleaved by position order; duplicates at the same position
-// are deduplicated naturally.
-function mergeHistStores<T extends Positioned<P>, P extends Position>(
-  sources: HistStore<T, P>[],
-  cmp: (a: P, b: P) => number,
-): HistStore<T, P>
-
-// Cross-source merge: sources can have different item types and different
-// position types. Output position is keyed by source name, so consumers
-// can resume each source independently.
-function mergeCrossSource<T>(
-  sources: Record<string, HistStore<unknown, Position>>,
-  project: (key: string, item: unknown) => T,
-  cmp: (a: MergedItem<T>, b: MergedItem<T>) => number,
-): HistStore<MergedItem<T>, MergedPos>
-
-class MergedPos implements Position {
-  // Keys are source names; values are marshalled per-source positions.
-  positions: Record<string, bytes>
-  marshal(): bytes
-}
-
-interface MergedItem<T> extends Positioned<MergedPos> {
-  sourceKey: string
-  item: T
-}
-```
-
-Cross-source merge lets you compose, e.g., `EvmHistStore<Burn>` on Ethereum with `EvmHistStore<Mint>` on Polygon into one chronologically ordered stream. The keyed MergedPos round-trips through JSON and survives source additions/removals across restarts.
-
-# Reducer
-
-A Reducer is a *stateful, monotonic fold* over N source HistStores producing one output HistStore. The output position is a vector of source positions — one per input. Reduced state is cached; resolving state at an arbitrary position uses cost-based query planning (replay-from-floor vs. fetch-and-replay) over the in-memory cache, the reducer's external cache (e.g. `erc20_balances`), and the source's own log cache.
-
-```typescript
-interface Reducer<S, In, Out, P extends Position> {
-  // Pure function. Called once per source event during forward iteration.
-  apply(state: S, sourceIdx: number, event: In): S
-
-  // Optional. Fetch state directly from the source (e.g. eth_call balanceOf)
-  // at a given position. Used as a checkpoint when replay would be too expensive.
-  fetchState?(pos: P): Promise<S>
-
-  // Optional. Look up the closest cached state at or before `pos` from
-  // a durable side cache.
-  cachedStateFloor?(pos: P): { pos: P; state: S } | null
-}
-
-function reduce<S, In, Out, P extends Position>(
-  sources: HistStore<In, P>[],
-  reducer: Reducer<S, In, Out, P>,
-  initial: S,
-  project: (state: S, event: In) => Out,
-): HistStore<Out, ReducerPos<P>>
-
-// Vector of one source position per input.
-class ReducerPos<P extends Position> implements Position {
-  components: P[]
-}
-```
-
-Use Reducer when the output is a function of the *cumulative history*: running balance, total volume, contract state. Don't use Reducer for problems where state items become obsolete and disappear from the output once consumed — use Matcher.
-
-# Matcher
-
-A Matcher is a *stateless, pure correlation* between two source HistStores (src and dst). Anchors are owned by the caller; `computeState(anchors)` reads each source's tail since its anchor and produces a snapshot of `{ matched, pending, orphans }`. There is no internal accumulating state — matched pairs disappear from the output once the caller advances both anchors past them.
-
-```typescript
-interface MatchInput<Src, Dst extends Positioned<Position>> {
-  srcHist: Hist<Src, Position>
-  dstHist: Hist<Dst, Position>
-  srcItems: readonly Src[]
-  dstItems: readonly Dst[]
-  anchors: { src: Position; dst: Position }
-}
-
-interface MatchOutput<Src, Dst> {
-  matched: readonly { src: Src; dst: Dst }[]
-  pending: readonly Src[]   // src items with no dst match yet
-  orphans: readonly Dst[]   // dst items with no src match
-}
-
-type MatchFn<Src, Dst, Out = MatchOutput<Src, Dst>> =
-  (input: MatchInput<Src, Dst>) => Out | Promise<Out>
-
-// Pure compute. No internal state. compute(anchors) is referentially transparent
-// given fixed source tails. The wake signal merges both source tips so consumers
-// recompute exactly when either side advances.
-class BaseMatcher<Src, Dst extends Positioned<Position>, Out = MatchOutput<Src, Dst>> {
-  constructor(
-    srcStore: HistStore<Src, Position>,
-    dstStore: HistStore<Dst, Position>,
-    match: MatchFn<Src, Dst, Out>,
-  )
-  computeState(anchors: { src: Position; dst: Position }): Promise<Out>
-  changes(): Store<unknown>
-}
-
-// Adds anchor persistence on top of BaseMatcher. Anchors are loaded lazily on
-// first use, cached in memory, and persisted to the side cache on setAnchors.
-class AnchoredMatcher<Src, Dst extends Positioned<Position>, Out = MatchOutput<Src, Dst>>
-  extends BaseMatcher<Src, Dst, Out>
+```rust
+pub trait Position:
+    Clone + Default + Eq + Ord + std::fmt::Debug + Send + Sync + 'static
 {
-  currentState(): Promise<Out>
-  iter(): AsyncGenerator<Out, never>
-  setAnchors(next: { src: Position; dst: Position }): Promise<void>
-  getHistory(since: Timestamp): Promise<Out>  // ad-hoc time-bounded query
+    fn marshal(&self) -> Vec<u8>;
+    fn unmarshal(bytes: &[u8]) -> Option<Self>;
 }
 ```
 
-Use Matcher when the output is a *current correlation* between two streams: bridge initiator ↔ completion, deposit ↔ withdraw, quote issued ↔ redeemed. Matched pairs are transient — they surface in the output once or a few times, then disappear once anchors advance past them. Unmatched items remain in `pending` / `orphans` until they get matched or until the operator decides to act on them (refund, escalate).
+`Default` is the natural lower-bound sentinel — for EVM it's `EvmPosition { block: 0, log_index: 0 }`.
 
-# Reducer vs Matcher — when to use which
+For EVM:
 
-| Property | Reducer | Matcher |
+```rust
+pub struct EvmPosition {
+    pub block: u64,
+    pub log_index: u32,
+}
+```
+
+### `Positioned<T, P>`
+
+An item paired with its post-cut position.
+
+```rust
+pub struct Positioned<T, P: Position> {
+    pub item: T,
+    pub pos: P,
+}
+```
+
+`hist.split(item.pos)` yields `(prefix_including_item, rest)` — that's the convention used to save resume anchors.
+
+### `Hist<T, P>`
+
+A finite, immutable snapshot of a history segment. Iterates items in `(start, end]` in position order.
+
+```rust
+impl<T, P: Position> Hist<T, P> {
+    pub fn start(&self) -> &P;
+    pub fn end(&self) -> &P;
+    pub fn iter(&self) -> impl Stream<Item = Result<Positioned<T, P>, HistoryError>>;
+    pub fn split(&self, p: P) -> (Self, Self);  // clamps p to [start, end]
+    pub fn is_empty(&self) -> bool;
+}
+```
+
+The window is fixed at construction. Even if new items arrive at the source, `this` `Hist` continues to reflect the same window. Get a fresh window via `HistStore::next` / `HistStore::snapshots`.
+
+### `HistStore<T, P>`
+
+Reactive sequence of `Hist` snapshots. Yields a fresh `Hist` whenever the source's tip advances.
+
+```rust
+impl<T, P: Position> HistStore<T, P> {
+    pub fn snapshots(&self) -> impl Stream<Item = Hist<T, P>>;
+    pub async fn next(&self) -> Hist<T, P>;            // current snapshot
+    pub fn subscribe(&self, cb) -> AsyncDisposable;     // push variant
+    pub async fn time_pos(&self, t: Timestamp) -> Result<P, HistoryError>;
+    pub fn latest(&self) -> &Store<P>;                  // mempool-ish tip
+    pub fn best(&self) -> &Store<P>;                    // mined tip (Phase 7)
+    pub fn safe(&self) -> &Store<P>;                    // finalized tip (Phase 7)
+}
+```
+
+`best`/`safe` are stubs that mirror `latest` until Phase 7 wires confirmation depth and finality polling.
+
+### `Store<T>`
+
+A reactive value (Svelte/Zustand-style). `get()` is non-blocking; `subscribe()` returns a stream where the first emission is the current value.
+
+```rust
+impl<T: Clone + Send + Sync + 'static> Store<T> {
+    pub fn get(&self) -> T;
+    pub fn subscribe(&self) -> impl Stream<Item = T>;
+}
+```
+
+### Free functions
+
+```rust
+// Yield every item arriving after `start`, across snapshot boundaries.
+pub fn watch_hist<T, P>(store: &HistStore<T, P>, start: P) -> impl Stream<Item = ...>;
+
+// Snapshot the tip BEFORE running op, then await the first post-snapshot item
+// satisfying `predicate`. Race-safe.
+pub async fn act_and_wait<T, P, R, ...>(store: &HistStore<T, P>, op: OpFn, predicate: Pred)
+    -> Result<(Positioned<T, P>, R), HistoryError>;
+```
+
+### `AsyncDisposable`
+
+A handle returned by `subscribe(cb)` and similar push-based APIs. Drops cancel the background task.
+
+```rust
+pub struct AsyncDisposable { /* CancellationToken + JoinHandle */ }
+impl Drop for AsyncDisposable { /* cancels + aborts */ }
+```
+
+## Combinators
+
+Pure proxies over `HistStore` — no I/O. Wrapped store continues to drive snapshots, tip stores, and time anchors.
+
+| Combinator | Effect | Item out |
 |---|---|---|
-| Output | History of states, one per event | Current snapshot of correlation |
-| State growth | Accumulates over time | Bounded by unmatched items |
-| Sources | N (same or different P) | 2 (different P typical) |
-| State backing | In-memory + durable side cache | Anchors only |
-| Replay | Fetch + replay from checkpoint | Pure compute from src/dst tails |
-| Position | Vector of source positions | Pair `{ src, dst }` of source positions |
-| Example | Running balance | Bridge tracking |
+| `map_hist_store(hs, f)` | Apply `f: Fn(&Src) -> Dst` per item | `MappedItem<Src, Dst> { item: Dst, source: Src }` |
+| `filter_hist_store(hs, pred)` | Keep items where `pred(&item)` is true | `FilteredItem<Item> { item, skipped: Vec<Item> }` |
+| `since_hist_store(hs, cut)` | Pre-split every yielded `Hist` at `cut` | `Item` (passthrough) |
 
-Both ship; they're orthogonal abstractions, not alternatives.
+The `since` combinator pre-splits at the *upstream* level. Concretely: `since(map(src, expensive_f), cut)` only calls `expensive_f` for post-cut items, because `Hist::split` happens before the mapper's `iter()` runs. Test `since_skips_mapper_on_pre_cut_items` pins this.
+
+## Merge (heterogeneous sources)
+
+Combine multiple `HistStore`s sharing a common item type `T` (potentially with different per-source `Position` types) into one `HistStore<MergedItem<T>, MergedPos>`. Streaming k-way merge ordered by a user-supplied `cmp`.
+
+```rust
+pub struct MergedPos { pub positions: BTreeMap<String, Vec<u8>> }
+pub struct MergedItem<T> { pub item: T, pub source_key: String, pub source_pos: Vec<u8> }
+pub struct ErasedHistStore<T> { /* type-erases per-source P */ }
+
+pub fn merge_hist_stores<T, F>(
+    sources: BTreeMap<String, ErasedHistStore<T>>,
+    cmp: F,
+) -> HistStore<MergedItem<T>, MergedPos>
+where F: Fn(&MergedItem<T>, &MergedItem<T>) -> Ordering;
+```
+
+Each yielded `MergedItem` carries a vector-clock `MergedPos`: the source that just emitted advances; other sources stay at whatever they last yielded (or `Default` if they never yielded in this window). Saving the last yielded `MergedPos` and resuming via `hist.split(saved).1` produces the exact continuation, per source.
+
+`MergedPos` Ord is byte-lex (`BTreeMap<String, Vec<u8>>` natural ord). That's a total order suitable for the `Position` trait, but it does **not** match component-wise containment — postcard leb128 doesn't preserve numeric order across byte-length boundaries. `MergedHistBackend` therefore overrides `HistBackend::clamp_pos` to clamp each per-source position separately via that source's own `Ord`.
+
+## Matcher
+
+Pure correlation between two source streams. Two layers:
+
+* **`BaseMatcher`** is the compute kernel. No mutable state beyond a background aggregator task for `changes()`. Tests/ad-hoc callers drive it directly via `compute_state(anchors)`.
+* **`AnchoredMatcher`** adds persistence over `AnchorStore` plus an in-memory cache. Production callers use this.
+
+```rust
+pub struct MatcherAnchors<SP: Position, DP: Position> { pub src: SP, pub dst: DP }
+pub struct Match<Src, Dst> { pub src: Src, pub dst: Dst }
+pub struct MatchOutput<Src, Dst> {
+    pub matched: Vec<Match<Src, Dst>>,
+    pub pending: Vec<Src>,
+    pub orphans: Vec<Dst>,
+}
+
+#[async_trait]
+pub trait MatchFn<Src, Dst, Output, SP, DP> {
+    async fn matchup(&self, input: MatchInput<Src, Dst, SP, DP>) -> Result<Output, HistoryError>;
+}
+pub fn match_fn<F, ...>(closure: F) -> Arc<dyn MatchFn<...>>;  // sync-closure adapter
+
+#[async_trait]
+pub trait AnchorStore {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, HistoryError>;
+    async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), HistoryError>;
+}
+pub struct InMemoryAnchorStore { /* HashMap */ }
+pub struct SqliteAnchorStore { /* own DB file, kv table */ }
+
+pub type Matcher<Src, Dst, SP, DP> =
+    AnchoredMatcher<Src, Dst, MatchOutput<Src, Dst>, SP, DP>;
+```
+
+**Asymmetric anchor advance is by design.** A matcher anchor pair `{src, dst}` is *not* "everything processed up to this pair" — it's "items strictly after these positions are still eligible for matching." Advance only `src` past a matched pair, and on next compute the pair moves from `matched` to `orphans` because the dst item is still in the dst tail. Consumers wanting monotonic guarantees advance anchors as a synchronized pair. Pinned by `asymmetric_anchor_advance_demotes_match_to_orphan`.
+
+**Matched pairs are transient.** They surface for one or more compute calls, then disappear once anchors advance past them. If you need a permanent matched log, persist matched pairs in your application before advancing.
+
+## EVM source layer
+
+Concrete `HistStoreBackend` for EVM log streams. Requires the `evm` feature.
+
+| Component | Role |
+|---|---|
+| `EvmLogHistory<P>` | `HistStoreBackend<EvmEvent, EvmPosition>` + `HistBackend<EvmEvent, EvmPosition>` over one log filter. |
+| `LogStore` | Durable SQLite — `cached_logs`, `scanned_ranges`, `reorged_blocks`, `cached_block_headers`, `erc20_metadata`, `erc20_balances`. Narrow public API; never on the live path. |
+| `LogIndex` | In-memory `BTreeMap<BlockPos, Range>` per filter. Empty-range tombstones, singleflight via `Arc<Notify>` per Range, lazy first-touch load from `LogStore`. |
+| `EvmLogSubscriber` | WebSocket (`eth_subscribe`) or HTTP poll fallback. Drop cancels via `CancellationToken`. Reconnect-with-backoff 100 ms → 30 s. |
+| `OwnedErc20<P>` | Two narrow `EvmLogHistory` instances sharing one `LogStore` (`topic1=owner` outgoing, `topic2=owner` incoming) merged into `HistStore<MergedItem<EvmEvent>, MergedPos>` ordered by `(block, log_index)`. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`). |
+| `aligned_block_ranges` | Snaps RPC ranges to `batch_size` boundaries so concurrent consumers hit the same cache entries. |
+
+Position bridging: `EvmPosition(0, 0)` ↔ `BlockPos::Bottom`; otherwise `BlockPos::At { block, log_index }` 1:1.
+
+## Data flow
+
+Cold-backfill path is below the live-event path on the diagram; both share the same `LogIndex` for the in-memory hot path.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Consumer
+    participant Hist as Hist iter
+    participant Idx as LogIndex
+    participant Drain as drain task
+    participant Store as LogStore SQLite
+    participant Sub as EvmLogSubscriber
+    participant RPC as alloy Provider
+
+    Note over App,RPC: COLD path — Hist::iter into uncached gap
+    App->>Hist: iter(start, end)
+    Hist->>Idx: items(start, end)
+    Idx->>Store: get_scanned_ranges + get_logs_in_range
+    Store-->>Idx: persisted bounds + logs
+    Idx->>Idx: compute_gaps
+    Idx->>RPC: eth_getLogs(aligned chunk)
+    Note over Idx,RPC: singleflight — peers await this fetch
+    RPC-->>Idx: LogPage
+    Idx->>Idx: insert range into BTree (synchronous)
+    Idx->>Drain: send(LogPage)
+    Drain->>Store: insert_logs + record_scanned_range
+    Idx-->>Hist: stream items
+    Hist-->>App: Positioned item (EvmEvent + EvmPosition)
+
+    Note over App,RPC: LIVE path — subscribe() → push delivery
+    App->>Sub: subscribe(SubscribeTransport)
+    Sub->>RPC: eth_subscribe(logs) + subscribe(blocks)
+    RPC-->>Sub: log / block stream
+    Sub->>Idx: insert_page (synchronous BTree update)
+    Sub->>Idx: update latest_store (watch Sender)
+    Idx->>Drain: send(LogPage) — async, off the hot path
+    Drain->>Store: persist
+    Idx-->>App: watch_hist consumer wakes, yields item
+```
+
+Key invariants:
+
+* SQLite is **never** on the live-event path. A WS-delivered log goes `Subscriber → LogIndex (in-memory) → consumer wakeup` synchronously; the SQLite write is drained in the background.
+* Scanned-ness is first-class. Empty ranges (we scanned, found nothing) live alongside filled ranges in the same BTree. Iter into an empty range yields nothing; iter into a *missing* range triggers RPC.
+* Singleflight. The first consumer hitting a cold gap inserts a placeholder and fires the RPC; concurrent consumers `await` the placeholder. Test: 5 walkers → 1 RPC.
+* Aligned chunks. RPC ranges are snapped to `batch_size` boundaries (default 1000 blocks) so different consumers asking slightly different ranges hit the same cache entries.
+
+## Ownership and lifetime
+
+Everything cancellable is owned by either an `Arc<T>` (shared, reference-counted) or an `AsyncDisposable` / `AbortOnDrop` (single-owner; drop cancels). No naked `tokio::spawn` that survives the owning struct.
+
+```mermaid
+flowchart LR
+    subgraph CONSUMER["Consumer-held"]
+        OwnedErc20Box["OwnedErc20&lt;P&gt;<br/>(owns 2 × Arc&lt;EvmLogHistory&gt;)"]
+        SubscriberBox["EvmLogSubscriber<br/>(returned by .subscribe())"]
+        MatcherBox["Arc&lt;AnchoredMatcher&gt;<br/>(owns BaseMatcher)"]
+        MergedHistStoreBox["HistStore (from merge_hist_stores)<br/>(owns Vec&lt;AbortAll&gt; of tip-aggregator tasks)"]
+    end
+
+    subgraph BG["Background tasks<br/>(abort on drop of owner)"]
+        WatcherTask["WS / Poll watcher task<br/>(EvmLogSubscriber)"]
+        DrainTask["LogIndex drain task<br/>(LogPage → LogStore)"]
+        AggrLatest["Merged latest aggregator task"]
+        AggrBest["Merged best aggregator task"]
+        AggrSafe["Merged safe aggregator task"]
+        ChangesTask["BaseMatcher changes() aggregator"]
+    end
+
+    subgraph SHARED["Shared (Arc, never solely owned)"]
+        LogStoreA["Arc&lt;LogStore&gt;<br/>(SQLite connection pool)"]
+        LogIndexA["Arc&lt;LogIndex&gt;<br/>(per filter_hash)"]
+    end
+
+    OwnedErc20Box --> LogIndexA
+    OwnedErc20Box --> LogStoreA
+    SubscriberBox -.drop aborts.-> WatcherTask
+    WatcherTask -- insert_page --> LogIndexA
+    LogIndexA -- attach_drain --> DrainTask
+    DrainTask -- writes --> LogStoreA
+    MergedHistStoreBox -.drop aborts.-> AggrLatest
+    MergedHistStoreBox -.drop aborts.-> AggrBest
+    MergedHistStoreBox -.drop aborts.-> AggrSafe
+    MatcherBox -.drop aborts.-> ChangesTask
+
+    classDef bg fill:#fff4e8,stroke:#cc8844
+    classDef shared fill:#e8f5e8,stroke:#44aa44
+    class WatcherTask,DrainTask,AggrLatest,AggrBest,AggrSafe,ChangesTask bg
+    class LogStoreA,LogIndexA shared
+```
+
+Key patterns:
+
+* **`AsyncDisposable` / `AbortOnDrop`.** Wraps a `JoinHandle`; `Drop` calls `abort()`. Used for the WS watcher, the LogIndex drain task, merged-store tip aggregators, and the matcher changes aggregator.
+* **`Arc<LogStore>` is shared.** Many `EvmLogHistory` instances over one chain can share one SQLite file; each has its own filter-hash-scoped slot. `OwnedErc20` exploits this — its two inner histories share one `Arc<LogStore>`.
+* **`Arc<LogIndex>` is per-filter.** Same SQLite, separate in-memory ranges. Filter hash collisions across processes are intentional: two processes with the same filter rebuild the same `LogIndex` from the same SQLite scanned-ranges table.
+* **No raw `tokio::spawn` leaks.** Every background task spawned by chainfold is owned by a struct that aborts it on drop.
+
+### The watch-coalescing footgun (recurring)
+
+Both `merge_hist_stores` tip aggregators and `BaseMatcher::changes()` aggregate per-source `Store<P>` subscriptions into a synthesized `Store<P>` / `Store<()>`. Initial naive implementation: skip the first emission of each per-source subscription, since it's the current value already represented in the synthesized channel.
+
+**This loses real updates.** Tokio `watch` channels coalesce — if a source updates between subscribe-time and the aggregator task's first poll, that update arrives as the "first" emission and gets silently dropped.
+
+**The rule:** propagate every emission. Redundant initial sends are harmless because the consumer-side watch coalesces too. Pinned by `snapshots_advance_when_any_source_appends` (merge) and `changes_fires_on_either_source_advance` (matcher).
+
+## Reorg / finality model
+
+* Logs are append-only in `LogStore`. Reorged block hashes go into a side table (`reorged_blocks`); queries filter them out at read time.
+* Scanned ranges whose `end_block_hash` is reorged become invalid and are refetched.
+* Three reactive tip stores on `HistStore`: `latest` (every received tip), `best` (mined; Phase 7 will subtract a confirmation depth), `safe` (finalized; Phase 7 will read `eth_getBlockByNumber("finalized")` where supported, fall back to `latest - 64`).
+* Compaction of scanned ranges runs only below the `safe` tip so a tip reorg can't invalidate a huge merged range.
+* Consumer-side reorg recovery: track `block_hash` on the last consumed `EvmEvent`; if the next `Hist::iter` walk surfaces a different hash at that position, walk back (this is the consumer's responsibility — Phase 7 may centralize it).
+
+## Layering rules
+
+1. **Source-agnostic core never references a concrete source.** No EVM type names in `arch.rs`, `combinators/*`, `merge.rs`, `matcher.rs`. Tests in those modules use `MockPos`.
+2. **Concrete sources live behind feature flags.** Today: `evm`. Future: `solana`, `bitcoin`, `lighter`, …
+3. **Backends implement traits; users get a struct.** `EvmLogHistory: HistStoreBackend<EvmEvent, EvmPosition>` is wrapped in an `Arc<dyn HistStoreBackend>` and handed to consumers as a `HistStore<EvmEvent, EvmPosition>`. Consumers do not know the backend type.
+4. **No global state.** Every long-lived resource (SQLite connection, in-memory range tree, watch channel, background task) is owned by a struct with a clear `Drop`.
+
+## Future work
+
+Tracked in [refactor.md](./refactor.md) and `MEMORY.md`. The biggest unbuilt pieces are:
+
+* **Phase 7 — pruning + best/safe wiring.** `LogIndex::prune_older_than` (drops items, keeps empty-range tombstones), `compact_in_memory(up_to_block)`, real `best`/`safe` polling, bounded long-running RSS.
+* **Reducer.** Per `refactor.md`, the matcher's sibling: a stateful monotonic fold over N sources producing one output `HistStore`. Output position is a vector of source positions. Both `Reducer` and `Matcher` ship; they target different problems (fold vs correlation). Currently deferred — `Erc20Balance` rebuild blocks on it.
+* **Real bridge decoder for `bridge_matcher`.** The CLI ships a generic `--match-on topic/data` key extractor; a real bridge needs an ABI-aware `MatchFn` (LayerZero ULN, OP `CrossDomainMessenger`, Arbitrum `Inbox`, …).
+* **Same-`P` typed merge alias.** `merge_hist_stores` always returns `HistStore<MergedItem<T>, MergedPos>`. When all sources share one `P` (the OwnedErc20 case) a typed `merge<T, P>` returning `HistStore<T, P>` would skip the `MergedPos` overhead. Not load-bearing today because the `MergedItem.source_key` is genuinely useful for direction reporting.
+* **Reorg-aware `lca()` and `is_equiv()`.** The pre-refactor `arch.md` envisioned `HistStore::lca(a, b)` for rolling back a stale anchor to the canonical chain's latest common ancestor. Currently consumer-side via `EvmEvent.block_hash` comparison. Centralizing into the API is a Phase 7 candidate.
+* **Other source backends.** Solana logs / Bitcoin scripthash subscriptions / CEX (Binance, Lighter, …) websockets all fit the `HistStoreBackend` shape. Each gets its own `Position` type; cross-source merge already supports it.
+
+## Examples that exist today
+
+* `examples/history_explorer.rs` — raw log walker over a single filter. `--measure` prints cold/warm/hot latency tiers.
+* `examples/erc20_explorer.rs` — ERC20 transfer explorer with running balance. `--owner` uses `OwnedErc20` (two narrow filters merged); without `--owner` walks the full Transfer stream.
+* `examples/bridge_explorer.rs` — multi-chain cross-source merge demo (`--chain key --rpc-url URL --address ADDR` repeated). Merges by `event.timestamp`, prints `[chain:block:idx]` events.
+* `examples/bridge_matcher.rs` — cross-chain `Matcher` CLI. `--src-rpc/--src-address` + `--dst-rpc/--dst-address` + `--match-on topic1|topic2|topic3|data`. Anchor persistence in a separate SQLite file. Generic key extractor — real-bridge ABI decoders are a follow-up.
+
+All four examples require `--features evm`.
+
+## Tests
+
+| Suite | Count | Notes |
+|---|---|---|
+| Lib unit | 95 | Runs without external deps. Mock sources for the source-agnostic surface. |
+| `tests/phase3_hist_store.rs` | 9 | Source-agnostic `Hist` / `HistStore` shape tests. |
+| `tests/phase4_combinators.rs` | 6 | map/filter/since composition. |
+| `tests/phase5_merge.rs` | 8 | Heterogeneous merge with two mock `Position` types. |
+| `tests/phase6_matcher.rs` | 6 | Includes SQLite persistence across restart (tempfile). |
+| `tests/anvil_smoke.rs` | 1 (+1 ignored) | Local anvil + fork-mainnet harness check. |
+| `tests/mock_provider_smoke.rs` | 1 | alloy `Asserter` wrapper. |
+| `tests/phase1_layering.rs` | (1 ignored) | Fork-mainnet warm-cache speedup measurement. |
+| `tests/phase2_push.rs` | (3 ignored) | Anvil live-event latency tests. |
+| `tests/owned_erc20.rs` | (2 ignored) | Fork-mainnet OwnedErc20 correctness vs broad-filter baseline. |
+
+Total: **126 active, 7 ignored** (anvil/fork-only — gated behind `--ignored` and the `anvil` binary). Run ignored tests with:
+
+```bash
+MAINNET_RPC_URL=https://your-rpc cargo test --features evm -- --ignored
+```

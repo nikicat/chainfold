@@ -1,5 +1,32 @@
 # Chainfold refactoring plan
 
+> **Status as of 2026-05-23.** Phases 0–6 shipped; the post-Phase-5 OwnedErc20
+> follow-up also shipped. Phase 7 (pruning + best/safe wiring) is the next
+> eligible chunk. Currently-deferred follow-ups: real bridge decoder for
+> `bridge_matcher`, same-`P` typed merge alias, `Reducer` rebuild.
+> See [`arch.md`](./arch.md) for the *shipped* design and
+> `~/.claude-personal/projects/-home-nb-src-chainfold/memory/` for per-phase
+> notes (`phase5_merge.md`, `phase6_matcher.md`, etc).
+>
+> | Phase | Status | Lib tests | Integration | Notes |
+> |---|---|---|---|---|
+> | 0 — Housekeeping + CCPs | ✅ Done (2026-05-21) | — | anvil_smoke, mock_provider_smoke | Dead pre-arch code deleted; anvil + mock harnesses landed. |
+> | 1 — LogStore + LogIndex | ✅ Done (2026-05-21) | 41 (26 + 15) | phase1_layering (#[ignore]) | Layered cache split; 98.5× warm-vs-cold on fork. |
+> | 2 — Push subscription | ✅ Done (2026-05-22) | +1 | phase2_push (3 × #[ignore]) | WS latency measured ~3 ms on local anvil. |
+> | 3 — Hist / HistStore split | ✅ Done (2026-05-22) | 64 | phase3_hist_store (9) | Full cleanup (no facade); `Cursor`/`History` removed. |
+> | 4 — map / filter / since | ✅ Done (2026-05-22) | 76 (+12) | phase4_combinators (6) | Pure proxies; no I/O. |
+> | 5 — Heterogeneous merge | ✅ Done (2026-05-22) | 84 (+8) | phase5_merge (8) | `MergedPos`, `ErasedHistStore`; clamp_pos override. |
+> | 5b — OwnedErc20 follow-up | ✅ Done (2026-05-23) | 95 (+2) | owned_erc20 (2 × #[ignore]) | Two narrow filters + merge; `erc20_explorer --owner` rewired. |
+> | 6 — Matcher | ✅ Done (2026-05-23) | 95 (+9) | phase6_matcher (6) | `BaseMatcher` / `AnchoredMatcher` / `AnchorStore` (in-mem + SQLite). |
+> | 7 — Pruning + best/safe + facade removal | ⏳ Pending | — | phase7_soak (planned) | Not started. |
+> | Bridge decoder | ⏳ Deferred | — | — | Generic `--match-on` extractor ships; ABI-aware impls per bridge are app-specific. |
+> | Same-`P` merge alias | ⏳ Deferred | — | — | Not load-bearing; `MergedItem.source_key` is useful as-is. |
+> | Reducer | ⏳ Deferred (Phase 6 spec) | — | — | Sibling of Matcher; `Erc20Balance` rebuild gates on it. |
+>
+> **Test totals after Phase 6 + OwnedErc20:** 95 lib + 31 active integration (anvil_smoke + mock_provider_smoke + 9 phase3 + 6 phase4 + 8 phase5 + 6 phase6) = 126 active, 7 ignored (anvil/fork-only).
+
+---
+
 A phased refactor aligning chainfold with the reference implementation's production-validated
 layering. Built on three locked-in structural shifts:
 
