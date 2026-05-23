@@ -23,6 +23,7 @@ pub enum ConfigError {
 #[derive(Debug, serde::Deserialize)]
 pub struct Config {
     pub provider: Option<ProviderConfig>,
+    pub etherscan: Option<EtherscanConfig>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -32,6 +33,11 @@ pub struct ProviderConfig {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct AlchemyConfig {
+    pub api_key: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct EtherscanConfig {
     pub api_key: String,
 }
 
@@ -107,23 +113,37 @@ impl Config {
         Err(ConfigError::UnsupportedChain(chain_id))
     }
 
+    /// Etherscan API key, if configured. Used by the signature resolver to
+    /// fall back to Etherscan when Sourcify has no metadata for a contract.
+    pub fn etherscan_api_key(&self) -> Option<&str> {
+        self.etherscan.as_ref().map(|e| e.api_key.as_str())
+    }
+
     /// Print resolved config with API key masked.
     pub fn show(&self) {
         println!("[provider]");
         match &self.provider {
             Some(p) => match &p.alchemy {
                 Some(a) => {
-                    let masked = if a.api_key.len() > 6 {
-                        format!("{}...{}", &a.api_key[..3], &a.api_key[a.api_key.len() - 3..])
-                    } else {
-                        "***".to_string()
-                    };
-                    println!("  alchemy.api_key = {}", masked);
+                    println!("  alchemy.api_key = {}", mask(&a.api_key));
                 }
                 None => println!("  (no alchemy config)"),
             },
             None => println!("  (no provider config)"),
         }
+        println!("[etherscan]");
+        match &self.etherscan {
+            Some(e) => println!("  api_key = {}", mask(&e.api_key)),
+            None => println!("  (no etherscan config)"),
+        }
+    }
+}
+
+fn mask(key: &str) -> String {
+    if key.len() > 6 {
+        format!("{}...{}", &key[..3], &key[key.len() - 3..])
+    } else {
+        "***".to_string()
     }
 }
 

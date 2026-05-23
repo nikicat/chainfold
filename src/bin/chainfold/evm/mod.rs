@@ -1,4 +1,5 @@
 pub mod erc20;
+pub mod events;
 
 use std::sync::Arc;
 
@@ -37,6 +38,12 @@ pub async fn run(
         EvmCommand::Erc20(erc20_args) => {
             erc20::run(
                 &provider, &cache, &db_path, args, erc20_args, chain_id, reverse, follow,
+            )
+            .await
+        }
+        EvmCommand::Events(events_args) => {
+            events::run(
+                &provider, &cache, &db_path, config, args, events_args, chain_id, reverse, follow,
             )
             .await
         }

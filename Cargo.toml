@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 evm = ["dep:alloy", "dep:tracing", "dep:blake3"]
-cli = ["evm", "dep:clap", "dep:hex", "dep:tracing-subscriber", "dep:chrono", "dep:toml", "dep:dirs"]
+cli = ["evm", "dep:clap", "dep:tracing-subscriber", "dep:chrono", "dep:toml", "dep:dirs"]
 
 [dependencies]
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
@@ -19,11 +19,13 @@ tokio-util = "0.7"    # CancellationToken (included by default, no "sync" featur
 rusqlite = { version = "0.34", features = ["bundled"] }
 rusqlite_migration = "2"
 postcard = { version = "1", features = ["alloc"] }
-alloy = { version = "1", features = ["provider-http", "provider-ws", "pubsub", "rpc-types", "sol-types"], optional = true }
+hex = "0.4"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+tiny-keccak = { version = "2", features = ["keccak"] }
+alloy = { version = "1", features = ["provider-http", "provider-ws", "pubsub", "rpc-types", "sol-types", "json-abi"], optional = true }
 tracing = { version = "0.1", optional = true }
 blake3 = { version = "1.8", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
-hex = { version = "0.4", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 chrono = { version = "0.4", optional = true }
 toml = { version = "0.8", optional = true }

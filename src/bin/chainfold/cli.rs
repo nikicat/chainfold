@@ -84,6 +84,32 @@ pub struct EvmArgs {
 pub enum EvmCommand {
     /// ERC20 token commands
     Erc20(Erc20Args),
+    /// Show all logs for one event of one contract
+    Events(EventsArgs),
+}
+
+#[derive(Parser)]
+pub struct EventsArgs {
+    /// Contract address (0x-prefixed hex).
+    #[arg(long, required = true)]
+    pub address: String,
+
+    /// Event name — looked up against Sourcify / Etherscan to derive
+    /// the canonical signature and topic0. Cached in SQLite.
+    /// Example: --event Transfer
+    #[arg(long, conflicts_with_all = ["event_sig", "topic0"])]
+    pub event: Option<String>,
+
+    /// Canonical event signature. No network calls; topic0 is computed
+    /// locally via keccak256.
+    /// Example: --event-sig 'Transfer(address,address,uint256)'
+    #[arg(long, conflicts_with_all = ["event", "topic0"])]
+    pub event_sig: Option<String>,
+
+    /// Raw topic0 hex (32 bytes). Bypasses any lookup.
+    /// Example: --topic0 0xddf252ad...
+    #[arg(long, conflicts_with_all = ["event", "event_sig"])]
+    pub topic0: Option<String>,
 }
 
 #[derive(Parser)]

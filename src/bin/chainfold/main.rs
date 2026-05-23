@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod evm;
 mod fmt;
+mod signature_cache;
 mod util;
 
 use clap::Parser;
@@ -36,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // No config file — require --rpc-url
                 Config {
                     provider: None,
+                    etherscan: None,
                 }
             });
             evm::run(&config, evm_args, cli.reverse, cli.follow).await?;

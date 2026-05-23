@@ -147,6 +147,21 @@ pub(crate) fn migrations() -> rusqlite_migration::Migrations<'static> {
         );
         ",
         ),
+        rusqlite_migration::M::up(
+            "
+        -- Resolved (event name) → (canonical signature, topic0) for a given
+        -- contract on a given chain. Populated by the signature resolver
+        -- (Sourcify → Etherscan) so subsequent lookups are zero-network.
+        CREATE TABLE event_signatures (
+            chain_id    INTEGER NOT NULL,
+            address     BLOB    NOT NULL,
+            event_name  TEXT    NOT NULL,
+            signature   TEXT    NOT NULL,
+            topic0      BLOB    NOT NULL,
+            PRIMARY KEY (chain_id, address, event_name)
+        );
+        ",
+        ),
     ])
 }
 
@@ -713,6 +728,64 @@ impl LogStore {
                 &owner[..],
                 block_number as i64,
                 &bytes[..]
+            ],
+        )?;
+        Ok(())
+    }
+
+    // --------------------------------------------------------
+    // Event signatures (resolver cache)
+    // --------------------------------------------------------
+
+    pub fn get_event_signature(
+        &self,
+        chain_id: u64,
+        address: &[u8; 20],
+        event_name: &str,
+    ) -> Result<Option<(String, [u8; 32])>, CacheError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT signature, topic0 FROM event_signatures
+             WHERE chain_id = ?1 AND address = ?2 AND event_name = ?3",
+        )?;
+        let mut rows = stmt.query_map(
+            rusqlite::params![chain_id as i64, &address[..], event_name],
+            |row| {
+                let sig: String = row.get(0)?;
+                let topic: Vec<u8> = row.get(1)?;
+                Ok((sig, topic))
+            },
+        )?;
+        match rows.next() {
+            Some(Ok((sig, topic))) if topic.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&topic);
+                Ok(Some((sig, arr)))
+            }
+            Some(Err(e)) => Err(e.into()),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn insert_event_signature(
+        &self,
+        chain_id: u64,
+        address: &[u8; 20],
+        event_name: &str,
+        signature: &str,
+        topic0: &[u8; 32],
+    ) -> Result<(), CacheError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO event_signatures
+             (chain_id, address, event_name, signature, topic0)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                chain_id as i64,
+                &address[..],
+                event_name,
+                signature,
+                &topic0[..]
             ],
         )?;
         Ok(())
