@@ -1,14 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use alloy::network::Ethereum;
 use alloy::primitives::U256;
 use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::{watch_hist, Hist, HistBackend};
+use chainfold::arch::{watch_hist, Position, Positioned};
 use chainfold::evm::{
-    apply_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogStore, TRANSFER_TOPIC,
+    apply_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogStore, OwnedErc20,
+    IN_KEY, OUT_KEY,
 };
+use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
 
 use crate::cli::{Erc20Args, Erc20Command, EvmArgs};
@@ -67,69 +69,86 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     for address in &addresses {
         let meta_symbol = metadata.get(address).map(|m| m.symbol.clone()).unwrap_or_default();
-        let topics: [Option<[u8; 32]>; 4] = [Some(TRANSFER_TOPIC), None, None, None];
-        let backend = EvmLogHistory::with_options(
+        let owned = OwnedErc20::with_options(
             provider.clone(),
             cache.clone(),
+            owner,
             *address,
-            topics,
             evm_args.chunk_size,
             12,
         )
         .await?;
+        owned.poll_tips().await?;
 
-        let (start, end) = resolve_range(evm_args, &backend).await?;
+        let (start, end) = resolve_range(evm_args, owned.out_history()).await?;
         println!("── {} ({}..{}) ──", meta_symbol, start.block, end.block);
 
+        let merged_hs = owned.transfers();
         let mut balance = U256::ZERO;
+        let mut last_pos: Option<EvmPosition> = None;
 
         if follow {
-            let _subscriber = backend
+            let _sub_out = owned
+                .out_history()
                 .subscribe(chainfold::evm::SubscribeTransport::Poll {
                     interval: std::time::Duration::from_secs(2),
                 })
                 .await?;
-            let hs = backend.hist_store();
-            let mut stream = watch_hist(&hs, start);
+            let _sub_in = owned
+                .in_history()
+                .subscribe(chainfold::evm::SubscribeTransport::Poll {
+                    interval: std::time::Duration::from_secs(2),
+                })
+                .await?;
+            let mut stream = watch_hist(&merged_hs, merged_pos_for(start));
             let mut count = 0;
             while let Some(item) = stream.next().await {
                 let item = item?;
-                let involved = involves_owner(&item.item, &owner);
+                let mi: &MergedItem<EvmEvent> = &item.item;
+                let event_pos = mi.item.position();
+                if Some(event_pos) == last_pos {
+                    continue;
+                }
+                last_pos = Some(event_pos);
                 if show_balance {
-                    balance = apply_transfer(owner, balance, &item.item);
+                    balance = apply_transfer(owner, balance, &mi.item);
                 }
-                if involved {
-                    if show_balance {
-                        fmt::print_balance(&item, balance, count, &ctx);
-                    } else {
-                        fmt::print_transfer(&item, count, &ctx);
-                    }
-                    count += 1;
+                let positioned = Positioned::new(mi.item.clone(), event_pos);
+                if show_balance {
+                    fmt::print_balance(&positioned, balance, count, &ctx);
+                } else {
+                    fmt::print_transfer(&positioned, count, &ctx);
                 }
+                count += 1;
             }
         } else {
-            let backend_dyn: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
-            let hist = Hist::new(backend_dyn, start, end);
-            let mut stream = hist.iter();
+            let hist = merged_hs.next().await;
+            let (_, after_start) = hist.split(merged_pos_for(start));
+            let (window, _) = after_start.split(merged_pos_for(end));
+            let mut stream = window.iter();
             let mut count = 0;
             while let Some(item) = stream.next().await {
                 let item = item?;
-                let involved = involves_owner(&item.item, &owner);
+                let mi: &MergedItem<EvmEvent> = &item.item;
+                let event_pos = mi.item.position();
+                if Some(event_pos) == last_pos {
+                    continue;
+                }
+                last_pos = Some(event_pos);
                 if show_balance {
-                    balance = apply_transfer(owner, balance, &item.item);
+                    balance = apply_transfer(owner, balance, &mi.item);
                 }
-                if involved {
-                    if count >= evm_args.limit {
-                        println!("... (limit reached, use --limit to show more)");
-                        break;
-                    }
-                    if show_balance {
-                        fmt::print_balance(&item, balance, count, &ctx);
-                    } else {
-                        fmt::print_transfer(&item, count, &ctx);
-                    }
-                    count += 1;
+                if count >= evm_args.limit {
+                    println!("... (limit reached, use --limit to show more)");
+                    break;
                 }
+                let positioned = Positioned::new(mi.item.clone(), event_pos);
+                if show_balance {
+                    fmt::print_balance(&positioned, balance, count, &ctx);
+                } else {
+                    fmt::print_transfer(&positioned, count, &ctx);
+                }
+                count += 1;
             }
             if count == 0 {
                 println!("No transfers involving owner.");
@@ -142,10 +161,15 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     Ok(())
 }
 
-fn involves_owner(event: &EvmEvent, owner: &[u8; 20]) -> bool {
-    chainfold::evm::decode_transfer(event)
-        .map(|t| t.from == *owner || t.to == *owner)
-        .unwrap_or(false)
+/// Build the two-key `MergedPos` representing `p` for both the `in` and
+/// `out` sub-histories. Used to bracket the merged stream when the caller
+/// has only an [`EvmPosition`] (e.g. from `resolve_range`).
+fn merged_pos_for(p: EvmPosition) -> MergedPos {
+    let bytes = p.marshal();
+    let mut m = BTreeMap::new();
+    m.insert(IN_KEY.into(), bytes.clone());
+    m.insert(OUT_KEY.into(), bytes);
+    MergedPos::new(m)
 }
 
 async fn resolve_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(

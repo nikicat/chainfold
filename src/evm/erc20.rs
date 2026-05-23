@@ -162,10 +162,25 @@ async fn fetch_metadata_batch<P: Provider<Ethereum>>(
         .await
         .map_err(|e| HistoryError::internal(format!("batch decimals: {e}")))?;
 
-    let name = decode_string_or_bytes32(&name_bytes)?;
-    let symbol = decode_string_or_bytes32(&symbol_bytes)?;
+    if name_bytes.is_empty() && symbol_bytes.is_empty() && decimals_bytes.is_empty() {
+        return Err(HistoryError::internal(format!(
+            "0x{} returned no data for name()/symbol()/decimals() — \
+             is this an ERC20 contract on this chain? \
+             (passing an EOA/wallet address here will fail this way)",
+            hex::encode(address),
+        )));
+    }
+
+    let name = decode_string_or_bytes32(&name_bytes)
+        .map_err(|_| decode_err("name", &address, &name_bytes))?;
+    let symbol = decode_string_or_bytes32(&symbol_bytes)
+        .map_err(|_| decode_err("symbol", &address, &symbol_bytes))?;
     let decimals = decimalsCall::abi_decode_returns(&decimals_bytes)
-        .map_err(|e| HistoryError::internal(format!("decimals decode: {e}")))?;
+        .map_err(|e| HistoryError::internal(format!(
+            "decimals() decode for 0x{}: {e} (raw: 0x{})",
+            hex::encode(address),
+            hex::encode(&decimals_bytes),
+        )))?;
 
     tracing::debug!(%addr, %name, %symbol, decimals, "batch success");
     Ok(Erc20Metadata {
@@ -190,6 +205,16 @@ fn decode_string_or_bytes32(data: &[u8]) -> Result<String, HistoryError> {
     }
     Err(HistoryError::internal(
         "failed to decode string return value",
+    ))
+}
+
+fn decode_err(field: &str, address: &[u8; 20], data: &[u8]) -> HistoryError {
+    HistoryError::internal(format!(
+        "{}() decode for 0x{} failed (raw: 0x{}) — \
+         not a standard ERC20 (or wrong chain)?",
+        field,
+        hex::encode(address),
+        hex::encode(data),
     ))
 }
 
