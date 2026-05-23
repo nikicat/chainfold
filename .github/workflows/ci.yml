@@ -100,7 +100,6 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: false
-          # For private repos, set CODECOV_TOKEN in the repo's Actions
-          # secrets and uncomment the line below. Public repos on GitHub
-          # work tokenless via OIDC.
-          # token: ${{ secrets.CODECOV_TOKEN }}
+          # Repo is private; CODECOV_TOKEN must be set as an Actions
+          # secret. Public repos on GitHub can drop this and use OIDC.
+          token: ${{ secrets.CODECOV_TOKEN }}
