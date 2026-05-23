@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Evm(evm_args) => {
             let config = Config::load_optional(cli.config.as_deref().map(std::path::Path::new))?;
-            let config = config.unwrap_or_else(|| {
+            let config = config.unwrap_or({
                 // No config file — require --rpc-url
                 Config {
                     provider: None,

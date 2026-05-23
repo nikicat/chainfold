@@ -1,4 +1,4 @@
-//! Phase 1 integration tests: durable LogStore + in-memory LogIndex.
+//! Phase 1 integration tests: durable `LogStore` + in-memory `LogIndex`.
 //!
 //! These hit a real RPC (mainnet via the anvil fork harness) so the cold
 //! cache populates via actual `eth_getLogs` calls. After that we drop the
@@ -12,7 +12,9 @@ mod common;
 use std::sync::Arc;
 use std::time::Instant;
 
+use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::transports::http::reqwest::Url;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{Hist, HistBackend};
 use chainfold::evm::{EvmLogHistory, LogStore, TRANSFER_TOPIC};
@@ -26,9 +28,9 @@ use common::{
 
 async fn build_history(
     db_path: &std::path::Path,
-    endpoint: alloy::transports::http::reqwest::Url,
+    endpoint: Url,
     chunk_size: u64,
-) -> Arc<EvmLogHistory<impl Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>> {
+) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>> {
     let store = Arc::new(LogStore::open(db_path.to_str().unwrap()).expect("open store"));
     let provider = ProviderBuilder::new().connect_http(endpoint);
     EvmLogHistory::with_options(
@@ -45,7 +47,7 @@ async fn build_history(
 
 async fn walk_forward<P>(history: &Arc<EvmLogHistory<P>>, from_block: u64, to_block: u64) -> usize
 where
-    P: Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static,
+    P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
     let start = if from_block == 0 {
         EvmPosition::earliest()

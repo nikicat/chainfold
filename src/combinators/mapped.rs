@@ -65,12 +65,12 @@ where
         Box::pin(
             self.upstream
                 .snapshots()
-                .map(move |hist| wrap_hist(hist, f.clone())),
+                .map(move |hist| wrap_hist(&hist, f.clone())),
         )
     }
 
     async fn next(&self) -> Hist<MappedItem<Src, Dst>, P> {
-        wrap_hist(self.upstream.next().await, self.f.clone())
+        wrap_hist(&self.upstream.next().await, self.f.clone())
     }
 
     fn subscribe(
@@ -79,7 +79,7 @@ where
     ) -> AsyncDisposable {
         let f = self.f.clone();
         self.upstream.subscribe(Box::new(move |hist| {
-            cb(wrap_hist(hist, f.clone()));
+            cb(wrap_hist(&hist, f.clone()));
         }))
     }
 
@@ -131,7 +131,7 @@ where
 }
 
 fn wrap_hist<Src, Dst, P>(
-    upstream: Hist<Src, P>,
+    upstream: &Hist<Src, P>,
     f: MapFn<Src, Dst>,
 ) -> Hist<MappedItem<Src, Dst>, P>
 where
@@ -139,13 +139,11 @@ where
     Dst: Send + Sync + 'static,
     P: Position,
 {
-    let start = upstream.start().clone();
-    let end = upstream.end().clone();
     let backend = Arc::new(MappedHistBackend {
         upstream: upstream.backend().clone(),
         f,
     });
-    Hist::new(backend, start, end)
+    Hist::new(backend, upstream.start().clone(), upstream.end().clone())
 }
 
 // ============================================================

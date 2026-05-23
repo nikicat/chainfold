@@ -13,7 +13,7 @@
 
 use std::sync::Mutex;
 
-use alloy::primitives::{Address, Bytes, LogData, B256, U256};
+use alloy::primitives::{Address, Bytes, Log as LogInner, LogData, B256, U256};
 use alloy::rpc::types::Log;
 use rusqlite::Connection;
 
@@ -29,8 +29,8 @@ pub const CACHE_VERSION: u32 = 3;
 /// `"./foo.db"` → `"./foo.v3.db"`, `"./foo"` → `"./foo.v3"`
 pub fn versioned_path(base: &str) -> String {
     match base.rsplit_once('.') {
-        Some((stem, ext)) => format!("{}.v{}.{}", stem, CACHE_VERSION, ext),
-        None => format!("{}.v{}", base, CACHE_VERSION),
+        Some((stem, ext)) => format!("{stem}.v{CACHE_VERSION}.{ext}"),
+        None => format!("{base}.v{CACHE_VERSION}"),
     }
 }
 
@@ -245,7 +245,7 @@ pub struct CachedErc20Metadata {
 
 /// Durable SQLite-backed log + range + header + erc20 store.
 ///
-/// Self-contained SQLite database. WAL mode supports concurrent readers.
+/// Self-contained `SQLite` database. WAL mode supports concurrent readers.
 /// Logs are append-only; reorgs are handled by marking blocks in
 /// `reorged_blocks` and filtering them out at query time.
 ///
@@ -280,8 +280,8 @@ impl LogStore {
     // Logs
     // --------------------------------------------------------
 
-    /// Insert logs. Deduplicates by (filter_hash, block_hash, log_index).
-    /// Logs without a block_hash (pending/mempool) are silently skipped.
+    /// Insert logs. Deduplicates by (`filter_hash`, `block_hash`, `log_index`).
+    /// Logs without a `block_hash` (pending/mempool) are silently skipped.
     pub fn insert_logs(&self, filter_hash: &[u8; 32], logs: &[Log]) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
@@ -293,9 +293,8 @@ impl LogStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             for log in logs {
-                let block_hash = match log.block_hash {
-                    Some(h) => h,
-                    None => continue,
+                let Some(block_hash) = log.block_hash else {
+                    continue;
                 };
                 let topics = log.topics();
                 stmt.execute(rusqlite::params![
@@ -338,7 +337,7 @@ impl LogStore {
         )?;
         let mut rows = stmt.query_map(
             rusqlite::params![&filter_hash[..], &block_hash[..], log_index as i64],
-            |row| row_to_log(row),
+            row_to_log,
         )?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
@@ -347,7 +346,7 @@ impl LogStore {
     }
 
     /// All cached, non-reorged logs for `filter_hash` in `[from_block, to_block]`,
-    /// ordered by (block_number, log_index).
+    /// ordered by (`block_number`, `log_index`).
     pub fn get_logs_in_range(
         &self,
         filter_hash: &[u8; 32],
@@ -366,7 +365,7 @@ impl LogStore {
         let logs = stmt
             .query_map(
                 rusqlite::params![&filter_hash[..], from_block as i64, to_block as i64],
-                |row| row_to_log(row),
+                row_to_log,
             )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(logs)
@@ -399,7 +398,7 @@ impl LogStore {
         Ok(())
     }
 
-    /// All valid scanned ranges for `filter_hash`, sorted by start_block.
+    /// All valid scanned ranges for `filter_hash`, sorted by `start_block`.
     /// Excludes ranges whose `end_block_hash` is in `reorged_blocks`.
     pub fn get_scanned_ranges(
         &self,
@@ -468,7 +467,7 @@ impl LogStore {
                 if last.1 + 1 >= *start {
                     if *end > last.1 {
                         last.1 = *end;
-                        last.2 = end_hash.clone();
+                        last.2.clone_from(end_hash);
                     }
                     continue;
                 }
@@ -807,10 +806,8 @@ pub(crate) fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
     let tx_index: i64 = row.get(10)?;
 
     let mut topics = Vec::new();
-    for t in [topic0, topic1, topic2, topic3] {
-        if let Some(bytes) = t {
-            topics.push(B256::from_slice(&bytes));
-        }
+    for bytes in [topic0, topic1, topic2, topic3].into_iter().flatten() {
+        topics.push(B256::from_slice(&bytes));
     }
 
     let log_data = LogData::new_unchecked(topics, Bytes::from(data));
@@ -818,7 +815,7 @@ pub(crate) fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
     addr_arr.copy_from_slice(&address_bytes);
 
     Ok(Log {
-        inner: alloy::primitives::Log {
+        inner: LogInner {
             address: Address::from(addr_arr),
             data: log_data,
         },
@@ -851,7 +848,7 @@ mod tests {
         let log_data = LogData::new_unchecked(vec![topic0], data);
 
         Log {
-            inner: alloy::primitives::Log {
+            inner: LogInner {
                 address: Address::from([0x42u8; 20]),
                 data: log_data,
             },
@@ -901,7 +898,7 @@ mod tests {
     fn logs_round_trip() {
         let store = LogStore::open_in_memory().unwrap();
         let log = make_test_log(100, 0, BLOCK_HASH_A);
-        store.insert_logs(&FH, &[log.clone()]).unwrap();
+        store.insert_logs(&FH, std::slice::from_ref(&log)).unwrap();
         let retrieved = store.get_logs_in_range(&FH, 100, 100).unwrap();
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].block_number, log.block_number);

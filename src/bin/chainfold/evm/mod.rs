@@ -3,7 +3,9 @@ pub mod events;
 
 use std::sync::Arc;
 
-use alloy::providers::Provider;
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::client::ClientBuilder;
+use alloy::transports::http::reqwest::Url;
 use chainfold::evm::{rpc_retry_layer, versioned_path, LogStore};
 
 use crate::cli::{EvmArgs, EvmCommand};
@@ -17,11 +19,11 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rpc_url = config.rpc_url(args.rpc_url.as_deref(), args.chain_id)?;
 
-    let url: alloy::transports::http::reqwest::Url = rpc_url.parse()?;
-    let client = alloy::rpc::client::ClientBuilder::default()
+    let url: Url = rpc_url.parse()?;
+    let client = ClientBuilder::default()
         .layer(rpc_retry_layer())
         .http(url);
-    let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
+    let provider = ProviderBuilder::new().connect_client(client);
 
     let db_path = versioned_path(&args.db);
     let cache = Arc::new(LogStore::open(&db_path)?);

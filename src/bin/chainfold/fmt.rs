@@ -7,7 +7,6 @@ use chainfold::evm::{decode_transfer, Erc20Metadata};
 
 pub fn explorer_base_url(chain_id: u64) -> &'static str {
     match chain_id {
-        1 => "https://etherscan.io",
         10 => "https://optimistic.etherscan.io",
         56 => "https://bscscan.com",
         100 => "https://gnosisscan.io",
@@ -15,7 +14,7 @@ pub fn explorer_base_url(chain_id: u64) -> &'static str {
         8453 => "https://basescan.org",
         42161 => "https://arbiscan.io",
         43114 => "https://snowscan.xyz",
-        534352 => "https://scrollscan.com",
+        534_352 => "https://scrollscan.com",
         _ => "https://etherscan.io",
     }
 }
@@ -43,9 +42,7 @@ fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
 }
 
 pub fn format_timestamp(ts: u64) -> String {
-    chrono::DateTime::from_timestamp(ts as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_else(|| "----------T--:--:--Z".into())
+    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(|| "----------T--:--:--Z".into(), |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 const AMOUNT_WHOLE_WIDTH: usize = 6;
@@ -56,7 +53,7 @@ pub fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: us
     let whole = raw / divisor;
     let frac = raw % divisor;
 
-    let whole_str = format!("{:>width$}", whole, width = whole_width);
+    let whole_str = format!("{whole:>whole_width$}");
 
     if frac_width == 0 {
         return whole_str;
@@ -83,9 +80,8 @@ pub struct FmtContext<'a> {
 pub fn print_transfer(item: &Positioned<EvmEvent, EvmPosition>, index: usize, ctx: &FmtContext) {
     let e = &item.item;
     if let Some(t) = decode_transfer(e) {
-        let meta = match ctx.metadata.get(&e.contract_address) {
-            Some(m) => m,
-            None => return,
+        let Some(meta) = ctx.metadata.get(&e.contract_address) else {
+            return;
         };
         let direction = if &t.to == ctx.owner { " IN" } else { "OUT" };
         let counterparty = if &t.to == ctx.owner { &t.from } else { &t.to };
@@ -119,9 +115,8 @@ pub fn print_balance(
 ) {
     let e = &item.item;
     if let Some(t) = decode_transfer(e) {
-        let meta = match ctx.metadata.get(&e.contract_address) {
-            Some(m) => m,
-            None => return,
+        let Some(meta) = ctx.metadata.get(&e.contract_address) else {
+            return;
         };
         let direction = if &t.to == ctx.owner { " IN" } else { "OUT" };
         let counterparty = if &t.to == ctx.owner { &t.from } else { &t.to };

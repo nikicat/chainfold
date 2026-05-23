@@ -7,7 +7,7 @@
 //! - `live_event_latency_ws` — WS push transport delivers a mined block
 //!   to the tip store within a tight latency budget.
 //! - `poll_drain_populates_scanned_ranges` — Poll transport observes new
-//!   blocks, fires `on_page`, drains to LogStore, and the resulting
+//!   blocks, fires `on_page`, drains to `LogStore`, and the resulting
 //!   `scanned_ranges` cover the post-subscribe window.
 //! - `resume_seeds_from_current_tip` — a fresh `subscribe()` after blocks
 //!   were mined while disconnected seeds `latest_store` to the current
@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
+use tokio::time::{sleep, timeout};
 
 use chainfold::evm::{EvmLogHistory, LogStore, SubscribeTransport};
 
@@ -73,7 +74,7 @@ async fn live_event_latency_ws() {
     .await
     .expect("EvmLogHistory::new");
 
-    let _subscriber = history
+    let subscriber = history
         .subscribe(SubscribeTransport::Ws)
         .await
         .expect("subscribe Ws");
@@ -83,12 +84,12 @@ async fn live_event_latency_ws() {
     let _initial = latest_rx.next().await;
 
     // Give the WS subscriptions a beat to install.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sleep(Duration::from_millis(150)).await;
 
     let start = Instant::now();
     mine_blocks(&provider, 1).await;
 
-    let observed = tokio::time::timeout(Duration::from_secs(2), latest_rx.next())
+    let observed = timeout(Duration::from_secs(2), latest_rx.next())
         .await
         .expect("timeout waiting for tip advance")
         .expect("latest_rx closed");
@@ -112,7 +113,7 @@ async fn live_event_latency_ws() {
         latency.as_millis()
     );
 
-    drop(_subscriber);
+    drop(subscriber);
 }
 
 #[tokio::test]
@@ -150,7 +151,7 @@ async fn poll_drain_populates_scanned_ranges() {
     mine_blocks(&provider, 5).await;
 
     // Wait for poll cycle + drain flush.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    sleep(Duration::from_millis(400)).await;
 
     let final_tip = history.latest_store().get().block;
     assert!(
@@ -201,7 +202,7 @@ async fn resume_seeds_from_current_tip() {
         .await
         .expect("subscribe sub1");
     mine_blocks(&provider, 2).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
     let tip_at_disconnect = history.latest_store().get().block;
     drop(sub1);
 
@@ -227,7 +228,7 @@ async fn resume_seeds_from_current_tip() {
 
     // Newly mined block after resume should still flow through.
     mine_blocks(&provider, 1).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
     let after_one_more = history.latest_store().get().block;
     assert!(
         after_one_more > seeded_tip,

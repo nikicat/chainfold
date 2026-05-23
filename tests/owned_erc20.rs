@@ -3,7 +3,7 @@
 //! These tests fork mainnet via the anvil harness, so they're
 //! `#[ignore]`-gated. Run with:
 //!
-//!   cargo test --features evm --test owned_erc20 -- --ignored
+//!   cargo test --features evm --test `owned_erc20` -- --ignored
 //!
 //! Verifies that the two-narrow-filter merge produces exactly the same
 //! event set as the broad-filter + client-side filter approach, and that

@@ -8,7 +8,7 @@
 //! `MergedItem.source_key` ("in" or "out").
 //!
 //! Self-transfers (from == to == owner) appear twice in the merged stream
-//! by design — once with source_key="in", once with source_key="out". The
+//! by design — once with `source_key="in`", once with `source_key="out`". The
 //! explorer dedupes by position so balance updates and printout happen
 //! once.
 //!
@@ -17,25 +17,30 @@
 //! separate follow-up.
 //!
 //! Usage:
-//!   cargo run --features evm --example erc20_explorer -- \
+//!   cargo run --features evm --example `erc20_explorer` -- \
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --owner 0xYourAddress \
 //!     --from 2025-01-15 --to 2025-01-16
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
+use alloy::network::Ethereum;
 use alloy::primitives::U256;
-use alloy::providers::Provider;
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::client::ClientBuilder;
+use alloy::transports::http::reqwest::Url;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Position};
 use chainfold::evm::{
-    apply_transfer, decode_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogStore,
-    OwnedErc20, IN_KEY, OUT_KEY,
+    apply_transfer, decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
+    Erc20Metadata, EvmLogHistory, LogStore, OwnedErc20, SubscribeTransport, IN_KEY, OUT_KEY,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use chrono::NaiveDate;
 use clap::Parser;
+use futures_util::future::join_all;
 use futures_util::StreamExt;
 
 #[derive(Parser)]
@@ -97,7 +102,7 @@ fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
         .map_err(|_| "address must be 20 bytes".into())
 }
 
-async fn resolve_range<P: Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>(
+async fn resolve_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     args: &Args,
     backend: &Arc<EvmLogHistory<P>>,
 ) -> Result<(EvmPosition, EvmPosition), Box<dyn std::error::Error>> {
@@ -108,7 +113,7 @@ async fn resolve_range<P: Provider<alloy::network::Ethereum> + Clone + Send + Sy
             let to_ts = parse_datetime(to_str)?;
             let start = hs.time_pos(from_ts).await?;
             let end = hs.time_pos(to_ts).await?;
-            println!("  Date range: {} → {}", from_str, to_str);
+            println!("  Date range: {from_str} → {to_str}");
             println!(
                 "  Estimated blocks: {} → {}",
                 start.block + 1,
@@ -140,7 +145,6 @@ async fn resolve_range<P: Provider<alloy::network::Ethereum> + Clone + Send + Sy
 
 fn explorer_base_url(chain_id: u64) -> &'static str {
     match chain_id {
-        1 => "https://etherscan.io",
         10 => "https://optimistic.etherscan.io",
         56 => "https://bscscan.com",
         100 => "https://gnosisscan.io",
@@ -148,7 +152,7 @@ fn explorer_base_url(chain_id: u64) -> &'static str {
         8453 => "https://basescan.org",
         42161 => "https://arbiscan.io",
         43114 => "https://snowscan.xyz",
-        534352 => "https://scrollscan.com",
+        534_352 => "https://scrollscan.com",
         _ => "https://etherscan.io",
     }
 }
@@ -176,9 +180,7 @@ fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
 }
 
 fn format_timestamp(ts: u64) -> String {
-    chrono::DateTime::from_timestamp(ts as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_else(|| "----------T--:--:--Z".into())
+    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(|| "----------T--:--:--Z".into(), |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 const AMOUNT_WHOLE_WIDTH: usize = 6;
@@ -189,7 +191,7 @@ fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: usize)
     let whole = raw / divisor;
     let frac = raw % divisor;
 
-    let whole_str = format!("{:>width$}", whole, width = whole_width);
+    let whole_str = format!("{whole:>whole_width$}");
     if frac_width == 0 {
         return whole_str;
     }
@@ -268,12 +270,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<_, _>>()?;
     let owner = parse_hex_address(&args.owner)?;
 
-    let url: alloy::transports::http::reqwest::Url = args.rpc_url.parse()?;
-    let client = alloy::rpc::client::ClientBuilder::default()
-        .layer(chainfold::evm::rpc_retry_layer())
+    let url: Url = args.rpc_url.parse()?;
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
         .http(url);
-    let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
-    let db_path = chainfold::evm::versioned_path(&args.db);
+    let provider = ProviderBuilder::new().connect_client(client);
+    let db_path = versioned_path(&args.db);
     let cache = Arc::new(LogStore::open(&db_path)?);
 
     let chain_id = provider.get_chain_id().await?;
@@ -282,7 +284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let meta_futures = addresses
         .iter()
         .map(|addr| fetch_erc20_metadata(&provider, *addr, chain_id, &cache));
-    let meta_results = futures_util::future::join_all(meta_futures).await;
+    let meta_results = join_all(meta_futures).await;
 
     let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
     for (addr, result) in addresses.iter().zip(meta_results) {
@@ -303,8 +305,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  Owner:    0x{}", hex::encode(owner));
     println!("  Tokens:   {}", addresses.len());
-    println!("  Chain:    {}", chain_id);
-    println!("  DB:       {}", db_path);
+    println!("  Chain:    {chain_id}");
+    println!("  DB:       {db_path}");
     println!();
 
     for address in &addresses {
@@ -342,14 +344,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // subscribe each.
             let _sub_out = owned
                 .out_history()
-                .subscribe(chainfold::evm::SubscribeTransport::Poll {
-                    interval: std::time::Duration::from_secs(2),
+                .subscribe(SubscribeTransport::Poll {
+                    interval: Duration::from_secs(2),
                 })
                 .await?;
             let _sub_in = owned
                 .in_history()
-                .subscribe(chainfold::evm::SubscribeTransport::Poll {
-                    interval: std::time::Duration::from_secs(2),
+                .subscribe(SubscribeTransport::Poll {
+                    interval: Duration::from_secs(2),
                 })
                 .await?;
             let mut stream = watch_hist(&merged_hs, merged_pos_for(start));

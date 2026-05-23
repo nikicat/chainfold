@@ -1,23 +1,28 @@
-//! CLI to manually test EvmLogHistory navigation over the new
+//! CLI to manually test `EvmLogHistory` navigation over the new
 //! `Hist` / `HistStore` API.
 //!
 //! Usage:
-//!   cargo run --features evm --example history_explorer -- \
-//!     --rpc-url https://eth.llamarpc.com \
+//!   cargo run --features evm --example `history_explorer` -- \
+//!     --rpc-url <https://eth.llamarpc.com> \
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --topic0 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef \
 //!     --from-block 22000000 --num-blocks 10
 //!
 //!   # or with dates:
-//!   cargo run --features evm --example history_explorer -- \
+//!   cargo run --features evm --example `history_explorer` -- \
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --from 2025-01-15 --to 2025-01-16
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use alloy::network::Ethereum;
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::client::ClientBuilder;
+use alloy::transports::http::reqwest::Url;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::{watch_hist, Hist, HistStore, Positioned};
-use chainfold::evm::{EvmLogHistory, LogStore};
+use chainfold::arch::{watch_hist, Hist, HistBackend, HistStore, HistoryError, Positioned};
+use chainfold::evm::{rpc_retry_layer, versioned_path, EvmLogHistory, LogStore, SubscribeTransport};
 use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
@@ -97,9 +102,7 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
     let e = &item.item;
     let topic0_hex = e
         .topics
-        .first()
-        .map(|t| format!("0x{}", hex::encode(t)))
-        .unwrap_or_else(|| "(none)".into());
+        .first().map_or_else(|| "(none)".into(), |t| format!("0x{}", hex::encode(t)));
 
     println!(
         "[{:>4}] block={} log_idx={} tx=0x{}..{} topic0={}..{}",
@@ -123,7 +126,7 @@ async fn resolve_range(
             let to_ts = parse_datetime(to_str)?;
             let start = store.time_pos(from_ts).await?;
             let end = store.time_pos(to_ts).await?;
-            println!("  Date range: {} → {}", from_str, to_str);
+            println!("  Date range: {from_str} → {to_str}");
             println!("  Estimated blocks: {} → {}", start.block + 1, end.block + 1);
             // time_pos returns the cut "just before block B"; for `end` we
             // want the cut "after the last log of block B", i.e. end_of_block.
@@ -166,18 +169,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic0 = args.topic0.as_deref().map(parse_hex_32).transpose()?;
     let topics: [Option<[u8; 32]>; 4] = [topic0, None, None, None];
 
-    let url: alloy::transports::http::reqwest::Url = args.rpc_url.parse()?;
-    let client = alloy::rpc::client::ClientBuilder::default()
-        .layer(chainfold::evm::rpc_retry_layer())
+    let url: Url = args.rpc_url.parse()?;
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
         .http(url);
-    let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
-    let db_path = chainfold::evm::versioned_path(&args.db);
+    let provider = ProviderBuilder::new().connect_client(client);
+    let db_path = versioned_path(&args.db);
     let store = Arc::new(LogStore::open(&db_path)?);
 
     println!("Building EvmLogHistory...");
     println!("  Address:  0x{}", hex::encode(address));
     if let Some(t) = &args.topic0 {
-        println!("  Topic0:   {}", t);
+        println!("  Topic0:   {t}");
     }
 
     let backend =
@@ -187,9 +190,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chain_id = backend.chain_id();
     let (start, end) = resolve_range(&args, &hist_store).await?;
 
-    println!("  Chain:    {}", chain_id);
+    println!("  Chain:    {chain_id}");
     println!("  Range:    block {} .. {}", start.block, end.block);
-    println!("  DB:       {}", db_path);
+    println!("  DB:       {db_path}");
     println!();
 
     if args.measure {
@@ -198,17 +201,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async fn walk_window(
             backend: &Arc<
                 EvmLogHistory<
-                    impl alloy::providers::Provider<alloy::network::Ethereum>
+                    impl Provider<Ethereum>
                         + Clone
-                        + Send
-                        + Sync
                         + 'static,
                 >,
             >,
             start: EvmPosition,
             end: EvmPosition,
-        ) -> Result<usize, chainfold::arch::HistoryError> {
-            use chainfold::arch::HistBackend;
+        ) -> Result<usize, HistoryError> {
             let backend: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
             let hist = Hist::new(backend, start, end);
             let mut s = hist.iter();
@@ -229,11 +229,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // should never reach RPC since every gap is already in scanned_ranges.
         drop(backend);
         let store2 = Arc::new(LogStore::open(&db_path)?);
-        let url2: alloy::transports::http::reqwest::Url = args.rpc_url.parse()?;
-        let client2 = alloy::rpc::client::ClientBuilder::default()
-            .layer(chainfold::evm::rpc_retry_layer())
+        let url2: Url = args.rpc_url.parse()?;
+        let client2 = ClientBuilder::default()
+            .layer(rpc_retry_layer())
             .http(url2);
-        let provider2 = alloy::providers::ProviderBuilder::new().connect_client(client2);
+        let provider2 = ProviderBuilder::new().connect_client(client2);
         let backend2 =
             EvmLogHistory::with_options(provider2, store2, address, topics, args.chunk_size, 12)
                 .await?;
@@ -266,8 +266,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.follow {
         println!("Following new events (Ctrl+C to stop)...\n");
         let _subscriber = backend
-            .subscribe(chainfold::evm::SubscribeTransport::Poll {
-                interval: std::time::Duration::from_secs(2),
+            .subscribe(SubscribeTransport::Poll {
+                interval: Duration::from_secs(2),
             })
             .await?;
 
@@ -281,7 +281,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nHistory closed ({count} events).");
     } else {
         println!("Navigating forward from block {}:\n", start.block);
-        use chainfold::arch::HistBackend;
         let backend_dyn: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
         let hist = Hist::new(backend_dyn, start, end);
         let mut s = hist.iter();

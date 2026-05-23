@@ -25,6 +25,7 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use futures_util::StreamExt;
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::arch::HistoryError;
@@ -108,7 +109,7 @@ impl EvmLogSubscriber {
     }
 
     /// Cancel the loop. Idempotent. After return, the background task is
-    /// guaranteed to observe cancellation; awaiting the JoinHandle is the
+    /// guaranteed to observe cancellation; awaiting the `JoinHandle` is the
     /// caller's choice (default `Drop` aborts).
     pub fn cancel(&self) {
         self.cancel.cancel();
@@ -188,7 +189,7 @@ async fn run_loop<P>(
                     "subscription error, will reconnect"
                 );
                 tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
+                    _ = sleep(backoff) => {}
                     _ = cancel.cancelled() => return,
                 }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -215,7 +216,7 @@ where
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            _ = tokio::time::sleep(interval) => {}
+            _ = sleep(interval) => {}
         }
 
         let tip = provider
@@ -288,7 +289,7 @@ where
                     return Err(HistoryError::internal("logs subscription closed"));
                 };
                 let bn = log.block_number.unwrap_or(0);
-                let bh: [u8; 32] = log.block_hash.map(|h| h.0).unwrap_or([0; 32]);
+                let bh: [u8; 32] = log.block_hash.map_or([0; 32], |h| h.0);
                 // Single-block page — covers exactly this block. The drain
                 // task records (bn, bn) as a scanned range; if heads_stream
                 // later announces a higher tip it adds the empty tail.
@@ -387,8 +388,8 @@ mod tests {
             noop_callbacks(),
         );
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         drop(sub);
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        sleep(Duration::from_millis(20)).await;
     }
 }

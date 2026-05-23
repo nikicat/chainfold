@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use alloy::network::Ethereum;
 use alloy::primitives::U256;
@@ -8,9 +9,10 @@ use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Position, Positioned};
 use chainfold::evm::{
     apply_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogStore, OwnedErc20,
-    IN_KEY, OUT_KEY,
+    SubscribeTransport, IN_KEY, OUT_KEY,
 };
 use chainfold::merge::{MergedItem, MergedPos};
+use futures_util::future::join_all;
 use futures_util::StreamExt;
 
 use crate::cli::{Erc20Args, Erc20Command, EvmArgs};
@@ -38,7 +40,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let meta_futures = addresses
         .iter()
         .map(|addr| fetch_erc20_metadata(provider, *addr, chain_id, cache));
-    let meta_results = futures_util::future::join_all(meta_futures).await;
+    let meta_results = join_all(meta_futures).await;
 
     let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
     for (addr, result) in addresses.iter().zip(meta_results) {
@@ -68,8 +70,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     println!("  Owner:    0x{}", hex::encode(owner));
     println!("  Tokens:   {}", addresses.len());
-    println!("  Chain:    {}", chain_id);
-    println!("  DB:       {}", db_path);
+    println!("  Chain:    {chain_id}");
+    println!("  DB:       {db_path}");
     println!();
 
     let show_balance = matches!(erc20_args.command, Erc20Command::Balances);
@@ -100,14 +102,14 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         if follow {
             let _sub_out = owned
                 .out_history()
-                .subscribe(chainfold::evm::SubscribeTransport::Poll {
-                    interval: std::time::Duration::from_secs(2),
+                .subscribe(SubscribeTransport::Poll {
+                    interval: Duration::from_secs(2),
                 })
                 .await?;
             let _sub_in = owned
                 .in_history()
-                .subscribe(chainfold::evm::SubscribeTransport::Poll {
-                    interval: std::time::Duration::from_secs(2),
+                .subscribe(SubscribeTransport::Poll {
+                    interval: Duration::from_secs(2),
                 })
                 .await?;
             let mut stream = watch_hist(&merged_hs, merged_pos_for(start));
@@ -193,7 +195,7 @@ async fn resolve_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let to_ts = parse_datetime(to_str)?;
             let start = hs.time_pos(from_ts).await?;
             let end = hs.time_pos(to_ts).await?;
-            println!("  Date range: {} → {}", from_str, to_str);
+            println!("  Date range: {from_str} → {to_str}");
             println!(
                 "  Estimated blocks: {} → {}",
                 start.block + 1,

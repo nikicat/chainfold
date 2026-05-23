@@ -9,17 +9,22 @@
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chainfold::arch::{
     AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
     ItemStream, Position, Positioned, Store, Timestamp,
 };
 use chainfold::matcher::{
-    match_fn, AnchorStore, AnchoredMatcher, BaseMatcher, InMemoryAnchorStore, Match, MatchInput,
-    MatchOutput, Matcher, MatcherAnchors, SqliteAnchorStore,
+    match_fn, AnchorStore, AnchoredMatcher, BaseMatcher, InMemoryAnchorStore, Match, MatchFn,
+    MatchInput, MatchOutput, Matcher, MatcherAnchors, SqliteAnchorStore,
 };
 use futures_core::Stream;
+use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use tokio::sync::watch;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 // ============================================================
 // MockPos — same shape for both src and dst in these tests
@@ -57,7 +62,7 @@ fn ev(bridge_id: u64, label: &str) -> Ev {
 struct MockSource {
     items: Mutex<Vec<Ev>>,
     latest_store: Store<MockPos>,
-    latest_tx: tokio::sync::watch::Sender<MockPos>,
+    latest_tx: watch::Sender<MockPos>,
     best_store: Store<MockPos>,
     safe_store: Store<MockPos>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
@@ -66,9 +71,9 @@ struct MockSource {
 impl MockSource {
     fn new(initial: Vec<Ev>) -> Arc<Self> {
         let tip = MockPos(initial.len() as u64);
-        let (tx, rx) = tokio::sync::watch::channel(tip);
-        let (_, b_rx) = tokio::sync::watch::channel(tip);
-        let (_, s_rx) = tokio::sync::watch::channel(tip);
+        let (tx, rx) = watch::channel(tip);
+        let (_, b_rx) = watch::channel(tip);
+        let (_, s_rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
             latest_store: Store::new(rx),
@@ -111,7 +116,7 @@ impl HistBackend<Ev, MockPos> for MockSource {
             .take(to.saturating_sub(from))
             .map(|(i, item)| Positioned::new(item, MockPos((i + 1) as u64)))
             .collect();
-        Box::pin(futures_util::stream::iter(yielded.into_iter().map(Ok)))
+        Box::pin(iter(yielded.into_iter().map(Ok)))
     }
 }
 
@@ -120,7 +125,7 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<Ev, MockPos> {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
-        Box::pin(futures_util::stream::poll_fn(move |cx| {
+        Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
                 .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
@@ -135,7 +140,7 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
     fn subscribe(&self, cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>) -> AsyncDisposable {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = CancellationToken::new();
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(async move {
             loop {
@@ -171,7 +176,7 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
 // ============================================================
 
 fn bridge_match_fn(
-) -> Arc<dyn chainfold::matcher::MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
+) -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
     match_fn(|input: MatchInput<Ev, Ev, MockPos, MockPos>| {
         let mut dst_by_id: std::collections::HashMap<u64, Vec<Ev>> =
             std::collections::HashMap::new();
@@ -294,7 +299,7 @@ async fn iter_advances_on_either_side_append() {
     let mut stream = m.iter();
 
     // Initial state is empty.
-    let s0 = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+    let s0 = timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("initial within timeout")
         .expect("not closed")
@@ -304,7 +309,7 @@ async fn iter_advances_on_either_side_append() {
 
     // Append a src burn — should show up in pending.
     src.append(ev(1, "burn1"));
-    let s1 = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+    let s1 = timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("src tick")
         .expect("not closed")
@@ -313,7 +318,7 @@ async fn iter_advances_on_either_side_append() {
 
     // Append the dst mint — should now show up as matched.
     dst.append(ev(1, "mint1"));
-    let s2 = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+    let s2 = timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("dst tick")
         .expect("not closed")

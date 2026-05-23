@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use toml::de::Error as TomlError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("config file not found (searched: {searched:?})")]
@@ -12,7 +14,7 @@ pub enum ConfigError {
     #[error("parsing {path}: {source}")]
     Parse {
         path: PathBuf,
-        source: toml::de::Error,
+        source: TomlError,
     },
     #[error("env var ${var} referenced in config is not set")]
     MissingEnvVar { var: String },
@@ -175,7 +177,7 @@ fn interpolate_env(input: &str) -> Result<String, ConfigError> {
 fn alchemy_chain_slug(chain_id: u64) -> Result<&'static str, ConfigError> {
     match chain_id {
         1 => Ok("eth-mainnet"),
-        11155111 => Ok("eth-sepolia"),
+        11_155_111 => Ok("eth-sepolia"),
         137 => Ok("polygon-mainnet"),
         42161 => Ok("arb-mainnet"),
         10 => Ok("opt-mainnet"),

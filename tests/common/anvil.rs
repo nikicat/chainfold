@@ -17,7 +17,7 @@ use std::sync::Once;
 use alloy_node_bindings::{Anvil, AnvilInstance};
 
 /// Load a gitignored `.env` from the repo root on first call. Contributors
-/// keep their MAINNET_RPC_URL (Alchemy etc.) there instead of editing
+/// keep their `MAINNET_RPC_URL` (Alchemy etc.) there instead of editing
 /// shell profiles. Idempotent and silent if no `.env` exists.
 fn load_dotenv() {
     static ONCE: Once = Once::new();
@@ -37,8 +37,7 @@ pub fn anvil_available() -> bool {
     Command::new("anvil")
         .arg("--version")
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Spawn a plain local anvil instance. Returns `None` if anvil isn't on

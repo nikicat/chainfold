@@ -42,9 +42,9 @@ pub struct Erc20Metadata {
 
 /// Fetch name/symbol/decimals with cache-first, Multicall3, and batch fallback.
 ///
-/// 1. Check SQLite cache (instant, no RPC)
-/// 2. Try Multicall3 `aggregate` (1 eth_call, 1 HTTP request)
-/// 3. Fall back to JSON-RPC batch (3 eth_calls, 1 HTTP request)
+/// 1. Check `SQLite` cache (instant, no RPC)
+/// 2. Try Multicall3 `aggregate` (1 `eth_call`, 1 HTTP request)
+/// 3. Fall back to JSON-RPC batch (3 `eth_calls`, 1 HTTP request)
 /// 4. Write result to cache for next time
 ///
 /// Handles bytes32-returning tokens (MKR, SAI) in the batch fallback path.
@@ -265,7 +265,7 @@ pub fn apply_transfer(owner: [u8; 20], balance: U256, event: &EvmEvent) -> U256 
     }
 }
 
-/// On-chain `balanceOf(owner)` at `block`, with SQLite caching in
+/// On-chain `balanceOf(owner)` at `block`, with `SQLite` caching in
 /// `erc20_balances`.
 pub async fn fetch_balance_at<P: Provider<Ethereum>>(
     provider: &P,

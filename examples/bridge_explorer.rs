@@ -9,10 +9,10 @@
 //!
 //! Manual smoke test (USDC on Ethereum + Arbitrum):
 //!
-//!   cargo run --features evm --example bridge_explorer -- \
-//!     --chain eth --rpc-url https://eth.llamarpc.com \
+//!   cargo run --features evm --example `bridge_explorer` -- \
+//!     --chain eth --rpc-url <https://eth.llamarpc.com> \
 //!       --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-//!     --chain arb --rpc-url https://arb1.arbitrum.io/rpc \
+//!     --chain arb --rpc-url <https://arb1.arbitrum.io/rpc> \
 //!       --address 0xaf88d065e77c8cC2239327C5EDb3A432268e5831 \
 //!     --num-blocks 50
 
@@ -20,10 +20,12 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use alloy::providers::Provider;
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::client::ClientBuilder;
+use alloy::transports::http::reqwest::Url;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{HistStore, Position};
-use chainfold::evm::{EvmLogHistory, LogStore, TRANSFER_TOPIC};
+use chainfold::evm::{rpc_retry_layer, versioned_path, EvmLogHistory, LogStore, TRANSFER_TOPIC};
 use chainfold::merge::{merge_hist_stores, ErasedHistStore, MergedItem, MergedPos};
 use clap::Parser;
 use futures_util::StreamExt;
@@ -116,16 +118,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, key) in args.chain.iter().enumerate() {
         println!("Setting up '{}' from {}...", key, args.rpc_url[i]);
-        let url: alloy::transports::http::reqwest::Url = args.rpc_url[i].parse()?;
-        let client = alloy::rpc::client::ClientBuilder::default()
-            .layer(chainfold::evm::rpc_retry_layer())
+        let url: Url = args.rpc_url[i].parse()?;
+        let client = ClientBuilder::default()
+            .layer(rpc_retry_layer())
             .http(url);
-        let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
+        let provider = ProviderBuilder::new().connect_client(client);
         let address = parse_hex_address(&args.address[i])?;
 
         let db_dir = format!("{}/{}", args.db.trim_end_matches('/'), key);
         std::fs::create_dir_all(&db_dir).ok();
-        let db_path = chainfold::evm::versioned_path(&format!("{db_dir}/log_store.db"));
+        let db_path = versioned_path(&format!("{db_dir}/log_store.db"));
         let store = Arc::new(LogStore::open(&db_path)?);
 
         let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
@@ -184,12 +186,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let topic0_hex = m
             .item
             .topics
-            .first()
-            .map(|t| format!("0x{}", hex::encode(&t[..4])))
-            .unwrap_or_else(|| "(none)".into());
-        let ts = chrono::DateTime::from_timestamp(m.item.timestamp as i64, 0)
-            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-            .unwrap_or_else(|| "----------T--:--:--Z".into());
+            .first().map_or_else(|| "(none)".into(), |t| format!("0x{}", hex::encode(&t[..4])));
+        let ts = chrono::DateTime::from_timestamp(m.item.timestamp as i64, 0).map_or_else(|| "----------T--:--:--Z".into(), |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
         println!(
             "[{:>4}] {:<10} [{}:{:>9}:{:>3}]  topic0={}  tx=0x{}",
             count,

@@ -64,12 +64,12 @@ where
         Box::pin(
             self.upstream
                 .snapshots()
-                .map(move |hist| wrap_hist(hist, pred.clone())),
+                .map(move |hist| wrap_hist(&hist, pred.clone())),
         )
     }
 
     async fn next(&self) -> Hist<FilteredItem<Item>, P> {
-        wrap_hist(self.upstream.next().await, self.pred.clone())
+        wrap_hist(&self.upstream.next().await, self.pred.clone())
     }
 
     fn subscribe(
@@ -78,7 +78,7 @@ where
     ) -> AsyncDisposable {
         let pred = self.pred.clone();
         self.upstream.subscribe(Box::new(move |hist| {
-            cb(wrap_hist(hist, pred.clone()));
+            cb(wrap_hist(&hist, pred.clone()));
         }))
     }
 
@@ -142,18 +142,16 @@ where
     }
 }
 
-fn wrap_hist<Item, P>(upstream: Hist<Item, P>, pred: Predicate<Item>) -> Hist<FilteredItem<Item>, P>
+fn wrap_hist<Item, P>(upstream: &Hist<Item, P>, pred: Predicate<Item>) -> Hist<FilteredItem<Item>, P>
 where
     Item: Clone + Send + Sync + 'static,
     P: Position,
 {
-    let start = upstream.start().clone();
-    let end = upstream.end().clone();
     let backend = Arc::new(FilteredHistBackend {
         upstream: upstream.backend().clone(),
         pred,
     });
-    Hist::new(backend, start, end)
+    Hist::new(backend, upstream.start().clone(), upstream.end().clone())
 }
 
 // ============================================================
@@ -167,8 +165,7 @@ mod tests {
 
     fn even(e: &MockEvent) -> bool {
         e.0.parse::<u64>()
-            .map(|n| n.is_multiple_of(2))
-            .unwrap_or(false)
+            .is_ok_and(|n| n.is_multiple_of(2))
     }
 
     fn mk(i: u64) -> MockEvent {

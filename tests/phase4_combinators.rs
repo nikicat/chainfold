@@ -18,7 +18,10 @@ use chainfold::combinators::{
     filter_hist_store, map_hist_store, since_hist_store, FilteredItem, MappedItem,
 };
 use futures_core::Stream;
+use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 // ============================================================
 // MockPos / MockEvent / MockSource (mirror of phase3_hist_store.rs)
@@ -42,7 +45,7 @@ struct MockEvent(u64);
 struct MockSource {
     items: Mutex<Vec<MockEvent>>,
     latest_store: Store<MockPos>,
-    latest_tx: tokio::sync::watch::Sender<MockPos>,
+    latest_tx: watch::Sender<MockPos>,
     best_store: Store<MockPos>,
     safe_store: Store<MockPos>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
@@ -51,9 +54,9 @@ struct MockSource {
 impl MockSource {
     fn new(initial: Vec<MockEvent>) -> Arc<Self> {
         let tip = MockPos(initial.len() as u64);
-        let (tx, rx) = tokio::sync::watch::channel(tip);
-        let (_, b_rx) = tokio::sync::watch::channel(tip);
-        let (_, s_rx) = tokio::sync::watch::channel(tip);
+        let (tx, rx) = watch::channel(tip);
+        let (_, b_rx) = watch::channel(tip);
+        let (_, s_rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
             latest_store: Store::new(rx),
@@ -96,7 +99,7 @@ impl HistBackend<MockEvent, MockPos> for MockSource {
             .take(to.saturating_sub(from))
             .map(|(i, item)| Positioned::new(item, MockPos((i + 1) as u64)))
             .collect();
-        Box::pin(futures_util::stream::iter(yielded.into_iter().map(Ok)))
+        Box::pin(iter(yielded.into_iter().map(Ok)))
     }
 }
 
@@ -105,7 +108,7 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<MockEvent, MockPos> {
         let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
-        Box::pin(futures_util::stream::poll_fn(move |cx| {
+        Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
                 .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
@@ -123,7 +126,7 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
     ) -> AsyncDisposable {
         let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = CancellationToken::new();
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(async move {
             loop {

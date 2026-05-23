@@ -1,5 +1,5 @@
 //! Adapter: implements [`SignatureCache`] over [`LogStore`] so the CLI
-//! reuses the same SQLite file for event-signature caching.
+//! reuses the same `SQLite` file for event-signature caching.
 
 use std::sync::Arc;
 

@@ -48,11 +48,11 @@ pub struct EvmArgs {
     #[arg(long)]
     pub rpc_url: Option<String>,
 
-    /// SQLite cache path
+    /// `SQLite` cache path
     #[arg(long, default_value = "./chainfold.db")]
     pub db: String,
 
-    /// Block chunk size for eth_getLogs
+    /// Block chunk size for `eth_getLogs`
     #[arg(long, default_value = "1000")]
     pub chunk_size: u64,
 
@@ -95,7 +95,7 @@ pub struct EventsArgs {
     pub address: String,
 
     /// Event name — looked up against Sourcify / Etherscan to derive
-    /// the canonical signature and topic0. Cached in SQLite.
+    /// the canonical signature and topic0. Cached in `SQLite`.
     /// Example: --event Transfer
     #[arg(long, conflicts_with_all = ["event_sig", "topic0"])]
     pub event: Option<String>,

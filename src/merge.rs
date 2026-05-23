@@ -42,7 +42,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_core::Stream;
+use futures_util::stream::{poll_fn, unfold};
 use futures_util::StreamExt;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::arch::{
     AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
@@ -72,7 +76,7 @@ impl MergedPos {
 
     /// Marshalled bytes for `key`, or `None` if absent.
     pub fn get(&self, key: &str) -> Option<&[u8]> {
-        self.positions.get(key).map(|v| v.as_slice())
+        self.positions.get(key).map(std::vec::Vec::as_slice)
     }
 }
 
@@ -183,7 +187,7 @@ where
         end: Vec<u8>,
     ) -> Subscription<Result<(T, Vec<u8>), HistoryError>> {
         let store = self.store.clone();
-        Box::pin(futures_util::stream::unfold(
+        Box::pin(unfold(
             ErasedIterState::<T, P>::Init { start, end, store },
             erased_iter_step::<T, P>,
         ))
@@ -234,27 +238,21 @@ where
 {
     match state {
         ErasedIterState::Init { start, end, store } => {
-            let start_p = match P::unmarshal(&start) {
-                Some(p) => p,
-                None => {
-                    return Some((
-                        Err(HistoryError::internal(
-                            "merge: failed to unmarshal start position",
-                        )),
-                        ErasedIterState::Done,
-                    ))
-                }
+            let Some(start_p) = P::unmarshal(&start) else {
+                return Some((
+                    Err(HistoryError::internal(
+                        "merge: failed to unmarshal start position",
+                    )),
+                    ErasedIterState::Done,
+                ));
             };
-            let end_p = match P::unmarshal(&end) {
-                Some(p) => p,
-                None => {
-                    return Some((
-                        Err(HistoryError::internal(
-                            "merge: failed to unmarshal end position",
-                        )),
-                        ErasedIterState::Done,
-                    ))
-                }
+            let Some(end_p) = P::unmarshal(&end) else {
+                return Some((
+                    Err(HistoryError::internal(
+                        "merge: failed to unmarshal end position",
+                    )),
+                    ErasedIterState::Done,
+                ));
             };
             let hist = store.next().await;
             // Take the window via two splits — uses per-source Ord, which
@@ -287,7 +285,7 @@ where
 // AbortAll — JoinHandle cleanup on drop
 // ============================================================
 
-struct AbortAll(Vec<tokio::task::JoinHandle<()>>);
+struct AbortAll(Vec<JoinHandle<()>>);
 
 impl Drop for AbortAll {
     fn drop(&mut self) {
@@ -317,7 +315,7 @@ where
         .iter()
         .map(|(k, s)| (k.clone(), get_pos(s)))
         .collect();
-    let (tx, rx) = tokio::sync::watch::channel(MergedPos::new(initial_positions.clone()));
+    let (tx, rx) = watch::channel(MergedPos::new(initial_positions.clone()));
 
     let state = Arc::new(std::sync::Mutex::new(initial_positions));
     let tx = Arc::new(tx);
@@ -426,7 +424,7 @@ where
         let sources = self.sources.clone();
         let cmp = self.cmp.clone();
         let mut tip_sub = self.latest_store.subscribe();
-        Box::pin(futures_util::stream::poll_fn(move |cx| {
+        Box::pin(poll_fn(move |cx| {
             use std::task::Poll;
             match Pin::new(&mut tip_sub).poll_next(cx) {
                 Poll::Pending => Poll::Pending,
@@ -457,7 +455,7 @@ where
         cb: Box<dyn Fn(Hist<MergedItem<T>, MergedPos>) + Send + Sync>,
     ) -> AsyncDisposable {
         let mut stream = self.snapshots();
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = CancellationToken::new();
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(async move {
             loop {
@@ -506,8 +504,8 @@ impl<T: Clone + Send + Sync + 'static> HistBackend<MergedItem<T>, MergedPos>
     for MergedHistBackend<T>
 {
     fn iter(&self, start: MergedPos, end: MergedPos) -> ItemStream<MergedItem<T>, MergedPos> {
-        Box::pin(futures_util::stream::unfold(
-            MergeState::init(&self.sources, self.cmp.clone(), start, end),
+        Box::pin(unfold(
+            MergeState::init(&self.sources, self.cmp.clone(), &start, &end),
             merge_step,
         ))
     }
@@ -562,8 +560,8 @@ impl<T: Clone + Send + Sync + 'static> MergeState<T> {
     fn init(
         sources: &BTreeMap<String, Arc<dyn ErasedSource<T>>>,
         cmp: MergedCmp<T>,
-        start: MergedPos,
-        end: MergedPos,
+        start: &MergedPos,
+        end: &MergedPos,
     ) -> Self {
         let mut vector_clock: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut streams = Vec::with_capacity(sources.len());
@@ -607,17 +605,14 @@ where
     T: Clone + Send + Sync + 'static,
 {
     // Fill heads.
-    for s in state.streams.iter_mut() {
+    for s in &mut state.streams {
         if s.head.is_none() && !s.exhausted {
-            match s.stream.next().await {
-                Some(item) => s.head = Some(item),
-                None => {
-                    s.exhausted = true;
-                    // Source exhausted within (start, end] — advance the
-                    // vector clock to end[k] so resumes know we've consumed
-                    // through.
-                    state.vector_clock.insert(s.key.clone(), s.end_pos.clone());
-                }
+            if let Some(item) = s.stream.next().await { s.head = Some(item) } else {
+                s.exhausted = true;
+                // Source exhausted within (start, end] — advance the
+                // vector clock to end[k] so resumes know we've consumed
+                // through.
+                state.vector_clock.insert(s.key.clone(), s.end_pos.clone());
             }
         }
     }
@@ -699,7 +694,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream::iter;
     use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     // -- Mock source A: integer positions, simple "events" carrying a time. --
 
@@ -726,7 +724,7 @@ mod tests {
         name: String,
         items: Mutex<Vec<MockEvent>>,
         latest_store: Store<MockPos>,
-        latest_tx: tokio::sync::watch::Sender<MockPos>,
+        latest_tx: watch::Sender<MockPos>,
         best_store: Store<MockPos>,
         safe_store: Store<MockPos>,
         self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
@@ -735,9 +733,9 @@ mod tests {
     impl MockSource {
         fn new(name: &str, initial: Vec<MockEvent>) -> Arc<Self> {
             let tip = MockPos(initial.len() as u64);
-            let (tx, rx) = tokio::sync::watch::channel(tip);
-            let (_, b_rx) = tokio::sync::watch::channel(tip);
-            let (_, s_rx) = tokio::sync::watch::channel(tip);
+            let (tx, rx) = watch::channel(tip);
+            let (_, b_rx) = watch::channel(tip);
+            let (_, s_rx) = watch::channel(tip);
             let s = Arc::new(Self {
                 name: name.into(),
                 items: Mutex::new(initial),
@@ -781,7 +779,7 @@ mod tests {
                 .take(to.saturating_sub(from))
                 .map(|(i, item)| Positioned::new(item, MockPos((i + 1) as u64)))
                 .collect();
-            Box::pin(futures_util::stream::iter(yielded.into_iter().map(Ok)))
+            Box::pin(iter(yielded.into_iter().map(Ok)))
         }
     }
 
@@ -790,7 +788,7 @@ mod tests {
         fn snapshots(&self) -> HistStream<MockEvent, MockPos> {
             let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
             let mut sub = self.latest_store.subscribe();
-            Box::pin(futures_util::stream::poll_fn(move |cx| {
+            Box::pin(poll_fn(move |cx| {
                 Pin::new(&mut sub)
                     .poll_next(cx)
                     .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
@@ -808,7 +806,7 @@ mod tests {
         ) -> AsyncDisposable {
             let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
             let mut sub = self.latest_store.subscribe();
-            let cancel = tokio_util::sync::CancellationToken::new();
+            let cancel = CancellationToken::new();
             let cancel2 = cancel.clone();
             let handle = tokio::spawn(async move {
                 loop {
@@ -1023,7 +1021,7 @@ mod tests {
         // Append to b — merged store should emit a new snapshot.
         b.append(ev(20, "b1"));
         // The aggregation task is async; give it a chance to propagate.
-        let h2 = tokio::time::timeout(std::time::Duration::from_secs(2), snaps.next())
+        let h2 = timeout(Duration::from_secs(2), snaps.next())
             .await
             .expect("snapshot within timeout")
             .expect("snapshot stream not closed");

@@ -40,11 +40,15 @@
 //! eligible for matching." If consumers want monotonic guarantees they
 //! advance anchors as a synchronized pair.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_core::Stream;
+use futures_util::stream::unfold;
 use futures_util::{StreamExt, TryStreamExt};
+use tokio::sync::{watch, Mutex};
+use tokio::task::{spawn_blocking, JoinHandle};
 
 use crate::arch::{
     Hist, HistStore, HistoryError, Position, Positioned, Store, Subscription, Timestamp,
@@ -244,7 +248,7 @@ where
 // AbortOnDrop
 // ============================================================
 
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+struct AbortOnDrop(JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -364,7 +368,7 @@ where
     SP: Position,
     DP: Position,
 {
-    let (tx, rx) = tokio::sync::watch::channel(());
+    let (tx, rx) = watch::channel(());
     let handle = tokio::spawn(async move {
         // Always propagate every emission. Tokio `watch` channels coalesce
         // missed updates into the next observable value, so skipping the
@@ -404,7 +408,7 @@ pub trait AnchorStore: Send + Sync {
 /// Hash-map-backed [`AnchorStore`] for tests and ephemeral runs.
 #[derive(Default)]
 pub struct InMemoryAnchorStore {
-    inner: tokio::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    inner: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl InMemoryAnchorStore {
@@ -436,12 +440,12 @@ impl SqliteAnchorStore {
         let conn = rusqlite::Connection::open(path)
             .map_err(|e| HistoryError::internal(format!("sqlite open: {e}")))?;
         conn.execute_batch(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS matcher_anchors (
                 key TEXT PRIMARY KEY,
                 value BLOB NOT NULL
             );
-            "#,
+            ",
         )
         .map_err(|e| HistoryError::internal(format!("sqlite create: {e}")))?;
         Ok(Self {
@@ -455,7 +459,7 @@ impl AnchorStore for SqliteAnchorStore {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, HistoryError> {
         let key = key.to_owned();
         let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, HistoryError> {
+        spawn_blocking(move || -> Result<Option<Vec<u8>>, HistoryError> {
             let conn = conn.lock().unwrap();
             let mut stmt = conn
                 .prepare_cached("SELECT value FROM matcher_anchors WHERE key = ?1")
@@ -474,7 +478,7 @@ impl AnchorStore for SqliteAnchorStore {
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), HistoryError> {
         let key = key.to_owned();
         let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), HistoryError> {
+        spawn_blocking(move || -> Result<(), HistoryError> {
             let conn = conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO matcher_anchors (key, value) VALUES (?1, ?2) \
@@ -507,7 +511,7 @@ where
     anchor_store: Arc<dyn AnchorStore>,
     anchor_key: String,
     start: Timestamp,
-    cached: tokio::sync::Mutex<Option<MatcherAnchors<SP, DP>>>,
+    cached: Mutex<Option<MatcherAnchors<SP, DP>>>,
 }
 
 impl<Src, Dst, Output, SP, DP> AnchoredMatcher<Src, Dst, Output, SP, DP>
@@ -531,7 +535,7 @@ where
             anchor_store,
             anchor_key: anchor_key.into(),
             start,
-            cached: tokio::sync::Mutex::new(None),
+            cached: Mutex::new(None),
         }
     }
 
@@ -588,7 +592,7 @@ where
     pub fn iter(self: &Arc<Self>) -> MatcherStateStream<Src, Dst, Output, SP, DP> {
         let matcher = self.clone();
         let sub = self.base.changes().subscribe();
-        Box::pin(futures_util::stream::unfold(
+        Box::pin(unfold(
             (matcher, sub),
             |(matcher, mut sub)| async move {
                 // Wait for a change tick (first tick is the current value,
@@ -626,8 +630,12 @@ mod tests {
         AsyncDisposable, HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream,
     };
     use futures_core::Stream;
+    use futures_util::stream::{iter, poll_fn};
     use std::pin::Pin as StdPin;
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+    use tokio::time::timeout;
+    use tokio_util::sync::CancellationToken;
 
     // -- Mock source (same-shape across src/dst, parameterised by P) --
 
@@ -643,8 +651,8 @@ mod tests {
         }
     }
 
-    /// Each item carries an integer "bridge_id" — that's what the bridge
-    /// MatchFn correlates on.
+    /// Each item carries an integer "`bridge_id`" — that's what the bridge
+    /// `MatchFn` correlates on.
     #[derive(Debug, Clone, Eq, PartialEq)]
     struct Ev {
         bridge_id: u64,
@@ -661,7 +669,7 @@ mod tests {
     struct MockSource {
         items: StdMutex<Vec<Ev>>,
         latest_store: Store<MockPos>,
-        latest_tx: tokio::sync::watch::Sender<MockPos>,
+        latest_tx: watch::Sender<MockPos>,
         best_store: Store<MockPos>,
         safe_store: Store<MockPos>,
         self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
@@ -670,9 +678,9 @@ mod tests {
     impl MockSource {
         fn new(initial: Vec<Ev>) -> Arc<Self> {
             let tip = MockPos(initial.len() as u64);
-            let (tx, rx) = tokio::sync::watch::channel(tip);
-            let (_, b_rx) = tokio::sync::watch::channel(tip);
-            let (_, s_rx) = tokio::sync::watch::channel(tip);
+            let (tx, rx) = watch::channel(tip);
+            let (_, b_rx) = watch::channel(tip);
+            let (_, s_rx) = watch::channel(tip);
             let s = Arc::new(Self {
                 items: StdMutex::new(initial),
                 latest_store: Store::new(rx),
@@ -715,7 +723,7 @@ mod tests {
                 .take(to.saturating_sub(from))
                 .map(|(i, item)| Positioned::new(item, MockPos((i + 1) as u64)))
                 .collect();
-            Box::pin(futures_util::stream::iter(yielded.into_iter().map(Ok)))
+            Box::pin(iter(yielded.into_iter().map(Ok)))
         }
     }
 
@@ -724,7 +732,7 @@ mod tests {
         fn snapshots(&self) -> HistStream<Ev, MockPos> {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
             let mut sub = self.latest_store.subscribe();
-            Box::pin(futures_util::stream::poll_fn(move |cx| {
+            Box::pin(poll_fn(move |cx| {
                 StdPin::new(&mut sub)
                     .poll_next(cx)
                     .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
@@ -739,7 +747,7 @@ mod tests {
         fn subscribe(&self, cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>) -> AsyncDisposable {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
             let mut sub = self.latest_store.subscribe();
-            let cancel = tokio_util::sync::CancellationToken::new();
+            let cancel = CancellationToken::new();
             let cancel2 = cancel.clone();
             let handle = tokio::spawn(async move {
                 loop {
@@ -770,13 +778,13 @@ mod tests {
         }
     }
 
-    /// Simple bridge_id-based matcher: items with the same bridge_id pair.
+    /// Simple bridge_id-based matcher: items with the same `bridge_id` pair.
     /// Pending = src items without dst match. Orphans = dst items without
     /// src match.
     fn bridge_match_fn() -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
         match_fn(|input: MatchInput<Ev, Ev, MockPos, MockPos>| {
-            let mut dst_by_id: std::collections::HashMap<u64, Vec<Ev>> =
-                std::collections::HashMap::new();
+            let mut dst_by_id: HashMap<u64, Vec<Ev>> =
+                HashMap::new();
             for d in &input.dst_items {
                 dst_by_id
                     .entry(d.item.bridge_id)
@@ -972,14 +980,14 @@ mod tests {
 
         // Advance src — changes should fire.
         src.append(ev(1, "burn1"));
-        tokio::time::timeout(std::time::Duration::from_secs(2), sub.next())
+        timeout(Duration::from_secs(2), sub.next())
             .await
             .expect("src change within timeout")
             .expect("subscription not closed");
 
         // Advance dst — changes should fire too.
         dst.append(ev(1, "mint1"));
-        tokio::time::timeout(std::time::Duration::from_secs(2), sub.next())
+        timeout(Duration::from_secs(2), sub.next())
             .await
             .expect("dst change within timeout")
             .expect("subscription not closed");
@@ -1001,7 +1009,7 @@ mod tests {
 
         let mut stream = m.iter();
         // Initial state (changes() emits immediately) → empty.
-        let s0 = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        let s0 = timeout(Duration::from_secs(2), stream.next())
             .await
             .expect("initial state within timeout")
             .expect("stream not closed")
@@ -1010,7 +1018,7 @@ mod tests {
 
         // Append a src item — iter should yield a new state.
         src.append(ev(1, "burn1"));
-        let s1 = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        let s1 = timeout(Duration::from_secs(2), stream.next())
             .await
             .expect("post-append state within timeout")
             .expect("stream not closed")

@@ -30,9 +30,13 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
+use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
-use alloy::rpc::types::Filter;
+use alloy::rpc::types::{Filter, Log};
+use futures_util::stream::{empty, once, poll_fn};
 use futures_util::StreamExt;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::arch::evm::{EvmEvent, EvmPosition};
 use crate::arch::{
@@ -42,6 +46,13 @@ use crate::arch::{
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::log_store::{compute_filter_hash, BlockHeader, LogStore};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
+
+fn fmt_topic(t: Option<&[u8; 32]>) -> String {
+    match t {
+        Some(b) => format!("0x{}", hex::encode(b)),
+        None => "*".into(),
+    }
+}
 
 /// Default chunk size for `eth_getLogs` calls (in blocks).
 const DEFAULT_CHUNK_SIZE: u64 = 1000;
@@ -68,11 +79,11 @@ pub struct EvmLogHistory<P> {
     latest_store: Store<EvmPosition>,
     best_store: Store<EvmPosition>,
     safe_store: Store<EvmPosition>,
-    latest_tx: tokio::sync::watch::Sender<EvmPosition>,
+    latest_tx: watch::Sender<EvmPosition>,
     #[allow(dead_code)]
-    best_tx: tokio::sync::watch::Sender<EvmPosition>,
+    best_tx: watch::Sender<EvmPosition>,
     #[allow(dead_code)]
-    safe_tx: tokio::sync::watch::Sender<EvmPosition>,
+    safe_tx: watch::Sender<EvmPosition>,
 
     // Wall-clock → block-number estimation. Anchored at a recent block
     // rather than genesis because some chains use timestamp 0 at genesis.
@@ -125,9 +136,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             .timestamp;
 
         let earliest = EvmPosition::earliest();
-        let (latest_tx, latest_rx) = tokio::sync::watch::channel(earliest);
-        let (best_tx, best_rx) = tokio::sync::watch::channel(earliest);
-        let (safe_tx, safe_rx) = tokio::sync::watch::channel(earliest);
+        let (latest_tx, latest_rx) = watch::channel(earliest);
+        let (best_tx, best_rx) = watch::channel(earliest);
+        let (safe_tx, safe_rx) = watch::channel(earliest);
 
         let fetcher = build_fetcher(provider.clone(), store.clone(), address, topics);
         let index = Arc::new(LogIndex::with_chunk_size(
@@ -159,21 +170,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         });
         let _ = history.self_ref.set(Arc::downgrade(&history));
 
-        fn fmt_topic(t: &Option<[u8; 32]>) -> String {
-            match t {
-                Some(b) => format!("0x{}", alloy::hex::encode(b)),
-                None => "*".into(),
-            }
-        }
         tracing::debug!(
             chain_id,
-            address = %format!("0x{}", alloy::hex::encode(address)),
-            topic0 = %fmt_topic(&topics[0]),
-            topic1 = %fmt_topic(&topics[1]),
-            topic2 = %fmt_topic(&topics[2]),
-            topic3 = %fmt_topic(&topics[3]),
+            address = %format!("0x{}", hex::encode(address)),
+            topic0 = %fmt_topic(topics[0].as_ref()),
+            topic1 = %fmt_topic(topics[1].as_ref()),
+            topic2 = %fmt_topic(topics[2].as_ref()),
+            topic3 = %fmt_topic(topics[3].as_ref()),
             chunk_size,
-            filter_hash = %format!("0x{}", alloy::hex::encode(&filter_hash[..8])),
+            filter_hash = %format!("0x{}", hex::encode(&filter_hash[..8])),
             "EvmLogHistory created"
         );
 
@@ -309,7 +314,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     fn build_filter(&self, from: Option<u64>, to: Option<u64>) -> Filter {
-        let mut filter = Filter::new().address(alloy::primitives::Address::from(self.address));
+        let mut filter = Filter::new().address(Address::from(self.address));
         if let Some(f) = from {
             filter = filter.from_block(f);
         }
@@ -317,16 +322,16 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             filter = filter.to_block(t);
         }
         if let Some(t) = self.topics[0] {
-            filter = filter.event_signature(alloy::primitives::B256::from(t));
+            filter = filter.event_signature(B256::from(t));
         }
         if let Some(t) = self.topics[1] {
-            filter = filter.topic1(alloy::primitives::B256::from(t));
+            filter = filter.topic1(B256::from(t));
         }
         if let Some(t) = self.topics[2] {
-            filter = filter.topic2(alloy::primitives::B256::from(t));
+            filter = filter.topic2(B256::from(t));
         }
         if let Some(t) = self.topics[3] {
-            filter = filter.topic3(alloy::primitives::B256::from(t));
+            filter = filter.topic3(B256::from(t));
         }
         filter
     }
@@ -378,7 +383,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistBackend<EvmEvent
 {
     fn iter(&self, start: EvmPosition, end: EvmPosition) -> ItemStream<EvmEvent, EvmPosition> {
         if end <= start {
-            return Box::pin(futures_util::stream::empty());
+            return Box::pin(empty());
         }
 
         // Materialize any persisted scanned ranges covering this window
@@ -387,7 +392,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistBackend<EvmEvent
         let from_block = start.block;
         let to_block = end.block;
         if let Err(e) = self.index.ensure_window_loaded(from_block, to_block) {
-            return Box::pin(futures_util::stream::once(async move { Err(e) }));
+            return Box::pin(once(async move { Err(e) }));
         }
 
         let start_pos = evm_to_block_pos(start);
@@ -427,7 +432,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<Evm
     fn snapshots(&self) -> HistStream<EvmEvent, EvmPosition> {
         let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
         let mut latest_sub = self.latest_store.subscribe();
-        Box::pin(futures_util::stream::poll_fn(move |cx| {
+        Box::pin(poll_fn(move |cx| {
             latest_sub.as_mut().poll_next(cx).map(|tip_opt| {
                 tip_opt.map(|tip| Hist::new(backend.clone(), EvmPosition::earliest(), tip))
             })
@@ -446,7 +451,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<Evm
     ) -> AsyncDisposable {
         let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
         let mut stream = self.latest_store.subscribe();
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = CancellationToken::new();
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(async move {
             loop {
@@ -489,10 +494,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<Evm
 // Free helpers
 // ============================================================
 
-fn log_to_evm_event(log: &alloy::rpc::types::Log) -> EvmEvent {
+fn log_to_evm_event(log: &Log) -> EvmEvent {
     let addr: [u8; 20] = log.address().0 .0;
-    let block_hash: [u8; 32] = log.block_hash.map(|h| h.0).unwrap_or([0; 32]);
-    let tx_hash: [u8; 32] = log.transaction_hash.map(|h| h.0).unwrap_or([0; 32]);
+    let block_hash: [u8; 32] = log.block_hash.map_or([0; 32], |h| h.0);
+    let tx_hash: [u8; 32] = log.transaction_hash.map_or([0; 32], |h| h.0);
 
     EvmEvent {
         contract_address: addr,
@@ -561,20 +566,20 @@ where
         let store = store.clone();
         Box::pin(async move {
             let mut filter = Filter::new()
-                .address(alloy::primitives::Address::from(address))
+                .address(Address::from(address))
                 .from_block(from)
                 .to_block(to);
             if let Some(t) = topics[0] {
-                filter = filter.event_signature(alloy::primitives::B256::from(t));
+                filter = filter.event_signature(B256::from(t));
             }
             if let Some(t) = topics[1] {
-                filter = filter.topic1(alloy::primitives::B256::from(t));
+                filter = filter.topic1(B256::from(t));
             }
             if let Some(t) = topics[2] {
-                filter = filter.topic2(alloy::primitives::B256::from(t));
+                filter = filter.topic2(B256::from(t));
             }
             if let Some(t) = topics[3] {
-                filter = filter.topic3(alloy::primitives::B256::from(t));
+                filter = filter.topic3(B256::from(t));
             }
             tracing::debug!(from, to, blocks = to - from + 1, "eth_getLogs");
             let logs = provider
@@ -608,9 +613,8 @@ where
 mod tests {
     use super::*;
     use crate::arch::Position;
-    use alloy::primitives::{Address, Bytes, LogData, B256};
+    use alloy::primitives::{Address, Bytes, Log as LogInner, LogData, B256, U64};
     use alloy::providers::ProviderBuilder;
-    use alloy::rpc::types::Log;
     use alloy::transports::mock::Asserter;
     use futures_util::TryStreamExt;
 
@@ -630,7 +634,7 @@ mod tests {
         let log_data = LogData::new_unchecked(vec![topic0], data);
 
         Log {
-            inner: alloy::primitives::Log {
+            inner: LogInner {
                 address: Address::from(ADDR),
                 data: log_data,
             },
@@ -673,11 +677,11 @@ mod tests {
 
     async fn make_history(
         store: Arc<LogStore>,
-    ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + Send + Sync + 'static>> {
+    ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>> {
         let asserter = Asserter::new();
         // get_chain_id, get_block_number for anchor
-        asserter.push_success(&alloy::primitives::U64::from(TEST_CHAIN));
-        asserter.push_success(&alloy::primitives::U64::from(200u64));
+        asserter.push_success(&U64::from(TEST_CHAIN));
+        asserter.push_success(&U64::from(200u64));
         // anchor block-header lookup hits the cache (warm_cache has block 200).
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
         EvmLogHistory::with_options(provider, store, ADDR, TOPICS, 100, 12)
@@ -789,7 +793,7 @@ mod tests {
         assert_eq!(*hist.end(), EvmPosition::new(200, u32::MAX));
     }
 
-    /// chain_id stays on EvmLogHistory, never on positions.
+    /// `chain_id` stays on `EvmLogHistory`, never on positions.
     #[tokio::test]
     async fn chain_id_is_on_history_not_position() {
         let (store, _) = warm_cache();

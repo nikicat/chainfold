@@ -6,13 +6,14 @@
 mod common;
 
 use alloy::providers::Provider;
+use alloy::rpc::types::eth::Filter;
 
 use common::mock_provider::{expect_get_logs, mock_provider, remaining};
 
 #[tokio::test]
 async fn mock_provider_consumes_queued_responses() {
     let asserter = expect_get_logs(2);
-    let provider = mock_provider(asserter.clone());
+    let provider = mock_provider(&asserter);
 
     assert_eq!(
         remaining(&asserter),
@@ -20,7 +21,7 @@ async fn mock_provider_consumes_queued_responses() {
         "asserter starts with 2 pre-queued responses"
     );
 
-    let filter = alloy::rpc::types::eth::Filter::new();
+    let filter = Filter::new();
     let logs1 = provider
         .get_logs(&filter)
         .await

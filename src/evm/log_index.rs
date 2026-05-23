@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy::rpc::types::Log;
 use futures_core::Stream;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::Notify;
 
 use super::log_store::LogStore;
@@ -103,7 +103,7 @@ impl BlockPos {
         }
     }
 
-    /// Convert a concrete (block, log_index) pair to a position.
+    /// Convert a concrete (block, `log_index`) pair to a position.
     pub fn at(block: u64, log_index: u32) -> Self {
         BlockPos::At { block, log_index }
     }
@@ -277,7 +277,7 @@ impl LogIndex {
         if drain.is_some() {
             return false;
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LogPage>();
+        let (tx, mut rx) = unbounded_channel::<LogPage>();
         let store = self.store.clone();
         let filter_hash = self.filter_hash;
         tokio::spawn(async move {
@@ -364,8 +364,8 @@ impl LogIndex {
             let item = log_ref_from(log).expect("page items must have block_hash");
             let item_pos = item.pos();
 
-            let strictly_past_tail = tail_end.map(|t| item_pos > t).unwrap_or(true);
-            let strictly_before_tail = tail_end.map(|t| item_pos < t).unwrap_or(false);
+            let strictly_past_tail = tail_end.is_none_or(|t| item_pos > t);
+            let strictly_before_tail = tail_end.is_some_and(|t| item_pos < t);
             // Equal-to-tail items go through addPage's "no-op for prev tracking"
             // branch — the reference keeps them out of insertLateItem because
             // a range already ends there.
@@ -382,7 +382,7 @@ impl LogIndex {
         // Final empty range if there's an unfilled tail past the last new item.
         if page_end > range_start {
             // Only append if the new tail extends past the existing tree tail.
-            let beyond_tail = tail_end.map(|t| page_end > t).unwrap_or(true);
+            let beyond_tail = tail_end.is_none_or(|t| page_end > t);
             if beyond_tail {
                 let start = if let Some(t) = tail_end {
                     if range_start <= t {
@@ -969,7 +969,7 @@ impl LogIndex {
         }
     }
 
-    /// One step of the items() walk performed entirely under the tree
+    /// One step of the `items()` walk performed entirely under the tree
     /// mutex. Side effect: installs a fetch placeholder + notify when
     /// returning [`WalkStep::FillGap`].
     fn snapshot_walk(&self, from: BlockPos, to: BlockPos) -> WalkStep {
@@ -1162,7 +1162,10 @@ fn assert_increasing(logs: &[Log]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, Bytes, LogData, B256};
+    use alloy::primitives::{Address, Bytes, Log as LogInner, LogData, B256};
+    use std::time::Duration;
+    use tokio::task::yield_now;
+    use tokio::time::sleep;
 
     const FH: [u8; 32] = [0xAA; 32];
     const HASH_A: [u8; 32] = [0xBB; 32];
@@ -1173,7 +1176,7 @@ mod tests {
         let data = Bytes::from(vec![0x01]);
         let log_data = LogData::new_unchecked(vec![topic0], data);
         Log {
-            inner: alloy::primitives::Log {
+            inner: LogInner {
                 address: Address::from([0x42u8; 20]),
                 data: log_data,
             },
@@ -1567,7 +1570,7 @@ mod tests {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {
                     // Give peers time to enter the wait state.
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    sleep(Duration::from_millis(50)).await;
                     Ok(LogPage {
                         from_block: from,
                         to_block: to,
@@ -1624,8 +1627,8 @@ mod tests {
 
         // Yield so the drain task can run.
         for _ in 0..10 {
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            yield_now().await;
+            sleep(Duration::from_millis(5)).await;
             let logs = store.get_logs_in_range(&FH, 100, 200).unwrap();
             if logs.len() == 2 {
                 break;
@@ -1652,7 +1655,7 @@ mod tests {
         });
 
         // Give any background work a chance to run.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        sleep(Duration::from_millis(20)).await;
         assert_eq!(
             store.get_logs_in_range(&FH, 100, 200).unwrap().len(),
             0,

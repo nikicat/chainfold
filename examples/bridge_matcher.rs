@@ -9,27 +9,31 @@
 //! **Bridge semantics are bridge-specific.** This example uses a *generic*
 //! key extractor so you can demonstrate the matcher against any pair of
 //! event streams whose pairing is "two events share value X." Real bridges
-//! (OP, Arbitrum, LayerZero, etc.) need a custom `MatchFn` that decodes
+//! (OP, Arbitrum, `LayerZero`, etc.) need a custom `MatchFn` that decodes
 //! their actual sequence/messageId field — extend `make_match_fn` or
 //! implement `MatchFn` directly.
 //!
 //! Manual smoke (USDC Transfers on Ethereum vs Arbitrum, paired by
 //! sender topic):
 //!
-//!   cargo run --features evm --example bridge_matcher -- \
-//!     --src-rpc https://eth.llamarpc.com \
+//!   cargo run --features evm --example `bridge_matcher` -- \
+//!     --src-rpc <https://eth.llamarpc.com> \
 //!       --src-address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-//!     --dst-rpc https://arb1.arbitrum.io/rpc \
+//!     --dst-rpc <https://arb1.arbitrum.io/rpc> \
 //!       --dst-address 0xaf88d065e77c8cC2239327C5EDb3A432268e5831 \
 //!     --match-on topic1 --num-blocks 50
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use alloy::providers::Provider;
+use alloy::network::Ethereum;
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::client::ClientBuilder;
+use alloy::transports::http::reqwest::Url;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::evm::{EvmLogHistory, LogStore, TRANSFER_TOPIC};
+use chainfold::evm::{rpc_retry_layer, versioned_path, EvmLogHistory, LogStore, TRANSFER_TOPIC};
 use chainfold::matcher::{
-    match_fn, AnchorStore, AnchoredMatcher, Match, MatchInput, MatchOutput, Matcher,
+    match_fn, AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
     SqliteAnchorStore,
 };
 use clap::{Parser, ValueEnum};
@@ -73,7 +77,7 @@ struct Args {
     #[arg(long, default_value = "./bridge_matcher.db")]
     db: String,
 
-    /// Anchor cache file (separate from LogStore DBs).
+    /// Anchor cache file (separate from `LogStore` DBs).
     #[arg(long, default_value = "./bridge_matcher.db/anchors.sqlite")]
     anchor_db: String,
 
@@ -84,7 +88,7 @@ struct Args {
     #[arg(long, default_value = "1000")]
     chunk_size: u64,
 
-    /// Run in live mode: subscribe and re-print on every changes() tick.
+    /// Run in live mode: subscribe and re-print on every `changes()` tick.
     /// Default is a single snapshot.
     #[arg(long)]
     follow: bool,
@@ -130,7 +134,7 @@ fn extract_key(e: &EvmEvent, on: MatchOn) -> Option<Vec<u8>> {
 fn make_match_fn(
     on: MatchOn,
 ) -> Arc<
-    dyn chainfold::matcher::MatchFn<
+    dyn MatchFn<
         EvmEvent,
         EvmEvent,
         MatchOutput<EvmEvent, EvmEvent>,
@@ -140,8 +144,8 @@ fn make_match_fn(
 > {
     match_fn(
         move |input: MatchInput<EvmEvent, EvmEvent, EvmPosition, EvmPosition>| {
-            let mut dst_by_key: std::collections::HashMap<Vec<u8>, Vec<EvmEvent>> =
-                std::collections::HashMap::new();
+            let mut dst_by_key: HashMap<Vec<u8>, Vec<EvmEvent>> =
+                HashMap::new();
             for d in &input.dst_items {
                 if let Some(k) = extract_key(&d.item, on) {
                     dst_by_key.entry(k).or_default().push(d.item.clone());
@@ -183,16 +187,16 @@ async fn open_history(
     db_subdir: &str,
     chunk_size: u64,
 ) -> Result<
-    Arc<EvmLogHistory<impl Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>>,
+    Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>>,
     Box<dyn std::error::Error>,
 > {
-    let url: alloy::transports::http::reqwest::Url = rpc_url.parse()?;
-    let client = alloy::rpc::client::ClientBuilder::default()
-        .layer(chainfold::evm::rpc_retry_layer())
+    let url: Url = rpc_url.parse()?;
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
         .http(url);
-    let provider = alloy::providers::ProviderBuilder::new().connect_client(client);
+    let provider = ProviderBuilder::new().connect_client(client);
     std::fs::create_dir_all(db_subdir).ok();
-    let db_path = chainfold::evm::versioned_path(&format!("{db_subdir}/log_store.db"));
+    let db_path = versioned_path(&format!("{db_subdir}/log_store.db"));
     let store = Arc::new(LogStore::open(&db_path)?);
     let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
     Ok(EvmLogHistory::with_options(provider, store, address, topics, chunk_size, 12).await?)
@@ -283,15 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Anchor key:  {}", args.anchor_key);
     println!();
 
-    if !args.follow {
-        // One-shot: compute over the time window starting num_blocks back.
-        let since = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .saturating_sub(args.num_blocks * 12);
-        let state = m.base().get_history(since).await?;
-        print_state(&state.output);
-    } else {
+    if args.follow {
         // Live mode: print on every changes() tick.
         let mut stream = m.iter();
         let mut tick = 0u64;
@@ -301,6 +297,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_state(&state.output);
             tick += 1;
         }
+    } else {
+        // One-shot: compute over the time window starting num_blocks back.
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            .saturating_sub(args.num_blocks * 12);
+        let state = m.base().get_history(since).await?;
+        print_state(&state.output);
     }
 
     Ok(())

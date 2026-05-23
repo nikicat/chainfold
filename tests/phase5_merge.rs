@@ -8,15 +8,20 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chainfold::arch::{
     watch_hist, AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
     HistoryError, ItemStream, Position, Positioned, Store, Timestamp,
 };
-use chainfold::combinators::{filter_hist_store, since_hist_store};
+use chainfold::combinators::{filter_hist_store, since_hist_store, FilteredItem};
 use chainfold::merge::{merge_hist_stores, ErasedHistStore, MergedItem, MergedPos};
 use futures_core::Stream;
+use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use tokio::sync::watch;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 // ============================================================
 // Source A — integer position, "trade" events
@@ -89,7 +94,7 @@ fn cmp_by_time(a: &MergedItem<CommonEvent>, b: &MergedItem<CommonEvent>) -> Orde
 struct Source<P: Position + 'static> {
     items: Mutex<Vec<(P, CommonEvent)>>,
     latest_store: Store<P>,
-    latest_tx: tokio::sync::watch::Sender<P>,
+    latest_tx: watch::Sender<P>,
     best_store: Store<P>,
     safe_store: Store<P>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
@@ -98,9 +103,9 @@ struct Source<P: Position + 'static> {
 impl<P: Position + 'static> Source<P> {
     fn new(initial: Vec<(P, CommonEvent)>) -> Arc<Self> {
         let tip = initial.last().map(|(p, _)| p.clone()).unwrap_or_default();
-        let (tx, rx) = tokio::sync::watch::channel(tip.clone());
-        let (_, b_rx) = tokio::sync::watch::channel(tip.clone());
-        let (_, s_rx) = tokio::sync::watch::channel(tip);
+        let (tx, rx) = watch::channel(tip.clone());
+        let (_, b_rx) = watch::channel(tip.clone());
+        let (_, s_rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
             latest_store: Store::new(rx),
@@ -138,7 +143,7 @@ impl<P: Position + 'static> HistBackend<CommonEvent, P> for Source<P> {
             .filter(|(p, _)| p > &start && p <= &end)
             .map(|(p, e)| Positioned::new(e, p))
             .collect();
-        Box::pin(futures_util::stream::iter(yielded.into_iter().map(Ok)))
+        Box::pin(iter(yielded.into_iter().map(Ok)))
     }
 }
 
@@ -147,7 +152,7 @@ impl<P: Position + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
     fn snapshots(&self) -> HistStream<CommonEvent, P> {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
-        Box::pin(futures_util::stream::poll_fn(move |cx| {
+        Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
                 .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), P::default(), tip)))
@@ -162,7 +167,7 @@ impl<P: Position + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
     fn subscribe(&self, cb: Box<dyn Fn(Hist<CommonEvent, P>) + Send + Sync>) -> AsyncDisposable {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = CancellationToken::new();
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(async move {
             loop {
@@ -359,8 +364,8 @@ async fn merge_composes_with_filter() {
 }
 
 async fn collect_merged_filtered(
-    hist: Hist<chainfold::combinators::FilteredItem<MergedItem<CommonEvent>>, MergedPos>,
-) -> Vec<Positioned<chainfold::combinators::FilteredItem<MergedItem<CommonEvent>>, MergedPos>> {
+    hist: Hist<FilteredItem<MergedItem<CommonEvent>>, MergedPos>,
+) -> Vec<Positioned<FilteredItem<MergedItem<CommonEvent>>, MergedPos>> {
     use futures_util::TryStreamExt;
     hist.iter().try_collect().await.unwrap()
 }
@@ -406,7 +411,7 @@ async fn merge_advances_with_tip_via_watch_hist() {
 
     let mut stream = watch_hist(&merged, MergedPos::default());
     // First item: a1.
-    let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+    let first = timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("first item within timeout")
         .unwrap()
@@ -415,7 +420,7 @@ async fn merge_advances_with_tip_via_watch_hist() {
 
     // Append to b; the merged store should re-snapshot and yield it.
     b.append(MockPosNamed("n01".into()), ev(20, "b1"));
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+    let second = timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("second item within timeout")
         .unwrap()

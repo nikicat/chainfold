@@ -28,7 +28,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_core::Stream;
+use futures_util::stream::unfold;
 use futures_util::StreamExt;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 // ============================================================
 // Core type aliases
@@ -124,7 +128,7 @@ impl<T, P: Position> Positioned<T, P> {
 ///
 /// Inspired by Svelte/Zustand stores.
 pub struct Store<T: Clone + Send + Sync> {
-    rx: tokio::sync::watch::Receiver<T>,
+    rx: watch::Receiver<T>,
 }
 
 impl<T: Clone + Send + Sync> Clone for Store<T> {
@@ -136,7 +140,7 @@ impl<T: Clone + Send + Sync> Clone for Store<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> Store<T> {
-    pub fn new(rx: tokio::sync::watch::Receiver<T>) -> Self {
+    pub fn new(rx: watch::Receiver<T>) -> Self {
         Self { rx }
     }
 
@@ -148,7 +152,7 @@ impl<T: Clone + Send + Sync + 'static> Store<T> {
     /// Stream of value changes. The first item is always the current value.
     pub fn subscribe(&self) -> Subscription<T> {
         let rx = self.rx.clone();
-        Box::pin(futures_util::stream::unfold(
+        Box::pin(unfold(
             (rx, true),
             |(mut rx, first)| async move {
                 if first {
@@ -172,14 +176,14 @@ impl<T: Clone + Send + Sync + 'static> Store<T> {
 ///
 /// Returned by [`HistStore::subscribe`] and similar push-based APIs.
 pub struct AsyncDisposable {
-    cancel: tokio_util::sync::CancellationToken,
-    handle: Option<tokio::task::JoinHandle<()>>,
+    cancel: CancellationToken,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl AsyncDisposable {
     pub fn new(
-        cancel: tokio_util::sync::CancellationToken,
-        handle: tokio::task::JoinHandle<()>,
+        cancel: CancellationToken,
+        handle: JoinHandle<()>,
     ) -> Self {
         Self {
             cancel,
@@ -424,7 +428,7 @@ pub fn watch_hist<T: Send + Sync + 'static, P: Position>(
     start: P,
 ) -> ItemStream<T, P> {
     let snapshots = store.snapshots();
-    Box::pin(futures_util::stream::unfold(
+    Box::pin(unfold(
         WatchState {
             snapshots,
             anchor: start,
@@ -502,7 +506,7 @@ where
 // ============================================================
 
 pub mod evm {
-    use super::*;
+    use super::{Position, Timestamp, Arc};
 
     // --------------------------------------------------------
     // EvmPosition — totally ordered (block, log_index)
@@ -568,7 +572,7 @@ pub mod evm {
     // Raw EVM event
     // --------------------------------------------------------
 
-    /// A single log event. Carries its own (block, log_index, block_hash,
+    /// A single log event. Carries its own (block, `log_index`, `block_hash`,
     /// timestamp) so consumers don't need to round-trip the store for them.
     #[derive(Debug, Clone)]
     pub struct EvmEvent {

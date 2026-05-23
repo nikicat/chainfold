@@ -1,15 +1,17 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Hist, HistBackend, HistStore, Positioned};
-use chainfold::evm::{EvmLogHistory, LogStore};
+use chainfold::evm::{EvmLogHistory, LogStore, SubscribeTransport};
 use chainfold::signatures::{resolve_event_topic, topic_from_signature};
 use futures_util::StreamExt;
 
 use crate::cli::{EventsArgs, EvmArgs};
 use crate::config::Config;
+use crate::fmt::format_timestamp;
 use crate::signature_cache::LogStoreSignatureCache;
 use crate::util::{parse_datetime, parse_hex_address};
 
@@ -42,19 +44,19 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     println!("  Address:  0x{}", hex::encode(address));
     if let Some(sig) = &signature {
-        println!("  Event:    {}", sig);
+        println!("  Event:    {sig}");
     }
     println!("  Topic0:   0x{}", hex::encode(topic0));
-    println!("  Chain:    {}", chain_id);
+    println!("  Chain:    {chain_id}");
     println!("  Range:    block {} .. {}", start.block, end.block);
-    println!("  DB:       {}", db_path);
+    println!("  DB:       {db_path}");
     println!();
 
     if follow {
         println!("Following new events (Ctrl+C to stop)...\n");
         let _subscriber = backend
-            .subscribe(chainfold::evm::SubscribeTransport::Poll {
-                interval: std::time::Duration::from_secs(2),
+            .subscribe(SubscribeTransport::Poll {
+                interval: Duration::from_secs(2),
             })
             .await?;
         let mut stream = watch_hist(&hist_store, start);
@@ -132,7 +134,7 @@ async fn resolve_range(
             let to_ts = parse_datetime(to_str)?;
             let start = hs.time_pos(from_ts).await?;
             let end = hs.time_pos(to_ts).await?;
-            println!("  Date range: {} → {}", from_str, to_str);
+            println!("  Date range: {from_str} → {to_str}");
             println!(
                 "  Estimated blocks: {} → {}",
                 start.block + 1,
@@ -186,7 +188,7 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
         "[{:>4}] {:<10} {}  0x{}…{}{}{}",
         index,
         e.block_number,
-        crate::fmt::format_timestamp(e.timestamp),
+        format_timestamp(e.timestamp),
         hex::encode(&e.tx_hash[..4]),
         hex::encode(&e.tx_hash[30..]),
         topics_str,

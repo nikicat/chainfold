@@ -1,7 +1,7 @@
 //! EVM-specific implementation for chainfold.
 //!
 //! Concrete `HistStoreBackend` for EVM log streams, layered over:
-//! - [`LogStore`] — durable SQLite persistence (logs, scanned ranges,
+//! - [`LogStore`] — durable `SQLite` persistence (logs, scanned ranges,
 //!   block headers, erc20 metadata/balance tables).
 //! - [`LogIndex`] — in-memory range tree on top of [`LogStore`].
 //! - [`EvmLogHistory`] — `HistStoreBackend<Positioned<EvmEvent,

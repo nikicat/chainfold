@@ -43,7 +43,7 @@ pub enum SignatureError {
 /// Cache surface used by [`resolve_event_topic`].
 ///
 /// `get` returns `(canonical_signature, topic0)` when the (chain, address,
-/// event_name) triple is known; `put` stores a freshly resolved entry.
+/// `event_name`) triple is known; `put` stores a freshly resolved entry.
 #[async_trait]
 pub trait SignatureCache: Send + Sync {
     async fn get(
@@ -160,8 +160,7 @@ async fn fetch_sourcify(
     let status = resp.status();
     if !status.is_success() {
         return Err(SignatureError::Decode(format!(
-            "sourcify returned {} for {}",
-            status, url
+            "sourcify returned {status} for {url}"
         )));
     }
     let body: SourcifyResponse = resp.json().await?;
