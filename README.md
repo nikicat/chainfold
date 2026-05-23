@@ -55,6 +55,16 @@ cargo build --features evm
 cargo test --features evm   # 126 tests, ~1s
 ```
 
+If you plan to commit changes, install the pre-commit hooks once per
+clone so rustfmt and taplo run automatically before each commit:
+
+```bash
+prek install   # runs `prek` from your PATH; install via `cargo install prek` if missing
+```
+
+The same checks run in CI, so skipping the local hook only means
+slower feedback — not different gates.
+
 Walk recent USDC transfers for an owner:
 
 ```bash
