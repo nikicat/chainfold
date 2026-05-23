@@ -1,5 +1,8 @@
 # chainfold
 
+[![CI](https://github.com/nikicat/chainfold/actions/workflows/ci.yml/badge.svg)](https://github.com/nikicat/chainfold/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/nikicat/chainfold/branch/main/graph/badge.svg)](https://codecov.io/gh/nikicat/chainfold)
+
 Treat blockchain event histories like local data. Chainfold gives a Rust
 process the illusion of working against a local full node — caching
 backfill, in-memory range index, sub-10ms live push, resumable
@@ -190,6 +193,20 @@ cargo test --features evm -- --ignored
 A gitignored `.env` with `MAINNET_RPC_URL=https://...` is the
 recommended way to supply your archive RPC for fork tests; the
 harness will use a public fallback if unset.
+
+## Coverage
+
+Local coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov):
+
+```bash
+just coverage        # text summary in the terminal
+just coverage-open   # HTML report, opens in browser
+just coverage-lcov   # emits lcov.info (same format CI uploads)
+```
+
+CI uploads to Codecov on every push. PRs get a status check that fails
+if patch coverage (the *changed* lines) drops below 80%, and a
+project-wide check that flags drops larger than 1%.
 
 ## License
 

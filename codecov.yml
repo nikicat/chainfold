@@ -1,0 +1,38 @@
+# Codecov configuration.
+# Docs: https://docs.codecov.com/docs/codecovyml-reference
+
+coverage:
+  status:
+    # Project-wide status: did total coverage drop?
+    # `threshold: 1%` tolerates small fluctuations so PRs aren't blocked by
+    # noise (e.g. a generic monomorphization shifting region counts).
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: false
+
+    # Patch status: are the *newly changed lines* in this PR covered?
+    # This is the gate that catches "new feature shipped without tests".
+    # 80% is a defensible floor for library code; raise once the suite
+    # is mature.
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+        informational: false
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+# Don't measure CLI glue, example binaries, or shared test helpers.
+# These are demo/integration plumbing, not the library surface we care
+# about.
+ignore:
+  - "examples/**"
+  - "src/bin/**"
+  - "tests/common/**"
+  - "**/tests_common.rs"
+  - "**/*.md"
