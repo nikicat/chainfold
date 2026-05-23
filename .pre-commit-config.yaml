@@ -1,0 +1,33 @@
+# Fast formatting + lint gate that mirrors CI's pre-build steps. Heavier
+# checks (cargo clippy, cargo test) stay manual — they cost seconds, not
+# milliseconds, and CI is the real gate.
+#
+# Install once per clone:  prek install
+# Run ad-hoc on everything: prek run --all-files
+# Skip a single commit:    git commit --no-verify
+#
+# `system` language: prek invokes the host's cargo/taplo rather than pulling
+# its own toolchain. rustup-managed components on the host stay authoritative.
+repos:
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        files: \.rs$
+
+      - id: taplo-fmt
+        name: taplo fmt
+        entry: taplo fmt --check
+        language: system
+        pass_filenames: false
+        files: \.toml$
+
+      - id: taplo-lint
+        name: taplo lint
+        entry: taplo lint
+        language: system
+        pass_filenames: false
+        files: \.toml$

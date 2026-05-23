@@ -1,0 +1,6 @@
+# Tuning for the lints enabled in Cargo.toml `[lints.clippy]`.
+
+# Allow `std::`, `core::`, `alloc::`, and `crate::` as the only acceptable
+# absolute-path prefixes — everything else must be brought in via `use`.
+absolute-paths-allowed-crates = ["std", "core", "alloc"]
+absolute-paths-max-segments = 2

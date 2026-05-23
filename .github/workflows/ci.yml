@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  ci:
+    name: fmt + taplo + clippy + build + test
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git pkgconf pacman rustup taplo-cli
+          rustup default stable
+          rustup component add rustfmt clippy
+
+      - uses: actions/checkout@v6
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: taplo fmt
+        run: taplo fmt --check
+
+      - name: taplo lint
+        run: taplo lint
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: build (no-default-features)
+        run: cargo build --all-targets --no-default-features --locked
+
+      - name: build (all features)
+        run: cargo build --all-targets --all-features --locked
+
+      - name: test
+        # Anvil-backed and fork tests are #[ignore]'d; default `cargo test`
+        # skips them, so no extra filter is needed here.
+        run: cargo test --all-features --locked
