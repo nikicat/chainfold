@@ -13,8 +13,8 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
-    HistoryError, ItemStream, Position, Positioned, Store, Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
+    ItemStream, Position, Positioned, Store, Timestamp,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]

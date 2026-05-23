@@ -83,7 +83,9 @@ pub async fn resolve_event_topic(
         .build()?;
     let abi_json = fetch_abi_json(&client, chain_id, address, etherscan_api_key).await?;
     let (sig, topic0) = event_topic_from_abi(&abi_json, event_name)?;
-    cache.put(chain_id, address, event_name, &sig, topic0).await?;
+    cache
+        .put(chain_id, address, event_name, &sig, topic0)
+        .await?;
     Ok((sig, topic0))
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::{Hist, HistBackend, HistStore, Positioned, watch_hist};
+use chainfold::arch::{watch_hist, Hist, HistBackend, HistStore, Positioned};
 use chainfold::evm::{EvmLogHistory, LogStore};
 use chainfold::signatures::{resolve_event_topic, topic_from_signature};
 use futures_util::StreamExt;
@@ -25,8 +25,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     follow: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let address = parse_hex_address(&events_args.address)?;
-    let (signature, topic0) =
-        resolve_topic0(cache, config, chain_id, address, events_args).await?;
+    let (signature, topic0) = resolve_topic0(cache, config, chain_id, address, events_args).await?;
 
     let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
     let backend = EvmLogHistory::with_options(
@@ -107,14 +106,9 @@ async fn resolve_topic0(
     }
     if let Some(name) = &args.event {
         let cache = LogStoreSignatureCache::new(cache.clone());
-        let (sig, topic) = resolve_event_topic(
-            &cache,
-            chain_id,
-            address,
-            name,
-            config.etherscan_api_key(),
-        )
-        .await?;
+        let (sig, topic) =
+            resolve_event_topic(&cache, chain_id, address, name, config.etherscan_api_key())
+                .await?;
         return Ok((Some(sig), topic));
     }
     Err("provide one of --topic0, --event-sig, or --event".into())
@@ -123,7 +117,9 @@ async fn resolve_topic0(
 fn parse_topic_hex(s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid topic0 hex: {e}"))?;
-    bytes.try_into().map_err(|_| "topic0 must be 32 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "topic0 must be 32 bytes".into())
 }
 
 async fn resolve_range(
@@ -137,7 +133,11 @@ async fn resolve_range(
             let start = hs.time_pos(from_ts).await?;
             let end = hs.time_pos(to_ts).await?;
             println!("  Date range: {} → {}", from_str, to_str);
-            println!("  Estimated blocks: {} → {}", start.block + 1, end.block + 1);
+            println!(
+                "  Estimated blocks: {} → {}",
+                start.block + 1,
+                end.block + 1
+            );
             let end_inclusive = EvmPosition::new(end.block.saturating_add(1), u32::MAX);
             Ok((start, end_inclusive))
         }

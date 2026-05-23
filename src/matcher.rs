@@ -181,22 +181,14 @@ where
     SP: Position,
     DP: Position,
 {
-    async fn matchup(
-        &self,
-        input: MatchInput<Src, Dst, SP, DP>,
-    ) -> Result<Output, HistoryError>;
+    async fn matchup(&self, input: MatchInput<Src, Dst, SP, DP>) -> Result<Output, HistoryError>;
 }
 
 /// Wrap a sync closure as a [`MatchFn`]. Equivalent to implementing the
 /// trait directly with `async fn matchup` returning a non-awaiting body.
-pub fn match_fn<F, Src, Dst, Output, SP, DP>(
-    f: F,
-) -> Arc<dyn MatchFn<Src, Dst, Output, SP, DP>>
+pub fn match_fn<F, Src, Dst, Output, SP, DP>(f: F) -> Arc<dyn MatchFn<Src, Dst, Output, SP, DP>>
 where
-    F: Fn(MatchInput<Src, Dst, SP, DP>) -> Result<Output, HistoryError>
-        + Send
-        + Sync
-        + 'static,
+    F: Fn(MatchInput<Src, Dst, SP, DP>) -> Result<Output, HistoryError> + Send + Sync + 'static,
     Src: Send + Sync + 'static,
     Dst: Send + Sync + 'static,
     Output: Send + 'static,
@@ -206,12 +198,9 @@ where
     struct SyncMatchFn<F>(F);
 
     #[async_trait::async_trait]
-    impl<F, Src, Dst, Output, SP, DP> MatchFn<Src, Dst, Output, SP, DP>
-        for SyncMatchFn<F>
+    impl<F, Src, Dst, Output, SP, DP> MatchFn<Src, Dst, Output, SP, DP> for SyncMatchFn<F>
     where
-        F: Fn(MatchInput<Src, Dst, SP, DP>) -> Result<Output, HistoryError>
-            + Send
-            + Sync,
+        F: Fn(MatchInput<Src, Dst, SP, DP>) -> Result<Output, HistoryError> + Send + Sync,
         Src: Send + Sync + 'static,
         Dst: Send + Sync + 'static,
         Output: Send + 'static,
@@ -431,10 +420,7 @@ impl AnchorStore for InMemoryAnchorStore {
     }
 
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), HistoryError> {
-        self.inner
-            .lock()
-            .await
-            .insert(key.to_owned(), value);
+        self.inner.lock().await.insert(key.to_owned(), value);
         Ok(())
     }
 }
@@ -582,10 +568,7 @@ where
     }
 
     /// Persist `next` and update the in-memory cache.
-    pub async fn set_anchors(
-        &self,
-        next: MatcherAnchors<SP, DP>,
-    ) -> Result<(), HistoryError> {
+    pub async fn set_anchors(&self, next: MatcherAnchors<SP, DP>) -> Result<(), HistoryError> {
         let bytes = next.marshal();
         self.anchor_store.set(&self.anchor_key, bytes).await?;
         *self.cached.lock().await = Some(next);
@@ -602,9 +585,7 @@ where
 
     /// Stream of states, one per `changes()` tick. Each yield re-uses the
     /// cached anchors; consumers advance via [`set_anchors`](Self::set_anchors).
-    pub fn iter(
-        self: &Arc<Self>,
-    ) -> MatcherStateStream<Src, Dst, Output, SP, DP> {
+    pub fn iter(self: &Arc<Self>) -> MatcherStateStream<Src, Dst, Output, SP, DP> {
         let matcher = self.clone();
         let sub = self.base.changes().subscribe();
         Box::pin(futures_util::stream::unfold(
@@ -626,16 +607,12 @@ where
 
 /// Default-output [`AnchoredMatcher`], with output set to
 /// [`MatchOutput<Src, Dst>`].
-pub type Matcher<Src, Dst, SP, DP> =
-    AnchoredMatcher<Src, Dst, MatchOutput<Src, Dst>, SP, DP>;
+pub type Matcher<Src, Dst, SP, DP> = AnchoredMatcher<Src, Dst, MatchOutput<Src, Dst>, SP, DP>;
 
 /// Stream type returned by [`AnchoredMatcher::iter`]. Extracted as a type
 /// alias to keep the method signature readable.
 pub type MatcherStateStream<Src, Dst, Output, SP, DP> = Pin<
-    Box<
-        dyn Stream<Item = Result<BaseMatcherState<Src, Dst, Output, SP, DP>, HistoryError>>
-            + Send,
-    >,
+    Box<dyn Stream<Item = Result<BaseMatcherState<Src, Dst, Output, SP, DP>, HistoryError>> + Send>,
 >;
 
 // ============================================================
@@ -649,8 +626,8 @@ mod tests {
         AsyncDisposable, HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream,
     };
     use futures_core::Stream;
-    use std::sync::Mutex as StdMutex;
     use std::pin::Pin as StdPin;
+    use std::sync::Mutex as StdMutex;
 
     // -- Mock source (same-shape across src/dst, parameterised by P) --
 
@@ -748,9 +725,9 @@ mod tests {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
             let mut sub = self.latest_store.subscribe();
             Box::pin(futures_util::stream::poll_fn(move |cx| {
-                StdPin::new(&mut sub).poll_next(cx).map(|tip_opt| {
-                    tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip))
-                })
+                StdPin::new(&mut sub)
+                    .poll_next(cx)
+                    .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
             }))
         }
 
@@ -759,10 +736,7 @@ mod tests {
             Hist::new(backend, MockPos(0), self.latest_store.get())
         }
 
-        fn subscribe(
-            &self,
-            cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>,
-        ) -> AsyncDisposable {
+        fn subscribe(&self, cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>) -> AsyncDisposable {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
             let mut sub = self.latest_store.subscribe();
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -799,8 +773,7 @@ mod tests {
     /// Simple bridge_id-based matcher: items with the same bridge_id pair.
     /// Pending = src items without dst match. Orphans = dst items without
     /// src match.
-    fn bridge_match_fn() -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>>
-    {
+    fn bridge_match_fn() -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
         match_fn(|input: MatchInput<Ev, Ev, MockPos, MockPos>| {
             let mut dst_by_id: std::collections::HashMap<u64, Vec<Ev>> =
                 std::collections::HashMap::new();
@@ -911,10 +884,7 @@ mod tests {
         let key = "test-key";
         // Persist anchors that point past all items.
         store
-            .set(
-                key,
-                MatcherAnchors::new(MockPos(99), MockPos(99)).marshal(),
-            )
+            .set(key, MatcherAnchors::new(MockPos(99), MockPos(99)).marshal())
             .await
             .unwrap();
 
@@ -973,7 +943,10 @@ mod tests {
 
         // First load: from store (empty) → time_anchors(0) = (default, default).
         let a1 = m.get_anchors().await.unwrap();
-        assert_eq!(a1, MatcherAnchors::new(MockPos::default(), MockPos::default()));
+        assert_eq!(
+            a1,
+            MatcherAnchors::new(MockPos::default(), MockPos::default())
+        );
 
         // Set a new pair, verify get returns the updated value.
         let next = MatcherAnchors::new(MockPos(7), MockPos(3));
@@ -983,8 +956,7 @@ mod tests {
 
         // Persistence written.
         let bytes = store.get("k").await.unwrap().expect("persisted");
-        let parsed: MatcherAnchors<MockPos, MockPos> =
-            MatcherAnchors::unmarshal(&bytes).unwrap();
+        let parsed: MatcherAnchors<MockPos, MockPos> = MatcherAnchors::unmarshal(&bytes).unwrap();
         assert_eq!(parsed, next);
     }
 

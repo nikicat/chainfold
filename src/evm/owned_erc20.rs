@@ -168,8 +168,7 @@ where
             ErasedHistStore::new(self.in_history.hist_store()),
         );
         merge_hist_stores(sources, |a, b| {
-            (a.item.block_number, a.item.log_index)
-                .cmp(&(b.item.block_number, b.item.log_index))
+            (a.item.block_number, a.item.log_index).cmp(&(b.item.block_number, b.item.log_index))
         })
     }
 }

@@ -75,11 +75,10 @@ impl Config {
             source: e,
         })?;
         let interpolated = interpolate_env(&raw)?;
-        let config: Config =
-            toml::from_str(&interpolated).map_err(|e| ConfigError::Parse {
-                path: path.to_owned(),
-                source: e,
-            })?;
+        let config: Config = toml::from_str(&interpolated).map_err(|e| ConfigError::Parse {
+            path: path.to_owned(),
+            source: e,
+        })?;
         Ok(config)
     }
 

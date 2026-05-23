@@ -59,15 +59,7 @@ use crate::arch::{
 /// Stored bytes are the per-source [`Position::marshal`] output. Missing
 /// keys are treated as that source's [`Default`].
 #[derive(
-    Clone,
-    Debug,
-    Default,
-    Eq,
-    PartialEq,
-    Ord,
-    PartialOrd,
-    serde::Serialize,
-    serde::Deserialize,
+    Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
 )]
 pub struct MergedPos {
     pub positions: BTreeMap<String, Vec<u8>>,
@@ -109,8 +101,7 @@ pub struct MergedItem<T> {
 
 /// Ordering function passed to [`merge_hist_stores`]. Items where this
 /// returns [`Ordering::Less`] are yielded first.
-pub type MergedCmp<T> =
-    Arc<dyn Fn(&MergedItem<T>, &MergedItem<T>) -> Ordering + Send + Sync>;
+pub type MergedCmp<T> = Arc<dyn Fn(&MergedItem<T>, &MergedItem<T>) -> Ordering + Send + Sync>;
 
 // ============================================================
 // ErasedHistStore<T> + ErasedSource<T>
@@ -225,7 +216,11 @@ where
 }
 
 enum ErasedIterState<T, P: Position> {
-    Init { start: Vec<u8>, end: Vec<u8>, store: HistStore<T, P> },
+    Init {
+        start: Vec<u8>,
+        end: Vec<u8>,
+        store: HistStore<T, P>,
+    },
     Streaming(ItemStream<T, P>),
     Done,
 }
@@ -414,11 +409,10 @@ impl<T: Clone + Send + Sync + 'static> MergedHistStoreBackend<T> {
             .iter()
             .map(|(k, s)| (k.clone(), s.earliest_pos()))
             .collect();
-        let backend: Arc<dyn HistBackend<MergedItem<T>, MergedPos>> =
-            Arc::new(MergedHistBackend {
-                sources: self.sources.clone(),
-                cmp: self.cmp.clone(),
-            });
+        let backend: Arc<dyn HistBackend<MergedItem<T>, MergedPos>> = Arc::new(MergedHistBackend {
+            sources: self.sources.clone(),
+            cmp: self.cmp.clone(),
+        });
         Hist::new(backend, MergedPos::new(earliest), end)
     }
 }
@@ -511,11 +505,7 @@ struct MergedHistBackend<T> {
 impl<T: Clone + Send + Sync + 'static> HistBackend<MergedItem<T>, MergedPos>
     for MergedHistBackend<T>
 {
-    fn iter(
-        &self,
-        start: MergedPos,
-        end: MergedPos,
-    ) -> ItemStream<MergedItem<T>, MergedPos> {
+    fn iter(&self, start: MergedPos, end: MergedPos) -> ItemStream<MergedItem<T>, MergedPos> {
         Box::pin(futures_util::stream::unfold(
             MergeState::init(&self.sources, self.cmp.clone(), start, end),
             merge_step,
@@ -530,7 +520,11 @@ impl<T: Clone + Send + Sync + 'static> HistBackend<MergedItem<T>, MergedPos>
         let mut clamped: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for (key, source) in &self.sources {
             let earliest = source.earliest_pos();
-            let start_bytes = start.positions.get(key).cloned().unwrap_or_else(|| earliest.clone());
+            let start_bytes = start
+                .positions
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| earliest.clone());
             let end_bytes = end.positions.get(key).cloned().unwrap_or(earliest.clone());
             let p_bytes = p.positions.get(key).cloned().unwrap_or(earliest);
             let chosen = if source.cmp_bytes(&p_bytes, &start_bytes) == Ordering::Less {
@@ -580,11 +574,7 @@ impl<T: Clone + Send + Sync + 'static> MergeState<T> {
                 .get(key)
                 .cloned()
                 .unwrap_or_else(|| earliest.clone());
-            let end_bytes = end
-                .positions
-                .get(key)
-                .cloned()
-                .unwrap_or(earliest);
+            let end_bytes = end.positions.get(key).cloned().unwrap_or(earliest);
             vector_clock.insert(key.clone(), start_bytes.clone());
             // Only build a per-source iter if the window is non-empty.
             if source.cmp_bytes(&start_bytes, &end_bytes) == Ordering::Less {
@@ -598,7 +588,11 @@ impl<T: Clone + Send + Sync + 'static> MergeState<T> {
                 });
             }
         }
-        Self { streams, vector_clock, cmp }
+        Self {
+            streams,
+            vector_clock,
+            cmp,
+        }
     }
 }
 
@@ -622,17 +616,24 @@ where
                     // Source exhausted within (start, end] — advance the
                     // vector clock to end[k] so resumes know we've consumed
                     // through.
-                    state
-                        .vector_clock
-                        .insert(s.key.clone(), s.end_pos.clone());
+                    state.vector_clock.insert(s.key.clone(), s.end_pos.clone());
                 }
             }
         }
     }
 
     // Surface errors first so they aren't masked by later items.
-    if let Some(i) = state.streams.iter().position(|s| matches!(&s.head, Some(Err(_)))) {
-        let err = state.streams[i].head.take().expect("head set above").err().unwrap();
+    if let Some(i) = state
+        .streams
+        .iter()
+        .position(|s| matches!(&s.head, Some(Err(_))))
+    {
+        let err = state.streams[i]
+            .head
+            .take()
+            .expect("head set above")
+            .err()
+            .unwrap();
         state.streams[i].exhausted = true;
         return Some((Err(err), state));
     }
@@ -764,9 +765,7 @@ mod tests {
         }
 
         fn hist_store(self: &Arc<Self>) -> HistStore<MockEvent, MockPos> {
-            HistStore::new(
-                Arc::clone(self) as Arc<dyn HistStoreBackend<MockEvent, MockPos>>
-            )
+            HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
         }
     }
 
@@ -792,9 +791,9 @@ mod tests {
             let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
             let mut sub = self.latest_store.subscribe();
             Box::pin(futures_util::stream::poll_fn(move |cx| {
-                Pin::new(&mut sub).poll_next(cx).map(|tip_opt| {
-                    tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip))
-                })
+                Pin::new(&mut sub)
+                    .poll_next(cx)
+                    .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
             }))
         }
 
@@ -841,7 +840,10 @@ mod tests {
     }
 
     fn ev(time: u64, label: &str) -> MockEvent {
-        MockEvent { time, label: label.into() }
+        MockEvent {
+            time,
+            label: label.into(),
+        }
     }
 
     fn cmp_by_time(a: &MergedItem<MockEvent>, b: &MergedItem<MockEvent>) -> Ordering {
@@ -928,7 +930,10 @@ mod tests {
         let anchor = items_all[1].pos.clone();
         let (_, tail) = hist.split(anchor);
         let items_tail = collect_merged(tail).await;
-        let labels: Vec<&str> = items_tail.iter().map(|p| p.item.item.label.as_str()).collect();
+        let labels: Vec<&str> = items_tail
+            .iter()
+            .map(|p| p.item.item.label.as_str())
+            .collect();
         assert_eq!(labels, vec!["a2", "b2", "a3"]);
     }
 
@@ -962,7 +967,10 @@ mod tests {
         let items_tail = collect_merged(tail).await;
         // Items after anchor_after_a1: from "a" only items past pos=1 (so a2);
         // from "b" everything (it wasn't in the old anchor → default = pos 0).
-        let labels: Vec<&str> = items_tail.iter().map(|p| p.item.item.label.as_str()).collect();
+        let labels: Vec<&str> = items_tail
+            .iter()
+            .map(|p| p.item.item.label.as_str())
+            .collect();
         // By time: b1(20), a2(30), b2(40).
         assert_eq!(labels, vec!["b1", "a2", "b2"]);
     }
@@ -1005,7 +1013,11 @@ mod tests {
         let mut snaps = merged.snapshots();
 
         let h1 = snaps.next().await.expect("first snapshot");
-        let labels1: Vec<String> = collect_merged(h1).await.iter().map(|p| p.item.item.label.clone()).collect();
+        let labels1: Vec<String> = collect_merged(h1)
+            .await
+            .iter()
+            .map(|p| p.item.item.label.clone())
+            .collect();
         assert_eq!(labels1, vec!["a1"]);
 
         // Append to b — merged store should emit a new snapshot.
@@ -1015,7 +1027,11 @@ mod tests {
             .await
             .expect("snapshot within timeout")
             .expect("snapshot stream not closed");
-        let labels2: Vec<String> = collect_merged(h2).await.iter().map(|p| p.item.item.label.clone()).collect();
+        let labels2: Vec<String> = collect_merged(h2)
+            .await
+            .iter()
+            .map(|p| p.item.item.label.clone())
+            .collect();
         assert_eq!(labels2, vec!["a1", "b1"]);
     }
 }

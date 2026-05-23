@@ -13,8 +13,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
-    HistoryError, ItemStream, Position, Positioned, Store, Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
+    ItemStream, Position, Positioned, Store, Timestamp,
 };
 
 type Predicate<Item> = Arc<dyn Fn(&Item) -> bool + Send + Sync>;
@@ -54,8 +54,7 @@ struct FilteredHistStoreBackend<Item, P: Position> {
 }
 
 #[async_trait::async_trait]
-impl<Item, P> HistStoreBackend<FilteredItem<Item>, P>
-    for FilteredHistStoreBackend<Item, P>
+impl<Item, P> HistStoreBackend<FilteredItem<Item>, P> for FilteredHistStoreBackend<Item, P>
 where
     Item: Clone + Send + Sync + 'static,
     P: Position,
@@ -112,11 +111,7 @@ where
     Item: Clone + Send + Sync + 'static,
     P: Position,
 {
-    fn iter(
-        &self,
-        start: P,
-        end: P,
-    ) -> ItemStream<FilteredItem<Item>, P> {
+    fn iter(&self, start: P, end: P) -> ItemStream<FilteredItem<Item>, P> {
         let pred = self.pred.clone();
         let mut skipped: Vec<Item> = Vec::new();
         Box::pin(self.upstream.iter(start, end).filter_map(move |result| {
@@ -147,10 +142,7 @@ where
     }
 }
 
-fn wrap_hist<Item, P>(
-    upstream: Hist<Item, P>,
-    pred: Predicate<Item>,
-) -> Hist<FilteredItem<Item>, P>
+fn wrap_hist<Item, P>(upstream: Hist<Item, P>, pred: Predicate<Item>) -> Hist<FilteredItem<Item>, P>
 where
     Item: Clone + Send + Sync + 'static,
     P: Position,
@@ -174,7 +166,9 @@ mod tests {
     use crate::combinators::tests_common::{collect, MockEvent, MockPos, MockSource};
 
     fn even(e: &MockEvent) -> bool {
-        e.0.parse::<u64>().map(|n| n.is_multiple_of(2)).unwrap_or(false)
+        e.0.parse::<u64>()
+            .map(|n| n.is_multiple_of(2))
+            .unwrap_or(false)
     }
 
     fn mk(i: u64) -> MockEvent {
@@ -199,19 +193,34 @@ mod tests {
         // First kept item is "2" — only "1" was skipped before it.
         assert_eq!(items[0].item.item.0, "2");
         assert_eq!(
-            items[0].item.skipped.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+            items[0]
+                .item
+                .skipped
+                .iter()
+                .map(|i| i.0.as_str())
+                .collect::<Vec<_>>(),
             vec!["1"]
         );
         // Second kept is "4" — "3" skipped in between.
         assert_eq!(items[1].item.item.0, "4");
         assert_eq!(
-            items[1].item.skipped.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+            items[1]
+                .item
+                .skipped
+                .iter()
+                .map(|i| i.0.as_str())
+                .collect::<Vec<_>>(),
             vec!["3"]
         );
         // Third kept is "6" — "5" skipped.
         assert_eq!(items[2].item.item.0, "6");
         assert_eq!(
-            items[2].item.skipped.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+            items[2]
+                .item
+                .skipped
+                .iter()
+                .map(|i| i.0.as_str())
+                .collect::<Vec<_>>(),
             vec!["5"]
         );
     }

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
-    HistoryError, ItemStream, Position, Positioned, Store, Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
+    ItemStream, Position, Positioned, Store, Timestamp,
 };
 
 /// Item emitted by a mapped history. Carries both the transformed value and
@@ -54,8 +54,7 @@ struct MappedHistStoreBackend<Src, Dst, P: Position> {
 }
 
 #[async_trait::async_trait]
-impl<Src, Dst, P> HistStoreBackend<MappedItem<Src, Dst>, P>
-    for MappedHistStoreBackend<Src, Dst, P>
+impl<Src, Dst, P> HistStoreBackend<MappedItem<Src, Dst>, P> for MappedHistStoreBackend<Src, Dst, P>
 where
     Src: Clone + Send + Sync + 'static,
     Dst: Send + Sync + 'static,
@@ -108,18 +107,13 @@ struct MappedHistBackend<Src, Dst, P: Position> {
     f: MapFn<Src, Dst>,
 }
 
-impl<Src, Dst, P> HistBackend<MappedItem<Src, Dst>, P>
-    for MappedHistBackend<Src, Dst, P>
+impl<Src, Dst, P> HistBackend<MappedItem<Src, Dst>, P> for MappedHistBackend<Src, Dst, P>
 where
     Src: Clone + Send + Sync + 'static,
     Dst: Send + Sync + 'static,
     P: Position,
 {
-    fn iter(
-        &self,
-        start: P,
-        end: P,
-    ) -> ItemStream<MappedItem<Src, Dst>, P> {
+    fn iter(&self, start: P, end: P) -> ItemStream<MappedItem<Src, Dst>, P> {
         let f = self.f.clone();
         Box::pin(self.upstream.iter(start, end).map(move |result| {
             result.map(|p| {

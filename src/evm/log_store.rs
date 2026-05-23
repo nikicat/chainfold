@@ -517,10 +517,7 @@ impl LogStore {
     /// Delete scanned ranges whose `end_block_hash` is in `reorged_blocks`.
     /// Call after [`Self::mark_reorged`] so gaps are recomputed for affected
     /// block ranges.
-    pub fn invalidate_reorged_ranges(
-        &self,
-        filter_hash: &[u8; 32],
-    ) -> Result<usize, CacheError> {
+    pub fn invalidate_reorged_ranges(&self, filter_hash: &[u8; 32]) -> Result<usize, CacheError> {
         let conn = self.conn.lock().unwrap();
         let deleted = conn.execute(
             "DELETE FROM scanned_ranges
@@ -959,8 +956,12 @@ mod tests {
     #[test]
     fn range_records_without_merging() {
         let store = LogStore::open_in_memory().unwrap();
-        store.record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A).unwrap();
-        store.record_scanned_range(&FH, 201, 300, &BLOCK_HASH_B).unwrap();
+        store
+            .record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A)
+            .unwrap();
+        store
+            .record_scanned_range(&FH, 201, 300, &BLOCK_HASH_B)
+            .unwrap();
         let ranges = store.get_scanned_ranges(&FH).unwrap();
         assert_eq!(ranges, vec![(100, 200), (201, 300)]);
     }
@@ -968,7 +969,9 @@ mod tests {
     #[test]
     fn range_reorged_end_block_excluded() {
         let store = LogStore::open_in_memory().unwrap();
-        store.record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A).unwrap();
+        store
+            .record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A)
+            .unwrap();
         store.mark_reorged(&[(BLOCK_HASH_A, 200)]).unwrap();
         assert!(store.get_scanned_ranges(&FH).unwrap().is_empty());
     }
@@ -976,8 +979,12 @@ mod tests {
     #[test]
     fn invalidate_reorged_ranges_deletes() {
         let store = LogStore::open_in_memory().unwrap();
-        store.record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A).unwrap();
-        store.record_scanned_range(&FH, 201, 300, &BLOCK_HASH_B).unwrap();
+        store
+            .record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A)
+            .unwrap();
+        store
+            .record_scanned_range(&FH, 201, 300, &BLOCK_HASH_B)
+            .unwrap();
         store.mark_reorged(&[(BLOCK_HASH_A, 200)]).unwrap();
         let deleted = store.invalidate_reorged_ranges(&FH).unwrap();
         assert_eq!(deleted, 1);
@@ -989,9 +996,15 @@ mod tests {
     #[test]
     fn compact_merges_finalized_ranges() {
         let store = LogStore::open_in_memory().unwrap();
-        store.record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A).unwrap();
-        store.record_scanned_range(&FH, 200, 299, &BLOCK_HASH_B).unwrap();
-        store.record_scanned_range(&FH, 300, 399, &BLOCK_HASH_C).unwrap();
+        store
+            .record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A)
+            .unwrap();
+        store
+            .record_scanned_range(&FH, 200, 299, &BLOCK_HASH_B)
+            .unwrap();
+        store
+            .record_scanned_range(&FH, 300, 399, &BLOCK_HASH_C)
+            .unwrap();
         store.compact_ranges(&FH, 399).unwrap();
         assert_eq!(store.get_scanned_ranges(&FH).unwrap(), vec![(100, 399)]);
     }
@@ -999,8 +1012,12 @@ mod tests {
     #[test]
     fn compact_preserves_end_block_hash_of_highest() {
         let store = LogStore::open_in_memory().unwrap();
-        store.record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A).unwrap();
-        store.record_scanned_range(&FH, 200, 299, &BLOCK_HASH_B).unwrap();
+        store
+            .record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A)
+            .unwrap();
+        store
+            .record_scanned_range(&FH, 200, 299, &BLOCK_HASH_B)
+            .unwrap();
         store.compact_ranges(&FH, 299).unwrap();
         // Mark the highest range's end hash reorged; should excise the merged range.
         store.mark_reorged(&[(BLOCK_HASH_B, 299)]).unwrap();
@@ -1010,8 +1027,12 @@ mod tests {
     #[test]
     fn compact_skips_reorged_ranges() {
         let store = LogStore::open_in_memory().unwrap();
-        store.record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A).unwrap();
-        store.record_scanned_range(&FH, 200, 299, &BLOCK_HASH_B).unwrap();
+        store
+            .record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A)
+            .unwrap();
+        store
+            .record_scanned_range(&FH, 200, 299, &BLOCK_HASH_B)
+            .unwrap();
         store.mark_reorged(&[(BLOCK_HASH_A, 199)]).unwrap();
         store.compact_ranges(&FH, 299).unwrap();
         // The reorged range is left alone (filtered out of visible ranges); the
@@ -1078,16 +1099,26 @@ mod tests {
         let addr = [0x42u8; 20];
         store.insert_erc20_metadata(&addr, 1, "A", "A", 18).unwrap();
         store.insert_erc20_metadata(&addr, 10, "B", "B", 6).unwrap();
-        assert_eq!(store.get_erc20_metadata(&addr, 1).unwrap().unwrap().name, "A");
-        assert_eq!(store.get_erc20_metadata(&addr, 10).unwrap().unwrap().name, "B");
+        assert_eq!(
+            store.get_erc20_metadata(&addr, 1).unwrap().unwrap().name,
+            "A"
+        );
+        assert_eq!(
+            store.get_erc20_metadata(&addr, 10).unwrap().unwrap().name,
+            "B"
+        );
     }
 
     #[test]
     fn erc20_metadata_upsert() {
         let store = LogStore::open_in_memory().unwrap();
         let addr = [0x42u8; 20];
-        store.insert_erc20_metadata(&addr, 1, "Old", "OLD", 18).unwrap();
-        store.insert_erc20_metadata(&addr, 1, "New", "NEW", 6).unwrap();
+        store
+            .insert_erc20_metadata(&addr, 1, "Old", "OLD", 18)
+            .unwrap();
+        store
+            .insert_erc20_metadata(&addr, 1, "New", "NEW", 6)
+            .unwrap();
         let m = store.get_erc20_metadata(&addr, 1).unwrap().unwrap();
         assert_eq!(m.name, "New");
         assert_eq!(m.symbol, "NEW");
@@ -1104,7 +1135,10 @@ mod tests {
         store
             .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1_000_000_u64))
             .unwrap();
-        let b = store.get_erc20_balance(1, &addr, &owner, 100).unwrap().unwrap();
+        let b = store
+            .get_erc20_balance(1, &addr, &owner, 100)
+            .unwrap()
+            .unwrap();
         assert_eq!(b, U256::from(1_000_000_u64));
     }
 
@@ -1120,11 +1154,17 @@ mod tests {
             .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
             .unwrap();
         assert_eq!(
-            store.get_erc20_balance(1, &addr, &owner, 100).unwrap().unwrap(),
+            store
+                .get_erc20_balance(1, &addr, &owner, 100)
+                .unwrap()
+                .unwrap(),
             U256::from(1u64)
         );
         assert_eq!(
-            store.get_erc20_balance(1, &addr, &owner, 200).unwrap().unwrap(),
+            store
+                .get_erc20_balance(1, &addr, &owner, 200)
+                .unwrap()
+                .unwrap(),
             U256::from(2u64)
         );
     }
@@ -1141,7 +1181,10 @@ mod tests {
             .insert_erc20_balance(1, &addr, &owner, 100, U256::from(2u64))
             .unwrap();
         assert_eq!(
-            store.get_erc20_balance(1, &addr, &owner, 100).unwrap().unwrap(),
+            store
+                .get_erc20_balance(1, &addr, &owner, 100)
+                .unwrap()
+                .unwrap(),
             U256::from(2u64)
         );
     }
@@ -1183,7 +1226,11 @@ mod tests {
     fn cleanup_reorged_before() {
         let store = LogStore::open_in_memory().unwrap();
         store
-            .mark_reorged(&[(BLOCK_HASH_A, 100), (BLOCK_HASH_B, 200), (BLOCK_HASH_C, 300)])
+            .mark_reorged(&[
+                (BLOCK_HASH_A, 100),
+                (BLOCK_HASH_B, 200),
+                (BLOCK_HASH_C, 300),
+            ])
             .unwrap();
         let deleted = store.cleanup_reorged_before(250).unwrap();
         assert_eq!(deleted, 2);

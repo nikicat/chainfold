@@ -30,8 +30,8 @@ use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Position};
 use chainfold::evm::{
-    apply_transfer, decode_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory,
-    LogStore, OwnedErc20, IN_KEY, OUT_KEY,
+    apply_transfer, decode_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogStore,
+    OwnedErc20, IN_KEY, OUT_KEY,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use chrono::NaiveDate;
@@ -39,7 +39,10 @@ use clap::Parser;
 use futures_util::StreamExt;
 
 #[derive(Parser)]
-#[command(name = "erc20_explorer", about = "Explore ERC20 transfers for an owner")]
+#[command(
+    name = "erc20_explorer",
+    about = "Explore ERC20 transfers for an owner"
+)]
 struct Args {
     #[arg(long, default_value = "https://eth.llamarpc.com")]
     rpc_url: String,
@@ -79,7 +82,9 @@ struct Args {
 
 fn parse_datetime(s: &str) -> Result<u64, String> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap()))
+        .or_else(|_| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+        })
         .map(|dt| dt.and_utc().timestamp() as u64)
         .map_err(|e| format!("invalid date: {e}"))
 }
@@ -87,7 +92,9 @@ fn parse_datetime(s: &str) -> Result<u64, String> {
 fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes.try_into().map_err(|_| "address must be 20 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "address must be 20 bytes".into())
 }
 
 async fn resolve_range<P: Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>(
@@ -102,7 +109,11 @@ async fn resolve_range<P: Provider<alloy::network::Ethereum> + Clone + Send + Sy
             let start = hs.time_pos(from_ts).await?;
             let end = hs.time_pos(to_ts).await?;
             println!("  Date range: {} → {}", from_str, to_str);
-            println!("  Estimated blocks: {} → {}", start.block + 1, end.block + 1);
+            println!(
+                "  Estimated blocks: {} → {}",
+                start.block + 1,
+                end.block + 1
+            );
             let end_inclusive = EvmPosition::new(end.block.saturating_add(1), u32::MAX);
             Ok((start, end_inclusive))
         }
@@ -276,11 +287,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
     for (addr, result) in addresses.iter().zip(meta_results) {
         let meta = result?;
-        println!("  {} ({}) — {} decimals", meta.symbol, meta.name, meta.decimals);
+        println!(
+            "  {} ({}) — {} decimals",
+            meta.symbol, meta.name, meta.decimals
+        );
         metadata.insert(*addr, meta);
     }
     let max_sym_width = metadata.values().map(|m| m.symbol.len()).max().unwrap_or(0);
-    let max_decimals = metadata.values().map(|m| m.decimals as usize).max().unwrap_or(0);
+    let max_decimals = metadata
+        .values()
+        .map(|m| m.decimals as usize)
+        .max()
+        .unwrap_or(0);
     println!();
 
     println!("  Owner:    0x{}", hex::encode(owner));

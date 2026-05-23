@@ -184,7 +184,16 @@ async fn map_composes_with_filter() {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].item.item, 20);
     assert_eq!(items[0].item.source.item.0, 2);
-    assert_eq!(items[0].item.source.skipped.iter().map(|i| i.0).collect::<Vec<_>>(), vec![1]);
+    assert_eq!(
+        items[0]
+            .item
+            .source
+            .skipped
+            .iter()
+            .map(|i| i.0)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
     assert_eq!(items[1].item.item, 40);
     assert_eq!(items[1].item.source.item.0, 4);
     assert_eq!(items[1].pos, MockPos(4));
@@ -225,7 +234,7 @@ async fn since_skips_mapper_on_pre_cut_items_full_pipeline() {
     let items = collect(since.next().await).await;
     let kept: Vec<u64> = items.iter().map(|p| p.item.item).collect();
     assert_eq!(kept, vec![8, 10, 12]); // x*2 for x in [4,5,6]
-    // Mapper only saw the post-cut items.
+                                       // Mapper only saw the post-cut items.
     assert_eq!(counter.load(Ordering::SeqCst), 3);
 }
 

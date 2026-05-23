@@ -4,7 +4,7 @@ pub mod events;
 use std::sync::Arc;
 
 use alloy::providers::Provider;
-use chainfold::evm::{LogStore, versioned_path, rpc_retry_layer};
+use chainfold::evm::{rpc_retry_layer, versioned_path, LogStore};
 
 use crate::cli::{EvmArgs, EvmCommand};
 use crate::config::Config;
@@ -43,7 +43,15 @@ pub async fn run(
         }
         EvmCommand::Events(events_args) => {
             events::run(
-                &provider, &cache, &db_path, config, args, events_args, chain_id, reverse, follow,
+                &provider,
+                &cache,
+                &db_path,
+                config,
+                args,
+                events_args,
+                chain_id,
+                reverse,
+                follow,
             )
             .await
         }

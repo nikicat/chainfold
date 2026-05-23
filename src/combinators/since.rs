@@ -26,8 +26,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistStore, HistStoreBackend, HistStream, HistoryError, Position,
-    Store, Timestamp,
+    AsyncDisposable, Hist, HistStore, HistStoreBackend, HistStream, HistoryError, Position, Store,
+    Timestamp,
 };
 
 /// Pre-split every snapshot emitted by `upstream` at `cut`. Items strictly
@@ -36,10 +36,7 @@ use crate::arch::{
 /// Use this when an expensive combinator sits between `since` and the
 /// source — it saves the wrapped combinator from processing items the
 /// caller will never see.
-pub fn since_hist_store<Item, P>(
-    upstream: HistStore<Item, P>,
-    cut: P,
-) -> HistStore<Item, P>
+pub fn since_hist_store<Item, P>(upstream: HistStore<Item, P>, cut: P) -> HistStore<Item, P>
 where
     Item: Send + Sync + 'static,
     P: Position,
@@ -75,10 +72,7 @@ where
         self.upstream.next().await.split(self.cut.clone()).1
     }
 
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<Item, P>) + Send + Sync>,
-    ) -> AsyncDisposable {
+    fn subscribe(&self, cb: Box<dyn Fn(Hist<Item, P>) + Send + Sync>) -> AsyncDisposable {
         let cut = self.cut.clone();
         self.upstream.subscribe(Box::new(move |hist| {
             cb(hist.split(cut.clone()).1);
@@ -156,10 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn since_cut_below_start_no_op() {
-        let src = MockSource::new(vec![
-            MockEvent("a".into()),
-            MockEvent("b".into()),
-        ]);
+        let src = MockSource::new(vec![MockEvent("a".into()), MockEvent("b".into())]);
         let since = since_hist_store(src.hist_store(), MockPos(0));
         let items = collect(since.next().await).await;
         assert_eq!(items.len(), 2);
@@ -167,10 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn since_cut_above_end_empty() {
-        let src = MockSource::new(vec![
-            MockEvent("a".into()),
-            MockEvent("b".into()),
-        ]);
+        let src = MockSource::new(vec![MockEvent("a".into()), MockEvent("b".into())]);
         let since = since_hist_store(src.hist_store(), MockPos(99));
         let hist = since.next().await;
         assert!(hist.is_empty());

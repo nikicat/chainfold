@@ -132,10 +132,7 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
         Hist::new(backend, MockPos(0), self.latest_store.get())
     }
 
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>,
-    ) -> AsyncDisposable {
+    fn subscribe(&self, cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>) -> AsyncDisposable {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -173,9 +170,8 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
 // Bridge-id match fn
 // ============================================================
 
-fn bridge_match_fn() -> Arc<
-    dyn chainfold::matcher::MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>,
-> {
+fn bridge_match_fn(
+) -> Arc<dyn chainfold::matcher::MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, MockPos>> {
     match_fn(|input: MatchInput<Ev, Ev, MockPos, MockPos>| {
         let mut dst_by_id: std::collections::HashMap<u64, Vec<Ev>> =
             std::collections::HashMap::new();
@@ -366,10 +362,7 @@ async fn get_history_returns_full_window_regardless_of_persisted_anchors() {
     let store = Arc::new(InMemoryAnchorStore::new());
     let key = "matcher-test";
     store
-        .set(
-            key,
-            MatcherAnchors::new(MockPos(99), MockPos(99)).marshal(),
-        )
+        .set(key, MatcherAnchors::new(MockPos(99), MockPos(99)).marshal())
         .await
         .unwrap();
     let m: Matcher<Ev, Ev, MockPos, MockPos> = AnchoredMatcher::new(

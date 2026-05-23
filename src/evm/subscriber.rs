@@ -43,7 +43,9 @@ pub enum SubscribeTransport {
 impl SubscribeTransport {
     /// Convenience: `Poll { interval: 2s }`.
     pub fn poll_default() -> Self {
-        Self::Poll { interval: Duration::from_secs(2) }
+        Self::Poll {
+            interval: Duration::from_secs(2),
+        }
     }
 }
 
@@ -99,7 +101,10 @@ impl EvmLogSubscriber {
             callbacks,
             cancel.clone(),
         ));
-        Self { cancel, handle: Some(handle) }
+        Self {
+            cancel,
+            handle: Some(handle),
+        }
     }
 
     /// Cancel the loop. Idempotent. After return, the background task is
@@ -339,9 +344,7 @@ where
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await
         .map_err(|e| HistoryError::internal(format!("get_block_by_number({number}): {e}")))?;
-    let block = block.ok_or_else(|| {
-        HistoryError::internal(format!("block {number} not found"))
-    })?;
+    let block = block.ok_or_else(|| HistoryError::internal(format!("block {number} not found")))?;
     let hash: B256 = block.header.hash;
     Ok(hash.0)
 }
@@ -377,7 +380,9 @@ mod tests {
         let sub = EvmLogSubscriber::start(
             provider,
             Filter::new(),
-            SubscribeTransport::Poll { interval: Duration::from_millis(10) },
+            SubscribeTransport::Poll {
+                interval: Duration::from_millis(10),
+            },
             0,
             noop_callbacks(),
         );
@@ -387,4 +392,3 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
-

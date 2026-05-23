@@ -28,9 +28,7 @@ async fn build_history(
     db_path: &std::path::Path,
     endpoint: alloy::transports::http::reqwest::Url,
     chunk_size: u64,
-) -> Arc<
-    EvmLogHistory<impl Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>,
-> {
+) -> Arc<EvmLogHistory<impl Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>> {
     let store = Arc::new(LogStore::open(db_path.to_str().unwrap()).expect("open store"));
     let provider = ProviderBuilder::new().connect_http(endpoint);
     EvmLogHistory::with_options(
@@ -87,7 +85,10 @@ async fn warm_store_then_drop_index_then_reopen() {
     let cold_start = Instant::now();
     let cold_count = walk_forward(&history_cold, from, to).await;
     let cold_elapsed = cold_start.elapsed();
-    assert!(cold_count > 0, "expected USDC transfers in the sweep window");
+    assert!(
+        cold_count > 0,
+        "expected USDC transfers in the sweep window"
+    );
     drop(history_cold);
 
     let history_warm = build_history(&db_path, endpoint, chunk_size).await;
@@ -95,7 +96,10 @@ async fn warm_store_then_drop_index_then_reopen() {
     let warm_count = walk_forward(&history_warm, from, to).await;
     let warm_elapsed = warm_start.elapsed();
 
-    assert_eq!(cold_count, warm_count, "warm walk should yield identical event count");
+    assert_eq!(
+        cold_count, warm_count,
+        "warm walk should yield identical event count"
+    );
 
     assert!(
         cold_elapsed.as_micros() > warm_elapsed.as_micros() * 5,

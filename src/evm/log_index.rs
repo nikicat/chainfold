@@ -364,10 +364,8 @@ impl LogIndex {
             let item = log_ref_from(log).expect("page items must have block_hash");
             let item_pos = item.pos();
 
-            let strictly_past_tail =
-                tail_end.map(|t| item_pos > t).unwrap_or(true);
-            let strictly_before_tail =
-                tail_end.map(|t| item_pos < t).unwrap_or(false);
+            let strictly_past_tail = tail_end.map(|t| item_pos > t).unwrap_or(true);
+            let strictly_before_tail = tail_end.map(|t| item_pos < t).unwrap_or(false);
             // Equal-to-tail items go through addPage's "no-op for prev tracking"
             // branch — the reference keeps them out of insertLateItem because
             // a range already ends there.
@@ -427,16 +425,9 @@ impl LogIndex {
     ///
     /// A range with a live `fetch` notify is left alone — the in-flight
     /// fetcher will deliver authoritative state.
-    fn insert_late_item(
-        tree: &mut BTreeMap<BlockPos, Range>,
-        item: LogRef,
-        range_start: BlockPos,
-    ) {
+    fn insert_late_item(tree: &mut BTreeMap<BlockPos, Range>, item: LogRef, range_start: BlockPos) {
         let item_pos = item.pos();
-        let existing_key = tree
-            .range(item_pos..)
-            .next()
-            .map(|(k, _)| *k);
+        let existing_key = tree.range(item_pos..).next().map(|(k, _)| *k);
         let existing = existing_key.and_then(|k| tree.get(&k));
 
         // Case 1: no covering range → new range in the gap.
@@ -469,10 +460,7 @@ impl LogIndex {
         if existing_start <= item_pos {
             // Case 4: split around item.pos.
             tree.remove(&existing_end);
-            tree.insert(
-                item_pos,
-                Range::filled(existing_start, item_pos, item),
-            );
+            tree.insert(item_pos, Range::filled(existing_start, item_pos, item));
             // Right half preserves the original tail item.
             let right = if let Some(orig) = existing_filled_item {
                 Range::filled(item_pos, existing_end, orig)
@@ -578,11 +566,7 @@ impl LogIndex {
     }
 
     /// First cached log strictly after `(block, log_index)`.
-    pub fn first_after(
-        &self,
-        block: u64,
-        log_index: u32,
-    ) -> Result<Option<Log>, HistoryError> {
+    pub fn first_after(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
         self.cached_navigate(NavDir::ForwardExclusive, block, log_index)
     }
 
@@ -596,11 +580,7 @@ impl LogIndex {
     }
 
     /// Last cached log strictly before `(block, log_index)`.
-    pub fn last_before(
-        &self,
-        block: u64,
-        log_index: u32,
-    ) -> Result<Option<Log>, HistoryError> {
+    pub fn last_before(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
         self.cached_navigate(NavDir::BackwardExclusive, block, log_index)
     }
 
@@ -747,11 +727,7 @@ impl LogIndex {
     /// the first arrival at a gap installs the notify, fetches, drops the
     /// notify, and notifies waiters; later arrivals see the notify, wait
     /// on it, and re-walk.
-    pub async fn ensure_cached(
-        &self,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<(), HistoryError> {
+    pub async fn ensure_cached(&self, from_block: u64, to_block: u64) -> Result<(), HistoryError> {
         self.ensure_window_loaded(from_block, to_block)?;
 
         let from_pos = BlockPos::before_block(from_block);
@@ -1226,10 +1202,13 @@ mod tests {
         assert!(BlockPos::Bottom < BlockPos::at(0, 0));
         assert!(BlockPos::Bottom < BlockPos::end_of_block(0));
         assert!(BlockPos::before_block(0) == BlockPos::Bottom);
-        assert!(BlockPos::before_block(1) == BlockPos::At {
-            block: 0,
-            log_index: u32::MAX,
-        });
+        assert!(
+            BlockPos::before_block(1)
+                == BlockPos::At {
+                    block: 0,
+                    log_index: u32::MAX,
+                }
+        );
     }
 
     // -- insert_page basic shapes --
@@ -1395,9 +1374,7 @@ mod tests {
         // Pre-populate the store as if a previous process had scanned [100, 200]
         // with one log at (150, 0).
         store.insert_logs(&FH, &[mk_log(150, 0, HASH_A)]).unwrap();
-        store
-            .record_scanned_range(&FH, 100, 200, &HASH_A)
-            .unwrap();
+        store.record_scanned_range(&FH, 100, 200, &HASH_A).unwrap();
 
         let idx = LogIndex::with_chunk_size(store, FH, never_fetch(), 1000);
         assert_eq!(idx.len(), 0, "tree starts empty");
@@ -1607,8 +1584,7 @@ mod tests {
         for _ in 0..5 {
             let idx = idx.clone();
             handles.push(tokio::spawn(async move {
-                let mut s =
-                    idx.items(BlockPos::before_block(100), BlockPos::end_of_block(200));
+                let mut s = idx.items(BlockPos::before_block(100), BlockPos::end_of_block(200));
                 s.next().await.map(|r| r.map(|log| log.block_number))
             }));
         }

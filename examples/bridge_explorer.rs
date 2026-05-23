@@ -29,7 +29,10 @@ use clap::Parser;
 use futures_util::StreamExt;
 
 #[derive(Parser)]
-#[command(name = "bridge_explorer", about = "Merge EVM log streams across chains")]
+#[command(
+    name = "bridge_explorer",
+    about = "Merge EVM log streams across chains"
+)]
 struct Args {
     /// Symbolic chain key, e.g. "eth", "arb". Repeat once per --rpc-url/--address.
     #[arg(long)]
@@ -66,13 +69,17 @@ struct Args {
 fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes.try_into().map_err(|_| "address must be 20 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "address must be 20 bytes".into())
 }
 
 fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
-    bytes.try_into().map_err(|_| "value must be 32 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "value must be 32 bytes".into())
 }
 
 fn cmp_by_time(a: &MergedItem<EvmEvent>, b: &MergedItem<EvmEvent>) -> Ordering {
@@ -154,7 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut start_positions = BTreeMap::new();
     for key in &args.chain {
         let tip = merged.latest().get();
-        let key_bytes = tip.get(key).expect("source must contribute to tip").to_vec();
+        let key_bytes = tip
+            .get(key)
+            .expect("source must contribute to tip")
+            .to_vec();
         let pos = EvmPosition::unmarshal(&key_bytes)
             .ok_or_else(|| format!("could not unmarshal position for {key}"))?;
         let from = EvmPosition::new(pos.block.saturating_sub(args.num_blocks), u32::MAX);

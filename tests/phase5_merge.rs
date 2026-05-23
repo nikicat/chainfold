@@ -30,7 +30,11 @@ impl Position for MockPosU64 {
         self.0.to_le_bytes().to_vec()
     }
     fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        bytes.try_into().ok().map(u64::from_le_bytes).map(MockPosU64)
+        bytes
+            .try_into()
+            .ok()
+            .map(u64::from_le_bytes)
+            .map(MockPosU64)
     }
 }
 
@@ -47,7 +51,9 @@ impl Position for MockPosNamed {
         self.0.as_bytes().to_vec()
     }
     fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        std::str::from_utf8(bytes).ok().map(|s| MockPosNamed(s.to_owned()))
+        std::str::from_utf8(bytes)
+            .ok()
+            .map(|s| MockPosNamed(s.to_owned()))
     }
 }
 
@@ -62,7 +68,10 @@ struct CommonEvent {
 }
 
 fn ev(time: u64, label: &str) -> CommonEvent {
-    CommonEvent { time, label: label.into() }
+    CommonEvent {
+        time,
+        label: label.into(),
+    }
 }
 
 fn cmp_by_time(a: &MergedItem<CommonEvent>, b: &MergedItem<CommonEvent>) -> Ordering {
@@ -117,9 +126,7 @@ impl<P: Position + 'static> Source<P> {
     }
 
     fn hist_store(self: &Arc<Self>) -> HistStore<CommonEvent, P> {
-        HistStore::new(
-            Arc::clone(self) as Arc<dyn HistStoreBackend<CommonEvent, P>>,
-        )
+        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<CommonEvent, P>>)
     }
 }
 
@@ -141,9 +148,9 @@ impl<P: Position + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
         Box::pin(futures_util::stream::poll_fn(move |cx| {
-            Pin::new(&mut sub).poll_next(cx).map(|tip_opt| {
-                tip_opt.map(|tip| Hist::new(backend.clone(), P::default(), tip))
-            })
+            Pin::new(&mut sub)
+                .poll_next(cx)
+                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), P::default(), tip)))
         }))
     }
 
@@ -152,10 +159,7 @@ impl<P: Position + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
         Hist::new(backend, P::default(), self.latest_store.get())
     }
 
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<CommonEvent, P>) + Send + Sync>,
-    ) -> AsyncDisposable {
+    fn subscribe(&self, cb: Box<dyn Fn(Hist<CommonEvent, P>) + Send + Sync>) -> AsyncDisposable {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
         let mut sub = self.latest_store.subscribe();
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -277,7 +281,10 @@ async fn merge_resumes_from_marshalled_anchor() {
 
     let (_, tail) = hist.split(restored);
     let items_tail = collect_merged(tail).await;
-    let labels: Vec<&str> = items_tail.iter().map(|p| p.item.item.label.as_str()).collect();
+    let labels: Vec<&str> = items_tail
+        .iter()
+        .map(|p| p.item.item.label.as_str())
+        .collect();
     assert_eq!(labels, vec!["a2", "b2", "a3"]);
 }
 
@@ -429,5 +436,8 @@ async fn merge_time_pos_aggregates_per_source() {
     // Both source stubs return P::default() — verify marshalled bytes
     // match each source's default.
     assert_eq!(tp.get("alpha"), Some(&MockPosU64::default().marshal()[..]));
-    assert_eq!(tp.get("named"), Some(&MockPosNamed::default().marshal()[..]));
+    assert_eq!(
+        tp.get("named"),
+        Some(&MockPosNamed::default().marshal()[..])
+    );
 }

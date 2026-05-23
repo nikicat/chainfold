@@ -85,9 +85,7 @@ impl HistoryError {
 /// and the trait does not provide source identity — that concern lives on
 /// [`HistStore`]. Heterogeneous merge wraps per-source positions in a keyed
 /// [`crate::merge::MergedPos`] and never compares them across sources.
-pub trait Position:
-    Clone + Default + Eq + Ord + std::fmt::Debug + Send + Sync + 'static
-{
+pub trait Position: Clone + Default + Eq + Ord + std::fmt::Debug + Send + Sync + 'static {
     /// Serialize for persistence. Reconstruct with [`unmarshal`](Self::unmarshal).
     fn marshal(&self) -> Vec<u8>;
 
@@ -131,7 +129,9 @@ pub struct Store<T: Clone + Send + Sync> {
 
 impl<T: Clone + Send + Sync> Clone for Store<T> {
     fn clone(&self) -> Self {
-        Self { rx: self.rx.clone() }
+        Self {
+            rx: self.rx.clone(),
+        }
     }
 }
 
@@ -226,7 +226,11 @@ impl<T, P: Position> Clone for Hist<T, P> {
 impl<T: Send + Sync + 'static, P: Position> Hist<T, P> {
     pub fn new(backend: Arc<dyn HistBackend<T, P>>, start: P, end: P) -> Self {
         debug_assert!(start <= end, "Hist::new: start must be <= end");
-        Self { backend, start, end }
+        Self {
+            backend,
+            start,
+            end,
+        }
     }
 
     /// Exclusive lower bound — items in this Hist are at positions `> start`.
@@ -311,7 +315,9 @@ pub struct HistStore<T, P: Position> {
 
 impl<T, P: Position> Clone for HistStore<T, P> {
     fn clone(&self) -> Self {
-        Self { backend: self.backend.clone() }
+        Self {
+            backend: self.backend.clone(),
+        }
     }
 }
 
@@ -333,10 +339,7 @@ impl<T: Send + Sync + 'static, P: Position> HistStore<T, P> {
 
     /// Push-based variant of [`snapshots`](Self::snapshots) — invokes `cb`
     /// with each new snapshot. Drop the returned handle to cancel.
-    pub fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>,
-    ) -> AsyncDisposable {
+    pub fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable {
         self.backend.subscribe(cb)
     }
 
@@ -387,9 +390,7 @@ pub trait HistBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
 
 /// Backing implementation for [`HistStore`]. Implemented per source.
 #[async_trait::async_trait]
-pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>:
-    Send + Sync
-{
+pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// Yield a fresh [`Hist`] each time the source's tip advances; first
     /// yield is the current snapshot.
     fn snapshots(&self) -> HistStream<T, P>;
@@ -398,10 +399,7 @@ pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>:
     async fn next(&self) -> Hist<T, P>;
 
     /// Push-based variant of [`snapshots`](Self::snapshots).
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>,
-    ) -> AsyncDisposable;
+    fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable;
 
     /// Estimate a position at a wall-clock time.
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;
@@ -494,7 +492,9 @@ where
             return Ok((item, result));
         }
     }
-    Err(HistoryError::internal("act_and_wait: stream ended without match"))
+    Err(HistoryError::internal(
+        "act_and_wait: stream ended without match",
+    ))
 }
 
 // ============================================================
@@ -547,7 +547,10 @@ pub mod evm {
 
         /// Lower-bound sentinel: strictly less than every real log position.
         pub const fn earliest() -> Self {
-            Self { block: 0, log_index: 0 }
+            Self {
+                block: 0,
+                log_index: 0,
+            }
         }
     }
 
@@ -581,7 +584,10 @@ pub mod evm {
 
     impl EvmEvent {
         pub fn position(&self) -> EvmPosition {
-            EvmPosition { block: self.block_number, log_index: self.log_index }
+            EvmPosition {
+                block: self.block_number,
+                log_index: self.log_index,
+            }
         }
     }
 

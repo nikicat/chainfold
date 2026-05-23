@@ -36,7 +36,10 @@ use clap::{Parser, ValueEnum};
 use futures_util::StreamExt;
 
 #[derive(Parser)]
-#[command(name = "bridge_matcher", about = "Pair EVM log events across two chains")]
+#[command(
+    name = "bridge_matcher",
+    about = "Pair EVM log events across two chains"
+)]
 struct Args {
     /// RPC URL for the source chain.
     #[arg(long)]
@@ -102,13 +105,17 @@ enum MatchOn {
 fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes.try_into().map_err(|_| "address must be 20 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "address must be 20 bytes".into())
 }
 
 fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
-    bytes.try_into().map_err(|_| "value must be 32 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "value must be 32 bytes".into())
 }
 
 fn extract_key(e: &EvmEvent, on: MatchOn) -> Option<Vec<u8>> {
@@ -131,40 +138,42 @@ fn make_match_fn(
         EvmPosition,
     >,
 > {
-    match_fn(move |input: MatchInput<EvmEvent, EvmEvent, EvmPosition, EvmPosition>| {
-        let mut dst_by_key: std::collections::HashMap<Vec<u8>, Vec<EvmEvent>> =
-            std::collections::HashMap::new();
-        for d in &input.dst_items {
-            if let Some(k) = extract_key(&d.item, on) {
-                dst_by_key.entry(k).or_default().push(d.item.clone());
-            }
-        }
-        let mut matched = Vec::new();
-        let mut pending = Vec::new();
-        for s in &input.src_items {
-            let Some(key) = extract_key(&s.item, on) else {
-                pending.push(s.item.clone());
-                continue;
-            };
-            if let Some(bucket) = dst_by_key.get_mut(&key) {
-                if !bucket.is_empty() {
-                    let d = bucket.remove(0);
-                    matched.push(Match {
-                        src: s.item.clone(),
-                        dst: d,
-                    });
-                    continue;
+    match_fn(
+        move |input: MatchInput<EvmEvent, EvmEvent, EvmPosition, EvmPosition>| {
+            let mut dst_by_key: std::collections::HashMap<Vec<u8>, Vec<EvmEvent>> =
+                std::collections::HashMap::new();
+            for d in &input.dst_items {
+                if let Some(k) = extract_key(&d.item, on) {
+                    dst_by_key.entry(k).or_default().push(d.item.clone());
                 }
             }
-            pending.push(s.item.clone());
-        }
-        let orphans: Vec<EvmEvent> = dst_by_key.into_values().flatten().collect();
-        Ok(MatchOutput {
-            matched,
-            pending,
-            orphans,
-        })
-    })
+            let mut matched = Vec::new();
+            let mut pending = Vec::new();
+            for s in &input.src_items {
+                let Some(key) = extract_key(&s.item, on) else {
+                    pending.push(s.item.clone());
+                    continue;
+                };
+                if let Some(bucket) = dst_by_key.get_mut(&key) {
+                    if !bucket.is_empty() {
+                        let d = bucket.remove(0);
+                        matched.push(Match {
+                            src: s.item.clone(),
+                            dst: d,
+                        });
+                        continue;
+                    }
+                }
+                pending.push(s.item.clone());
+            }
+            let orphans: Vec<EvmEvent> = dst_by_key.into_values().flatten().collect();
+            Ok(MatchOutput {
+                matched,
+                pending,
+                orphans,
+            })
+        },
+    )
 }
 
 async fn open_history(
@@ -253,8 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = std::path::Path::new(&args.anchor_db).parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let anchor_store: Arc<dyn AnchorStore> =
-        Arc::new(SqliteAnchorStore::open(&args.anchor_db)?);
+    let anchor_store: Arc<dyn AnchorStore> = Arc::new(SqliteAnchorStore::open(&args.anchor_db)?);
     let m: Arc<Matcher<EvmEvent, EvmEvent, EvmPosition, EvmPosition>> =
         Arc::new(AnchoredMatcher::new(
             src_history.hist_store(),

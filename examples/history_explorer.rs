@@ -16,14 +16,17 @@
 use std::sync::Arc;
 
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::arch::{Hist, HistStore, Positioned, watch_hist};
+use chainfold::arch::{watch_hist, Hist, HistStore, Positioned};
 use chainfold::evm::{EvmLogHistory, LogStore};
 use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
 
 #[derive(Parser)]
-#[command(name = "history_explorer", about = "Explore EVM log history via chainfold")]
+#[command(
+    name = "history_explorer",
+    about = "Explore EVM log history via chainfold"
+)]
 struct Args {
     #[arg(long, default_value = "https://eth.llamarpc.com")]
     rpc_url: String,
@@ -68,12 +71,16 @@ struct Args {
 fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes.try_into().map_err(|_| "address must be 20 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "address must be 20 bytes".into())
 }
 
 fn parse_datetime(s: &str) -> Result<u64, String> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap()))
+        .or_else(|_| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+        })
         .map(|dt| dt.and_utc().timestamp() as u64)
         .map_err(|e| format!("invalid date: {e}"))
 }
@@ -81,7 +88,9 @@ fn parse_datetime(s: &str) -> Result<u64, String> {
 fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
-    bytes.try_into().map_err(|_| "value must be 32 bytes".into())
+    bytes
+        .try_into()
+        .map_err(|_| "value must be 32 bytes".into())
 }
 
 fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
@@ -171,7 +180,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Topic0:   {}", t);
     }
 
-    let backend = EvmLogHistory::with_options(provider, store, address, topics, args.chunk_size, 12).await?;
+    let backend =
+        EvmLogHistory::with_options(provider, store, address, topics, args.chunk_size, 12).await?;
     let hist_store = backend.hist_store();
 
     let chain_id = backend.chain_id();
@@ -186,7 +196,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::time::Instant;
 
         async fn walk_window(
-            backend: &Arc<EvmLogHistory<impl alloy::providers::Provider<alloy::network::Ethereum> + Clone + Send + Sync + 'static>>,
+            backend: &Arc<
+                EvmLogHistory<
+                    impl alloy::providers::Provider<alloy::network::Ethereum>
+                        + Clone
+                        + Send
+                        + Sync
+                        + 'static,
+                >,
+            >,
             start: EvmPosition,
             end: EvmPosition,
         ) -> Result<usize, chainfold::arch::HistoryError> {
@@ -217,7 +235,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .http(url2);
         let provider2 = alloy::providers::ProviderBuilder::new().connect_client(client2);
         let backend2 =
-            EvmLogHistory::with_options(provider2, store2, address, topics, args.chunk_size, 12).await?;
+            EvmLogHistory::with_options(provider2, store2, address, topics, args.chunk_size, 12)
+                .await?;
         let t1 = Instant::now();
         let warm_n = walk_window(&backend2, start, end).await?;
         let warm_ms = t1.elapsed().as_secs_f64() * 1000.0;
@@ -228,7 +247,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let hot_n = walk_window(&backend2, start, end).await?;
         let hot_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        println!("--measure summary over {} blocks:", end.block - start.block + 1);
+        println!(
+            "--measure summary over {} blocks:",
+            end.block - start.block + 1
+        );
         println!("  cold  {cold_n:>6} events  {cold_ms:>10.2} ms  (RPC + SQLite + BTree)");
         println!("  warm  {warm_n:>6} events  {warm_ms:>10.2} ms  (SQLite -> fresh BTree)");
         println!("  hot   {hot_n:>6} events  {hot_ms:>10.2} ms  (warm BTree only)");

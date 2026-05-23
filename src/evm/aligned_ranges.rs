@@ -43,7 +43,11 @@ pub fn aligned_block_ranges(
         } else {
             (end, false)
         };
-        let item = AlignedRange { from, to, is_aligned };
+        let item = AlignedRange {
+            from,
+            to,
+            is_aligned,
+        };
         from = from.saturating_add(batch_size);
         Some(item)
     })

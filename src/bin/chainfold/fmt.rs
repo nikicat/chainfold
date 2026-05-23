@@ -89,7 +89,12 @@ pub fn print_transfer(item: &Positioned<EvmEvent, EvmPosition>, index: usize, ct
         };
         let direction = if &t.to == ctx.owner { " IN" } else { "OUT" };
         let counterparty = if &t.to == ctx.owner { &t.from } else { &t.to };
-        let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, ctx.max_decimals);
+        let amount = format_amount(
+            t.amount,
+            meta.decimals,
+            AMOUNT_WHOLE_WIDTH,
+            ctx.max_decimals,
+        );
         let sym = format!("{:<width$}", meta.symbol, width = ctx.max_sym_width);
 
         println!(
@@ -120,8 +125,18 @@ pub fn print_balance(
         };
         let direction = if &t.to == ctx.owner { " IN" } else { "OUT" };
         let counterparty = if &t.to == ctx.owner { &t.from } else { &t.to };
-        let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, ctx.max_decimals);
-        let balance_str = format_amount(balance, meta.decimals, BALANCE_WHOLE_WIDTH, ctx.max_decimals);
+        let amount = format_amount(
+            t.amount,
+            meta.decimals,
+            AMOUNT_WHOLE_WIDTH,
+            ctx.max_decimals,
+        );
+        let balance_str = format_amount(
+            balance,
+            meta.decimals,
+            BALANCE_WHOLE_WIDTH,
+            ctx.max_decimals,
+        );
         let sym = format!("{:<width$}", meta.symbol, width = ctx.max_sym_width);
 
         println!(

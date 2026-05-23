@@ -175,12 +175,13 @@ async fn fetch_metadata_batch<P: Provider<Ethereum>>(
         .map_err(|_| decode_err("name", &address, &name_bytes))?;
     let symbol = decode_string_or_bytes32(&symbol_bytes)
         .map_err(|_| decode_err("symbol", &address, &symbol_bytes))?;
-    let decimals = decimalsCall::abi_decode_returns(&decimals_bytes)
-        .map_err(|e| HistoryError::internal(format!(
+    let decimals = decimalsCall::abi_decode_returns(&decimals_bytes).map_err(|e| {
+        HistoryError::internal(format!(
             "decimals() decode for 0x{}: {e} (raw: 0x{})",
             hex::encode(address),
             hex::encode(&decimals_bytes),
-        )))?;
+        ))
+    })?;
 
     tracing::debug!(%addr, %name, %symbol, decimals, "batch success");
     Ok(Erc20Metadata {
@@ -361,7 +362,10 @@ mod tests {
         let owner = [0x01u8; 20];
         let other = [0x02u8; 20];
         let event = make_transfer_event(other, owner, U256::from(100));
-        assert_eq!(apply_transfer(owner, U256::from(50), &event), U256::from(150));
+        assert_eq!(
+            apply_transfer(owner, U256::from(50), &event),
+            U256::from(150)
+        );
     }
 
     #[test]
@@ -369,7 +373,10 @@ mod tests {
         let owner = [0x01u8; 20];
         let other = [0x02u8; 20];
         let event = make_transfer_event(owner, other, U256::from(30));
-        assert_eq!(apply_transfer(owner, U256::from(50), &event), U256::from(20));
+        assert_eq!(
+            apply_transfer(owner, U256::from(50), &event),
+            U256::from(20)
+        );
     }
 
     #[test]
@@ -393,7 +400,10 @@ mod tests {
             topics: vec![[0xFF; 32]],
             data: vec![],
         };
-        assert_eq!(apply_transfer(owner, U256::from(50), &event), U256::from(50));
+        assert_eq!(
+            apply_transfer(owner, U256::from(50), &event),
+            U256::from(50)
+        );
     }
 
     #[test]
@@ -402,7 +412,10 @@ mod tests {
         let other_a = [0x02u8; 20];
         let other_b = [0x03u8; 20];
         let event = make_transfer_event(other_a, other_b, U256::from(100));
-        assert_eq!(apply_transfer(owner, U256::from(50), &event), U256::from(50));
+        assert_eq!(
+            apply_transfer(owner, U256::from(50), &event),
+            U256::from(50)
+        );
     }
 
     #[test]

@@ -111,16 +111,9 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     );
 
     // Phase B — same range via OwnedErc20.
-    let owned = OwnedErc20::with_options(
-        provider,
-        store,
-        owner,
-        USDC.0 .0,
-        10,
-        12,
-    )
-    .await
-    .expect("OwnedErc20");
+    let owned = OwnedErc20::with_options(provider, store, owner, USDC.0 .0, 10, 12)
+        .await
+        .expect("OwnedErc20");
     owned.poll_tips().await.expect("poll_tips");
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
@@ -139,10 +132,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
         let topic2 = y.item.topics.get(2).copied();
         let is_from = topic1 == Some(owner_padded);
         let is_to = topic2 == Some(owner_padded);
-        assert!(
-            is_from || is_to,
-            "yielded event must involve the owner"
-        );
+        assert!(is_from || is_to, "yielded event must involve the owner");
         // source_key correctness:
         //   "out" only if topic1 == owner.
         //   "in"  only if topic2 == owner.

@@ -158,7 +158,9 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
 }
 
 async fn collect(hist: Hist<MockEvent, MockPos>) -> Vec<Positioned<MockEvent, MockPos>> {
-    futures_util::TryStreamExt::try_collect(hist.iter()).await.unwrap()
+    futures_util::TryStreamExt::try_collect(hist.iter())
+        .await
+        .unwrap()
 }
 
 // ============================================================
@@ -331,6 +333,12 @@ async fn forward_walk_multiple_snapshots_no_duplicates() {
     let (_, tail) = h2.split(anchor);
     let items2 = collect(tail).await;
 
-    assert_eq!(items1.iter().map(|p| p.item.0.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
-    assert_eq!(items2.iter().map(|p| p.item.0.as_str()).collect::<Vec<_>>(), vec!["c", "d"]);
+    assert_eq!(
+        items1.iter().map(|p| p.item.0.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        items2.iter().map(|p| p.item.0.as_str()).collect::<Vec<_>>(),
+        vec!["c", "d"]
+    );
 }

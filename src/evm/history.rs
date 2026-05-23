@@ -36,14 +36,12 @@ use futures_util::StreamExt;
 
 use crate::arch::evm::{EvmEvent, EvmPosition};
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
-    HistoryError, ItemStream, Positioned, Store, Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
+    ItemStream, Positioned, Store, Timestamp,
 };
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::log_store::{compute_filter_hash, BlockHeader, LogStore};
-use crate::evm::subscriber::{
-    EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks,
-};
+use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
 
 /// Default chunk size for `eth_getLogs` calls (in blocks).
 const DEFAULT_CHUNK_SIZE: u64 = 1000;
@@ -122,8 +120,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             .get_block_number()
             .await
             .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))?;
-        let anchor_timestamp =
-            ensure_block_header_via(&provider, &store, anchor_block).await?.timestamp;
+        let anchor_timestamp = ensure_block_header_via(&provider, &store, anchor_block)
+            .await?
+            .timestamp;
 
         let earliest = EvmPosition::earliest();
         let (latest_tx, latest_rx) = tokio::sync::watch::channel(earliest);
@@ -182,9 +181,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     /// Wrap this history as a public [`HistStore`].
-    pub fn hist_store(
-        self: &Arc<Self>,
-    ) -> HistStore<EvmEvent, EvmPosition> {
+    pub fn hist_store(self: &Arc<Self>) -> HistStore<EvmEvent, EvmPosition> {
         HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<_, _>>)
     }
 
@@ -284,8 +281,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
                 if let Err(e) = history.gap_fill_after_reconnect(last_tip).await {
                     tracing::warn!(last_tip, error = %e, "reconnect gap-fill");
                 }
-            })
-                as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         });
 
         let callbacks = SubscriberCallbacks {
@@ -377,14 +373,10 @@ fn evm_to_block_pos(p: EvmPosition) -> BlockPos {
 // HistBackend impl
 // ============================================================
 
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static>
-    HistBackend<EvmEvent, EvmPosition> for EvmLogHistory<P>
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistBackend<EvmEvent, EvmPosition>
+    for EvmLogHistory<P>
 {
-    fn iter(
-        &self,
-        start: EvmPosition,
-        end: EvmPosition,
-    ) -> ItemStream<EvmEvent, EvmPosition> {
+    fn iter(&self, start: EvmPosition, end: EvmPosition) -> ItemStream<EvmEvent, EvmPosition> {
         if end <= start {
             return Box::pin(futures_util::stream::empty());
         }
@@ -429,8 +421,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static>
 // ============================================================
 
 #[async_trait::async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static>
-    HistStoreBackend<EvmEvent, EvmPosition> for EvmLogHistory<P>
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<EvmEvent, EvmPosition>
+    for EvmLogHistory<P>
 {
     fn snapshots(&self) -> HistStream<EvmEvent, EvmPosition> {
         let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
@@ -498,7 +490,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static>
 // ============================================================
 
 fn log_to_evm_event(log: &alloy::rpc::types::Log) -> EvmEvent {
-    let addr: [u8; 20] = log.address().0.0;
+    let addr: [u8; 20] = log.address().0 .0;
     let block_hash: [u8; 32] = log.block_hash.map(|h| h.0).unwrap_or([0; 32]);
     let tx_hash: [u8; 32] = log.transaction_hash.map(|h| h.0).unwrap_or([0; 32]);
 
@@ -656,7 +648,9 @@ mod tests {
         let cache = Arc::new(LogStore::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 
-        cache.insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS).unwrap();
+        cache
+            .insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS)
+            .unwrap();
         cache
             .insert_block_header(100, &BH_100, &BH_0, GENESIS_TS + 1200)
             .unwrap();
@@ -692,9 +686,7 @@ mod tests {
     }
 
     /// Iterate a Hist into a Vec<Positioned> with no in-flight fetcher.
-    async fn collect(
-        hist: Hist<EvmEvent, EvmPosition>,
-    ) -> Vec<Positioned<EvmEvent, EvmPosition>> {
+    async fn collect(hist: Hist<EvmEvent, EvmPosition>) -> Vec<Positioned<EvmEvent, EvmPosition>> {
         hist.iter().try_collect().await.unwrap()
     }
 
@@ -806,7 +798,10 @@ mod tests {
         // EvmPosition has only block + log_index — no chain field.
         let p = EvmPosition::new(100, 0);
         let s = format!("{p:?}");
-        assert!(!s.contains("chain"), "EvmPosition Debug should not mention chain: {s}");
+        assert!(
+            !s.contains("chain"),
+            "EvmPosition Debug should not mention chain: {s}"
+        );
     }
 
     // Suppress dead-code warnings on unused fixtures during phase work.
