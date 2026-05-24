@@ -174,12 +174,26 @@ fn interpolate_env(input: &str) -> Result<String, ConfigError> {
 fn alchemy_chain_slug(chain_id: u64) -> Result<&'static str, ConfigError> {
     match chain_id {
         1 => Ok("eth-mainnet"),
-        11_155_111 => Ok("eth-sepolia"),
-        137 => Ok("polygon-mainnet"),
-        42161 => Ok("arb-mainnet"),
         10 => Ok("opt-mainnet"),
+        56 => Ok("bnb-mainnet"),
+        137 => Ok("polygon-mainnet"),
         8453 => Ok("base-mainnet"),
+        11_155_111 => Ok("eth-sepolia"),
+        42161 => Ok("arb-mainnet"),
         43114 => Ok("avax-mainnet"),
         _ => Err(ConfigError::UnsupportedChain(chain_id)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alchemy_slug_bnb_mainnet() {
+        assert_eq!(
+            alchemy_chain_slug(56).expect("bsc supported"),
+            "bnb-mainnet"
+        );
     }
 }
