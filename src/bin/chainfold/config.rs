@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use toml::de::Error as TomlError;
 
+use crate::chains;
+
 /// Hardcoded fallback used when no config file is present, or to fill in
 /// fields missing from a partial user config. Env-interpolated on load via
 /// the same `${VAR:-fallback}` rules as a real config file, so unset env
@@ -119,23 +121,24 @@ impl Config {
         paths
     }
 
-    /// Build the Alchemy RPC URL for `chain_id` if both an Alchemy API key
-    /// is configured and the chain has an Alchemy slug. Returns `None`
-    /// otherwise (caller decides on fallback).
-    ///
-    /// An empty `api_key` (e.g. from the default config when
-    /// `ALCHEMY_KEY` env var is unset, via `${ALCHEMY_KEY:-}`) counts as
-    /// "no Alchemy configured" and yields `None`.
-    pub fn alchemy_url(&self, chain_id: u64) -> Option<String> {
+    /// The configured Alchemy API key, if any. An empty `api_key` (e.g.
+    /// from the default config when `ALCHEMY_KEY` env var is unset, via
+    /// `${ALCHEMY_KEY:-}`) counts as "no Alchemy configured".
+    pub fn alchemy_api_key(&self) -> Option<&str> {
         let alchemy = self.provider.as_ref()?.alchemy.as_ref()?;
         if alchemy.api_key.is_empty() {
-            return None;
+            None
+        } else {
+            Some(&alchemy.api_key)
         }
-        let slug = alchemy_chain_slug(chain_id)?;
-        Some(format!(
-            "https://{slug}.g.alchemy.com/v2/{}",
-            alchemy.api_key
-        ))
+    }
+
+    /// Build the Alchemy RPC URL for `chain_id` if both an Alchemy API key
+    /// is configured and the chain has an Alchemy slug. Returns `None`
+    /// otherwise (caller decides on fallback). URL shape lives in
+    /// [`chains::alchemy_url`].
+    pub fn alchemy_url(&self, chain_id: u64) -> Option<String> {
+        chains::alchemy_url(chain_id, self.alchemy_api_key()?)
     }
 
     /// Etherscan API key, if configured. Used by the signature resolver to
@@ -282,28 +285,9 @@ fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
     }
 }
 
-fn alchemy_chain_slug(chain_id: u64) -> Option<&'static str> {
-    match chain_id {
-        1 => Some("eth-mainnet"),
-        10 => Some("opt-mainnet"),
-        56 => Some("bnb-mainnet"),
-        137 => Some("polygon-mainnet"),
-        8453 => Some("base-mainnet"),
-        11_155_111 => Some("eth-sepolia"),
-        42161 => Some("arb-mainnet"),
-        43114 => Some("avax-mainnet"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn alchemy_slug_bnb_mainnet() {
-        assert_eq!(alchemy_chain_slug(56), Some("bnb-mainnet"));
-    }
 
     fn alchemy_config(key: &str) -> Config {
         Config {
@@ -359,18 +343,6 @@ mod tests {
         // empty key means "no Alchemy effectively", fall through to public RPC.
         let c = alchemy_config("");
         assert!(c.alchemy_url(1).is_none());
-    }
-
-    #[test]
-    fn alchemy_chain_slug_returns_some_for_known_chains() {
-        assert_eq!(alchemy_chain_slug(1), Some("eth-mainnet"));
-        assert_eq!(alchemy_chain_slug(56), Some("bnb-mainnet"));
-        assert_eq!(alchemy_chain_slug(42161), Some("arb-mainnet"));
-    }
-
-    #[test]
-    fn alchemy_chain_slug_returns_none_for_unknown_chains() {
-        assert!(alchemy_chain_slug(99_999).is_none());
     }
 
     #[test]

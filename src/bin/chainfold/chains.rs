@@ -17,6 +17,30 @@ use thiserror::Error;
 const CHAINLIST_URL: &str = "https://chainlist.org/rpcs.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Map a chain ID to Alchemy's subdomain slug, e.g. `1 → "eth-mainnet"`.
+/// `None` means Alchemy doesn't host that chain.
+pub fn alchemy_chain_slug(chain_id: u64) -> Option<&'static str> {
+    match chain_id {
+        1 => Some("eth-mainnet"),
+        10 => Some("opt-mainnet"),
+        56 => Some("bnb-mainnet"),
+        137 => Some("polygon-mainnet"),
+        8453 => Some("base-mainnet"),
+        11_155_111 => Some("eth-sepolia"),
+        42161 => Some("arb-mainnet"),
+        43114 => Some("avax-mainnet"),
+        _ => None,
+    }
+}
+
+/// Build the Alchemy RPC URL for `chain_id`. `None` if Alchemy doesn't
+/// support the chain. Empty / placeholder API keys are the caller's
+/// concern — pass the key only when it's real.
+pub fn alchemy_url(chain_id: u64, api_key: &str) -> Option<String> {
+    let slug = alchemy_chain_slug(chain_id)?;
+    Some(format!("https://{slug}.g.alchemy.com/v2/{api_key}"))
+}
+
 fn default_cache_path() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -222,6 +246,33 @@ impl ChainResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- alchemy slug / url --
+
+    #[test]
+    fn alchemy_chain_slug_returns_some_for_known_chains() {
+        assert_eq!(alchemy_chain_slug(1), Some("eth-mainnet"));
+        assert_eq!(alchemy_chain_slug(56), Some("bnb-mainnet"));
+        assert_eq!(alchemy_chain_slug(42161), Some("arb-mainnet"));
+    }
+
+    #[test]
+    fn alchemy_chain_slug_returns_none_for_unknown_chains() {
+        assert!(alchemy_chain_slug(99_999).is_none());
+    }
+
+    #[test]
+    fn alchemy_url_known_chain() {
+        assert_eq!(
+            alchemy_url(1, "abc").as_deref(),
+            Some("https://eth-mainnet.g.alchemy.com/v2/abc"),
+        );
+    }
+
+    #[test]
+    fn alchemy_url_unknown_chain_is_none() {
+        assert!(alchemy_url(99_999, "abc").is_none());
+    }
 
     const ETH_ENTRY: &str = r#"{
         "name": "Ethereum Mainnet",
