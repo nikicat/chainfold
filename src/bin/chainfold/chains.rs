@@ -5,7 +5,8 @@
 //! Cache lives at `~/.cache/chainfold/chainlist.json`; refresh = manual `rm`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -60,6 +61,7 @@ pub enum ChainResolveError {
     },
 }
 
+#[derive(Debug)]
 pub struct ChainResolver {
     by_name: HashMap<String, u64>,
 }
@@ -84,6 +86,21 @@ impl ChainResolver {
             .ok_or_else(|| ChainResolveError::UnknownName {
                 name: name.to_owned(),
             })
+    }
+
+    /// Load the resolver from a JSON file on disk. The path is captured into
+    /// `Io`/`Parse` errors so the message tells the user what to delete.
+    pub fn load_from_path(path: &Path) -> Result<Self, ChainResolveError> {
+        let bytes = fs::read(path).map_err(|source| ChainResolveError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        let entries: Vec<ChainlistEntry> =
+            serde_json::from_slice(&bytes).map_err(|source| ChainResolveError::Parse {
+                path: path.to_owned(),
+                source,
+            })?;
+        Ok(Self::from_entries(&entries))
     }
 }
 
@@ -201,6 +218,32 @@ mod tests {
         match err {
             ChainResolveError::UnknownName { name } => assert_eq!(name, "bsc"),
             other => panic!("expected UnknownName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_disk_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chainlist.json");
+        let json = format!("[{ETH_ENTRY},{MINIMAL_ENTRY},{ENRICHED_ENTRY}]");
+        std::fs::write(&path, json).expect("write fixture");
+
+        let r = ChainResolver::load_from_path(&path).expect("load");
+        assert_eq!(r.resolve("ethereum").expect("eth"), 1);
+        assert_eq!(r.resolve("binance").expect("bnb"), 56);
+        assert_eq!(r.resolve("oeth").expect("op"), 10);
+    }
+
+    #[test]
+    fn load_from_corrupt_file_reports_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chainlist.json");
+        std::fs::write(&path, "{not json").expect("write fixture");
+
+        let err = ChainResolver::load_from_path(&path).expect_err("should fail");
+        match err {
+            ChainResolveError::Parse { path: p, .. } => assert_eq!(p, path),
+            other => panic!("expected Parse, got {other:?}"),
         }
     }
 }
