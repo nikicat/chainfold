@@ -8,8 +8,8 @@ use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Position, Positioned};
 use chainfold::evm::{
-    apply_transfer, fetch_erc20_metadata, Erc20Metadata, EvmLogHistory, LogStore, OwnedErc20,
-    SubscribeTransport, IN_KEY, OUT_KEY,
+    apply_transfer, fetch_erc20_metadata, Erc20Metadata, LogStore, OwnedErc20, SubscribeTransport,
+    IN_KEY, OUT_KEY,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::future::join_all;
@@ -17,7 +17,7 @@ use futures_util::StreamExt;
 
 use crate::cli::{Erc20Args, Erc20Command, EvmArgs};
 use crate::fmt::{self, FmtContext};
-use crate::util::{parse_datetime, parse_hex_address};
+use crate::util::{parse_hex_address, resolve_range};
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     provider: &P,
@@ -92,7 +92,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         .await?;
         owned.poll_tips().await?;
 
-        let (start, end) = resolve_range(evm_args, owned.out_history()).await?;
+        let out_hs = owned.out_history().hist_store();
+        let (start, end) = resolve_range(evm_args, &out_hs).await?;
         println!("── {} ({}..{}) ──", meta_symbol, start.block, end.block);
 
         let merged_hs = owned.transfers();
@@ -184,43 +185,3 @@ fn merged_pos_for(p: EvmPosition) -> MergedPos {
     MergedPos::new(m)
 }
 
-async fn resolve_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
-    args: &EvmArgs,
-    backend: &Arc<EvmLogHistory<P>>,
-) -> Result<(EvmPosition, EvmPosition), Box<dyn std::error::Error>> {
-    let hs = backend.hist_store();
-    match (&args.from, &args.to, args.from_block) {
-        (Some(from_str), Some(to_str), None) => {
-            let from_ts = parse_datetime(from_str)?;
-            let to_ts = parse_datetime(to_str)?;
-            let start = hs.time_pos(from_ts).await?;
-            let end = hs.time_pos(to_ts).await?;
-            println!("  Date range: {from_str} → {to_str}");
-            println!(
-                "  Estimated blocks: {} → {}",
-                start.block + 1,
-                end.block + 1
-            );
-            let end_inclusive = EvmPosition::new(end.block.saturating_add(1), u32::MAX);
-            Ok((start, end_inclusive))
-        }
-        (None, None, Some(from_block)) => {
-            let to_block = from_block + args.num_blocks - 1;
-            let start = if from_block == 0 {
-                EvmPosition::earliest()
-            } else {
-                EvmPosition::new(from_block - 1, u32::MAX)
-            };
-            Ok((start, EvmPosition::new(to_block, u32::MAX)))
-        }
-        (None, None, None) => {
-            let from_block = 22_000_000u64;
-            let to_block = from_block + args.num_blocks - 1;
-            Ok((
-                EvmPosition::new(from_block - 1, u32::MAX),
-                EvmPosition::new(to_block, u32::MAX),
-            ))
-        }
-        _ => Err("provide either --from + --to or --from-block, not both".into()),
-    }
-}
