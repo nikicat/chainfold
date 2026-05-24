@@ -24,12 +24,6 @@ fn default_cache_path() -> PathBuf {
         .join("chainlist.json")
 }
 
-#[allow(
-    dead_code,
-    reason = "called by ChainResolver::public_rpc_for; bin-target dead_code analysis ignores \
-              test context, and the picker is wired into the orchestration in a follow-up task. \
-              #[allow] (not #[expect]) because tests do exercise this via public_rpc_for."
-)]
 fn privacy_rank(tracking: Option<&str>) -> u8 {
     match tracking {
         Some("none") => 0,
@@ -85,12 +79,6 @@ pub struct NativeCurrency {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(
-    dead_code,
-    reason = "url and tracking are read by ChainResolver::public_rpc_for, which the bin doesn't \
-              call yet (wired in a follow-up task). #[allow] (not #[expect]) because tests read \
-              these fields, which silences the lint in the test target."
-)]
 pub struct RpcEntry {
     pub url: String,
     #[serde(default)]
@@ -124,11 +112,6 @@ pub enum ChainResolveError {
 
 #[derive(Debug)]
 pub struct ChainResolver {
-    #[allow(
-        dead_code,
-        reason = "read by ChainResolver::public_rpc_for; bin-target dead_code analysis ignores \
-                  test context, and the picker is wired into the orchestration in a follow-up task."
-    )]
     entries: Vec<ChainlistEntry>,
     by_name: HashMap<String, u64>,
 }
@@ -165,10 +148,6 @@ impl ChainResolver {
     /// 3. Rank by privacy:
     ///    tracking=none (0) > limited (1) > unspecified/None (2) > yes (3).
     /// 4. Stable within tier — first-listed in chainlist wins.
-    #[allow(
-        dead_code,
-        reason = "wired into the orchestration in a follow-up task; covered by unit tests today."
-    )]
     pub fn public_rpc_for(&self, chain_id: u64) -> Option<String> {
         let entry = self.entries.iter().find(|e| e.chain_id == chain_id)?;
         entry

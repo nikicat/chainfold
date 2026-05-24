@@ -25,8 +25,12 @@ pub enum ConfigError {
     Parse { path: PathBuf, source: TomlError },
     #[error("env var ${var} referenced in config is not set")]
     MissingEnvVar { var: String },
-    #[error("unsupported chain id {0} for Alchemy")]
-    UnsupportedChain(u64),
+    #[error(
+        "no RPC URL available for chain {chain_id} (tried: {tried:?}). \
+         Pass --rpc-url <url>, set ALCHEMY_KEY in the environment for a supported \
+         chain, or add chainlist.org data for this chain id."
+    )]
+    NoRpcAvailable { chain_id: u64, tried: Vec<String> },
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -132,21 +136,6 @@ impl Config {
             "https://{slug}.g.alchemy.com/v2/{}",
             alchemy.api_key
         ))
-    }
-
-    /// Resolve RPC URL: explicit `--rpc-url` > Alchemy config > error.
-    pub fn rpc_url(
-        &self,
-        explicit_url: Option<&str>,
-        chain_id: u64,
-    ) -> Result<String, ConfigError> {
-        if let Some(url) = explicit_url {
-            return Ok(url.to_string());
-        }
-        if let Some(url) = self.alchemy_url(chain_id) {
-            return Ok(url);
-        }
-        Err(ConfigError::UnsupportedChain(chain_id))
     }
 
     /// Etherscan API key, if configured. Used by the signature resolver to
@@ -509,6 +498,22 @@ mod tests {
         );
         std::env::remove_var("CHAINFOLD_TEST_PARTIAL_FILL");
         std::env::remove_var("ALCHEMY_KEY");
+    }
+
+    #[test]
+    fn no_rpc_available_error_message_lists_attempts() {
+        // Smoke test that the error formats reasonably and includes the
+        // chain id + the "tried" list. Pure formatting check, no I/O.
+        let err = ConfigError::NoRpcAvailable {
+            chain_id: 56,
+            tried: vec!["foo".into(), "bar".into()],
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("56"), "expected chain id in message");
+        assert!(
+            msg.contains("foo") && msg.contains("bar"),
+            "expected `tried` list in message"
+        );
     }
 
     #[test]

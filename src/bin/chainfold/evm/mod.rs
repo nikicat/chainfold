@@ -10,7 +10,7 @@ use chainfold::evm::{rpc_retry_layer, versioned_path, LogStore};
 
 use crate::chains::ChainResolver;
 use crate::cli::{EvmArgs, EvmCommand};
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
 
 pub async fn run(
     config: &Config,
@@ -18,13 +18,46 @@ pub async fn run(
     reverse: bool,
     follow: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Eagerly load the chainlist resolver if we'll need it: name resolution
+    // OR public-RPC fallback (i.e. no explicit --rpc-url).
+    let resolver = if args.chain.is_some() || args.rpc_url.is_none() {
+        Some(ChainResolver::load_or_fetch().await?)
+    } else {
+        None
+    };
+
     let chain_id = match (args.chain_id, args.chain.as_deref()) {
         (Some(id), _) => id,
-        (None, Some(name)) => ChainResolver::load_or_fetch().await?.resolve(name)?,
+        (None, Some(name)) => resolver
+            .as_ref()
+            .expect("resolver loaded when args.chain is set")
+            .resolve(name)?,
         (None, None) => unreachable!("clap enforces required_unless_present"),
     };
 
-    let rpc_url = config.rpc_url(args.rpc_url.as_deref(), chain_id)?;
+    // RPC URL resolution order:
+    // 1. explicit --rpc-url
+    // 2. Alchemy from config (file or default-via-env)
+    // 3. public RPC from chainlist.org
+    // 4. NoRpcAvailable error
+    let rpc_url = if let Some(url) = args.rpc_url.as_deref() {
+        url.to_string()
+    } else if let Some(url) = config.alchemy_url(chain_id) {
+        url
+    } else if let Some(url) = resolver.as_ref().and_then(|r| r.public_rpc_for(chain_id)) {
+        eprintln!("note: using public RPC {url} from chainlist.org");
+        url
+    } else {
+        return Err(ConfigError::NoRpcAvailable {
+            chain_id,
+            tried: vec![
+                "--rpc-url (not provided)".into(),
+                "Alchemy (no api_key or unsupported chain)".into(),
+                "chainlist.org public RPCs (none usable)".into(),
+            ],
+        }
+        .into());
+    };
 
     let url: Url = rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
