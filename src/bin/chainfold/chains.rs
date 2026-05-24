@@ -6,10 +6,23 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
+use tempfile::NamedTempFile;
 use thiserror::Error;
+
+const CHAINLIST_URL: &str = "https://chainlist.org/rpcs.json";
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn default_cache_path() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("chainfold")
+        .join("chainlist.json")
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +114,51 @@ impl ChainResolver {
                 source,
             })?;
         Ok(Self::from_entries(&entries))
+    }
+
+    /// Load the resolver from the default cache path
+    /// (`~/.cache/chainfold/chainlist.json`). If the file does not exist,
+    /// fetch from chainlist.org, write atomically, and load.
+    ///
+    /// Refresh = manual `rm` on the cache file.
+    pub async fn load_or_fetch() -> Result<Self, ChainResolveError> {
+        let path = default_cache_path();
+        if !path.exists() {
+            Self::fetch_and_persist(&path).await?;
+        }
+        Self::load_from_path(&path)
+    }
+
+    async fn fetch_and_persist(path: &Path) -> Result<(), ChainResolveError> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|source| ChainResolveError::Io {
+            path: parent.to_owned(),
+            source,
+        })?;
+
+        let client = reqwest::Client::builder().timeout(FETCH_TIMEOUT).build()?;
+        let bytes = client
+            .get(CHAINLIST_URL)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+
+        // Atomic write: temp file in the same directory, then persist.
+        let mut tmp = NamedTempFile::new_in(parent).map_err(|source| ChainResolveError::Io {
+            path: parent.to_owned(),
+            source,
+        })?;
+        Write::write_all(&mut tmp, &bytes).map_err(|source| ChainResolveError::Io {
+            path: tmp.path().to_owned(),
+            source,
+        })?;
+        tmp.persist(path).map_err(|e| ChainResolveError::Io {
+            path: path.to_owned(),
+            source: e.error,
+        })?;
+        Ok(())
     }
 }
 
