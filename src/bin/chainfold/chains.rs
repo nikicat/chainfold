@@ -24,6 +24,24 @@ fn default_cache_path() -> PathBuf {
         .join("chainlist.json")
 }
 
+#[allow(
+    dead_code,
+    reason = "called by ChainResolver::public_rpc_for; bin-target dead_code analysis ignores \
+              test context, and the picker is wired into the orchestration in a follow-up task. \
+              #[allow] (not #[expect]) because tests do exercise this via public_rpc_for."
+)]
+fn privacy_rank(tracking: Option<&str>) -> u8 {
+    match tracking {
+        Some("none") => 0,
+        Some("limited") => 1,
+        Some("yes") => 3,
+        // Treat absent or unknown ("unspecified", anything we don't recognize)
+        // as middle-rank — prefer it over "yes" but not over an explicit
+        // privacy commitment.
+        None | Some(_) => 2,
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(
@@ -69,9 +87,9 @@ pub struct NativeCurrency {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(
     dead_code,
-    reason = "url and tracking are read by ChainResolver::public_rpc_for (next task); \
-              #[allow] (not #[expect]) because tests read these fields, which silences \
-              the lint in the test target and would make #[expect] complain there."
+    reason = "url and tracking are read by ChainResolver::public_rpc_for, which the bin doesn't \
+              call yet (wired in a follow-up task). #[allow] (not #[expect]) because tests read \
+              these fields, which silences the lint in the test target."
 )]
 pub struct RpcEntry {
     pub url: String,
@@ -106,20 +124,26 @@ pub enum ChainResolveError {
 
 #[derive(Debug)]
 pub struct ChainResolver {
+    #[allow(
+        dead_code,
+        reason = "read by ChainResolver::public_rpc_for; bin-target dead_code analysis ignores \
+                  test context, and the picker is wired into the orchestration in a follow-up task."
+    )]
+    entries: Vec<ChainlistEntry>,
     by_name: HashMap<String, u64>,
 }
 
 impl ChainResolver {
     /// Build a resolver from an already-deserialized list of entries.
-    pub fn from_entries(entries: &[ChainlistEntry]) -> Self {
+    pub fn from_entries(entries: Vec<ChainlistEntry>) -> Self {
         let mut by_name = HashMap::with_capacity(entries.len() * 2);
-        for e in entries {
+        for e in &entries {
             by_name.insert(e.short_name.to_ascii_lowercase(), e.chain_id);
             if let Some(slug) = &e.chain_slug {
                 by_name.insert(slug.to_ascii_lowercase(), e.chain_id);
             }
         }
-        Self { by_name }
+        Self { entries, by_name }
     }
 
     pub fn resolve(&self, name: &str) -> Result<u64, ChainResolveError> {
@@ -129,6 +153,30 @@ impl ChainResolver {
             .ok_or_else(|| ChainResolveError::UnknownName {
                 name: name.to_owned(),
             })
+    }
+
+    /// Pick a usable public RPC URL for `chain_id` from the cached chainlist
+    /// entries. Returns `None` if the chain isn't in chainlist or has no
+    /// usable HTTPS endpoint.
+    ///
+    /// Selection algorithm:
+    /// 1. HTTPS only (drop http://, wss://).
+    /// 2. Drop URLs containing `${` (template placeholders needing API keys).
+    /// 3. Rank by privacy:
+    ///    tracking=none (0) > limited (1) > unspecified/None (2) > yes (3).
+    /// 4. Stable within tier — first-listed in chainlist wins.
+    #[allow(
+        dead_code,
+        reason = "wired into the orchestration in a follow-up task; covered by unit tests today."
+    )]
+    pub fn public_rpc_for(&self, chain_id: u64) -> Option<String> {
+        let entry = self.entries.iter().find(|e| e.chain_id == chain_id)?;
+        entry
+            .rpc
+            .iter()
+            .filter(|r| r.url.starts_with("https://") && !r.url.contains("${"))
+            .min_by_key(|r| privacy_rank(r.tracking.as_deref()))
+            .map(|r| r.url.clone())
     }
 
     /// Load the resolver from a JSON file on disk. The path is captured into
@@ -143,7 +191,7 @@ impl ChainResolver {
                 path: path.to_owned(),
                 source,
             })?;
-        Ok(Self::from_entries(&entries))
+        Ok(Self::from_entries(entries))
     }
 
     /// Load the resolver from the default cache path
@@ -281,7 +329,7 @@ mod tests {
 
     #[test]
     fn resolver_matches_short_name() {
-        let r = ChainResolver::from_entries(&fixture_entries());
+        let r = ChainResolver::from_entries(fixture_entries());
         assert_eq!(r.resolve("eth").expect("eth resolves"), 1);
         assert_eq!(r.resolve("bnb").expect("bnb resolves"), 56);
         assert_eq!(r.resolve("oeth").expect("oeth resolves"), 10);
@@ -289,14 +337,14 @@ mod tests {
 
     #[test]
     fn resolver_matches_chain_slug() {
-        let r = ChainResolver::from_entries(&fixture_entries());
+        let r = ChainResolver::from_entries(fixture_entries());
         assert_eq!(r.resolve("ethereum").expect("slug resolves"), 1);
         assert_eq!(r.resolve("binance").expect("slug resolves"), 56);
     }
 
     #[test]
     fn resolver_match_is_case_insensitive() {
-        let r = ChainResolver::from_entries(&fixture_entries());
+        let r = ChainResolver::from_entries(fixture_entries());
         assert_eq!(r.resolve("Ethereum").expect("mixed case"), 1);
         assert_eq!(r.resolve("BNB").expect("upper"), 56);
         assert_eq!(r.resolve("Binance").expect("slug mixed"), 56);
@@ -304,7 +352,7 @@ mod tests {
 
     #[test]
     fn resolver_unknown_name_errors() {
-        let r = ChainResolver::from_entries(&fixture_entries());
+        let r = ChainResolver::from_entries(fixture_entries());
         // "bsc" isn't a shortName (it's "bnb") or a chainSlug (it's "binance"),
         // so it must error per the design (no alias overlay).
         let err = r.resolve("bsc").expect_err("bsc should not resolve");
@@ -368,5 +416,131 @@ mod tests {
             ChainResolveError::Parse { path: p, .. } => assert_eq!(p, path),
             other => panic!("expected Parse, got {other:?}"),
         }
+    }
+
+    const PUBLIC_RPC_ENTRY: &str = r#"{
+        "name": "Test Chain",
+        "chain": "TEST",
+        "chainId": 99999,
+        "shortName": "test",
+        "rpc": [
+            {"url": "https://yes.example", "tracking": "yes"},
+            {"url": "https://none.example", "tracking": "none"},
+            {"url": "https://limited.example", "tracking": "limited"},
+            {"url": "https://unmarked.example"}
+        ],
+        "nativeCurrency": { "name": "T", "symbol": "T", "decimals": 18 }
+    }"#;
+
+    fn entries_with_rpc() -> Vec<ChainlistEntry> {
+        let entry: ChainlistEntry = serde_json::from_str(PUBLIC_RPC_ENTRY).expect("parse");
+        vec![entry]
+    }
+
+    #[test]
+    fn public_rpc_for_prefers_tracking_none() {
+        let r = ChainResolver::from_entries(entries_with_rpc());
+        assert_eq!(
+            r.public_rpc_for(99999).as_deref(),
+            Some("https://none.example"),
+            "tracking=none must win over limited/yes/unspecified"
+        );
+    }
+
+    #[test]
+    fn public_rpc_for_skips_placeholder_urls() {
+        let json = r#"{
+            "name": "Placeholder Chain",
+            "chain": "P",
+            "chainId": 88888,
+            "shortName": "p",
+            "rpc": [
+                {"url": "https://example.com/${API_KEY}", "tracking": "none"},
+                {"url": "https://plain.example", "tracking": "limited"}
+            ],
+            "nativeCurrency": { "name": "P", "symbol": "P", "decimals": 18 }
+        }"#;
+        let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
+        let r = ChainResolver::from_entries(vec![entry]);
+        assert_eq!(
+            r.public_rpc_for(88888).as_deref(),
+            Some("https://plain.example"),
+            "URL with ${{...}} placeholder must be skipped even if tracking=none"
+        );
+    }
+
+    #[test]
+    fn public_rpc_for_skips_non_https() {
+        let json = r#"{
+            "name": "Mixed Schemes",
+            "chain": "M",
+            "chainId": 77777,
+            "shortName": "m",
+            "rpc": [
+                {"url": "http://insecure.example", "tracking": "none"},
+                {"url": "wss://ws.example", "tracking": "none"},
+                {"url": "https://ok.example", "tracking": "yes"}
+            ],
+            "nativeCurrency": { "name": "M", "symbol": "M", "decimals": 18 }
+        }"#;
+        let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
+        let r = ChainResolver::from_entries(vec![entry]);
+        assert_eq!(
+            r.public_rpc_for(77777).as_deref(),
+            Some("https://ok.example"),
+            "http:// and wss:// must be skipped, leaving the https one even if tracking=yes"
+        );
+    }
+
+    #[test]
+    fn public_rpc_for_returns_none_when_no_usable_entry() {
+        let json = r#"{
+            "name": "Bad RPCs",
+            "chain": "B",
+            "chainId": 66666,
+            "shortName": "b",
+            "rpc": [
+                {"url": "http://insecure.example"},
+                {"url": "wss://ws.example"},
+                {"url": "https://templated.example/${KEY}"}
+            ],
+            "nativeCurrency": { "name": "B", "symbol": "B", "decimals": 18 }
+        }"#;
+        let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
+        let r = ChainResolver::from_entries(vec![entry]);
+        assert!(r.public_rpc_for(66666).is_none());
+    }
+
+    #[test]
+    fn public_rpc_for_unknown_chain_id_returns_none() {
+        let r = ChainResolver::from_entries(entries_with_rpc());
+        assert!(
+            r.public_rpc_for(12345).is_none(),
+            "no matching chain → None"
+        );
+    }
+
+    #[test]
+    fn public_rpc_for_preserves_order_within_tier() {
+        // Two `tracking: "none"` entries; the FIRST listed should win
+        // (stable sort within tier).
+        let json = r#"{
+            "name": "Tie",
+            "chain": "T",
+            "chainId": 55555,
+            "shortName": "t",
+            "rpc": [
+                {"url": "https://first.example", "tracking": "none"},
+                {"url": "https://second.example", "tracking": "none"}
+            ],
+            "nativeCurrency": { "name": "T", "symbol": "T", "decimals": 18 }
+        }"#;
+        let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
+        let r = ChainResolver::from_entries(vec![entry]);
+        assert_eq!(
+            r.public_rpc_for(55555).as_deref(),
+            Some("https://first.example"),
+            "stable rank → first-listed wins"
+        );
     }
 }
