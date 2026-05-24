@@ -29,7 +29,9 @@ fn default_cache_path() -> PathBuf {
 #[allow(
     dead_code,
     reason = "fields captured per design spec for future use (e.g. testnet warning, redFlags display); \
-              tested and used in tests but bin-target dead_code analysis ignores test context"
+              tested and used in tests but bin-target dead_code analysis ignores test context. \
+              #[allow] (not #[expect]) because tests do read these fields — the lint wouldn't fire \
+              in the test target, which would make #[expect] itself complain."
 )]
 pub struct ChainlistEntry {
     pub chain_id: u64,
@@ -53,7 +55,8 @@ pub struct ChainlistEntry {
 #[allow(
     dead_code,
     reason = "fields deserialized for upstream-schema fidelity and tested; \
-              bin-target dead_code analysis ignores test context"
+              bin-target dead_code analysis ignores test context. \
+              #[allow] (not #[expect]) — tests read these, so test-target dead_code stays silent."
 )]
 pub struct NativeCurrency {
     pub name: String,
