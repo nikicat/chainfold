@@ -26,6 +26,11 @@ fn default_cache_path() -> PathBuf {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    dead_code,
+    reason = "fields captured per design spec for future use (e.g. testnet warning, redFlags display); \
+              tested and used in tests but bin-target dead_code analysis ignores test context"
+)]
 pub struct ChainlistEntry {
     pub chain_id: u64,
     pub name: String,
@@ -45,6 +50,11 @@ pub struct ChainlistEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(
+    dead_code,
+    reason = "fields deserialized for upstream-schema fidelity and tested; \
+              bin-target dead_code analysis ignores test context"
+)]
 pub struct NativeCurrency {
     pub name: String,
     pub symbol: String,
