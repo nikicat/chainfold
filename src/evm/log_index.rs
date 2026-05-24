@@ -1,11 +1,10 @@
 //! In-memory range tree backed by [`LogStore`].
 //!
-//! Phase 1b of the refactor (see `refactor.md`). Translates the reference implementation's
-//! `RangeTree` (history.ts:758–951) to Rust: a `BTreeMap` keyed by the
-//! *end* position of each [`Range`], with the same singleflight / late-item
-//! semantics. Items themselves live in [`LogStore`]; the tree only holds
-//! [`LogRef`]s, so a long-running history's resident memory is bounded by
-//! the number of distinct positions (Phase 7 will add eviction).
+//! A `BTreeMap` keyed by the *end* position of each [`Range`], with
+//! singleflight + late-item handling. Items themselves live in
+//! [`LogStore`]; the tree only holds [`LogRef`]s, so a long-running
+//! history's resident memory is bounded by the number of distinct
+//! positions (eviction is a future addition).
 //!
 //! Lazy loading: rather than slurping every `scanned_range` from
 //! [`LogStore`] on first access, the tree materializes per-window on
@@ -13,11 +12,11 @@
 //! at the cost of one bookkeeping `Vec<(u64, u64)>` of windows already
 //! pulled in.
 //!
-//! This module owns: types, page insertion (four late-item cases),
-//! lazy-load of scanned ranges, the fetcher-driven singleflight, the
-//! `items()` async stream, and the cached-only navigation methods
-//! (`first_at_or_after`, `first_after`, `last_at_or_before`,
-//! `last_before`). Wiring into `EvmLogHistory` lands in Phase 1c.
+//! This module owns: types, page insertion (four late-item cases —
+//! see [`LogIndex::insert_late_item`]), lazy-load of scanned ranges,
+//! the fetcher-driven singleflight, the `items()` async stream, and
+//! the cached-only navigation methods (`first_at_or_after`,
+//! `first_after`, `last_at_or_before`, `last_before`).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -335,7 +334,7 @@ impl LogIndex {
     }
 
     // --------------------------------------------------------
-    // Page insertion (the reference RangeTree.addPage + addGapItems)
+    // Page insertion (addPage + addGapItems)
     // --------------------------------------------------------
 
     /// Install a freshly fetched page into the tree. Items in `page.items`
@@ -343,8 +342,6 @@ impl LogIndex {
     /// strictly past the existing tail are appended; items at-or-before
     /// the tail go through the late-item path (the four cases in
     /// [`Self::insert_late_item`]).
-    ///
-    /// Mirrors the reference `RangeTree.addPage` (history.ts:773–804).
     pub fn insert_page(&self, page: &LogPage) {
         assert_increasing(&page.items);
 
@@ -366,9 +363,9 @@ impl LogIndex {
 
             let strictly_past_tail = tail_end.is_none_or(|t| item_pos > t);
             let strictly_before_tail = tail_end.is_some_and(|t| item_pos < t);
-            // Equal-to-tail items go through addPage's "no-op for prev tracking"
-            // branch — the reference keeps them out of insertLateItem because
-            // a range already ends there.
+            // Equal-to-tail items take the no-op branch — they aren't
+            // routed through insert_late_item because a range already ends
+            // at that position.
 
             if strictly_past_tail {
                 new_ranges.push(Range::filled(range_start, item_pos, item));
@@ -413,7 +410,7 @@ impl LogIndex {
         }
     }
 
-    /// Translate of `RangeTree.insertLateItem` (reference history.ts:828–842).
+    /// Insert an item that arrived strictly before the current tail.
     ///
     /// Four cases over the range whose end is the next key `>= item.pos`:
     /// 1. None / range.start > item.pos → item sits in a gap →
@@ -893,10 +890,9 @@ impl LogIndex {
     /// Yield every cached and fetched-on-demand log whose position is
     /// in `(from, to]`, in ascending order. Closes when `to` is reached.
     ///
-    /// Mirrors the reference `RangeTree.items` (history.ts:872–915): gaps in
-    /// the tree trigger a fetcher call on the consuming task; in-flight
-    /// fetches block on the notify. Cancellation is by dropping the
-    /// stream (which drops the Arc<Self> capture).
+    /// Gaps in the tree trigger a fetcher call on the consuming task;
+    /// in-flight fetches block on the per-range `Notify`. Cancellation is
+    /// by dropping the stream (which drops the `Arc<Self>` capture).
     pub fn items(
         self: Arc<Self>,
         from: BlockPos,
@@ -1405,13 +1401,13 @@ mod tests {
         assert_eq!(align_window(0, 0, 1000), (0, 999));
     }
 
-    // -- prune tombstone forward-compat (Phase 7) --
+    // -- prune tombstone forward-compat --
 
     #[test]
     fn prune_keeps_empty_range_tombstone() {
         // Forward-compat smoke: an empty range survives a "drop the LogRef"
-        // operation (which Phase 7 will apply when pruning items). Today we
-        // model this with insert_page over a no-log scan.
+        // operation (which any future pruning would apply). Today we model
+        // this with insert_page over a no-log scan.
         let idx = mk_index();
         idx.insert_page(&LogPage {
             from_block: 100,

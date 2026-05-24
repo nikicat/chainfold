@@ -1,11 +1,10 @@
 //! Iterator that walks `[start, end]` forward in `batch_size`-aligned
 //! block ranges.
 //!
-//! Mirrors the reference implementation's `alignedBlockRanges` (erc20.ts:608–620). Two processes
-//! scanning the same filter at the same batch size record matching
-//! `scanned_ranges` rows when they fetch aligned chunks, so their caches
-//! can share work. The tail chunk may be partial (the `is_aligned: false`
-//! signal lets callers skip cache-record for those).
+//! Two processes scanning the same filter at the same batch size record
+//! matching `scanned_ranges` rows when they fetch aligned chunks, so
+//! their caches can share work. The tail chunk may be partial (the
+//! `is_aligned: false` signal lets callers skip cache-record for those).
 
 /// One block range from [`aligned_block_ranges`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -116,8 +115,8 @@ mod tests {
 
     #[test]
     fn lookback_from_recent_start_bounded_by_batch() {
-        // Per the reference implementation's "seed scan is bounded by lookback, not genesis":
-        // with start near the current tip, we should NOT scan from 0.
+        // Seed scan is bounded by lookback, not genesis: with start near
+        // the current tip, we should NOT scan from 0.
         let current = 18_000_000;
         let start = current - 10_000;
         let ranges: Vec<_> = collect(start, current, 1000);

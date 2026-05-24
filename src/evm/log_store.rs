@@ -1,15 +1,9 @@
 //! Durable SQLite-backed store for EVM log cache, scanned-range tracking,
 //! block headers, and ERC20 sidecar tables.
 //!
-//! Phase 1 of the refactor (see `refactor.md`) pushes navigation queries
-//! out of this layer into the in-memory [`LogIndex`](super::log_index).
-//! `LogStore` therefore exposes only the narrow durable surface — bulk
-//! read/write, scanned-range bookkeeping, and reorg invalidation — with
-//! no `first_log_*` / `last_log_*` navigation helpers.
-//!
-//! Schema lives here; [`super::log_cache_legacy`] is a thin facade that
-//! borrows these migrations and adds the deprecated navigation methods
-//! while old callers are being rewired.
+//! Exposes only the narrow durable surface — bulk read/write,
+//! scanned-range bookkeeping, and reorg invalidation. Navigation queries
+//! (first/last log) live in the in-memory [`LogIndex`](super::log_index).
 
 use std::sync::Mutex;
 
@@ -261,7 +255,7 @@ pub struct CachedErc20Metadata {
 /// Logs are append-only; reorgs are handled by marking blocks in
 /// `reorged_blocks` and filtering them out at query time.
 ///
-/// Phase 1 boundary: navigation queries (first/last log) live in
+/// Navigation queries (first/last log) live in
 /// [`LogIndex`](super::log_index), not here.
 pub struct LogStore {
     conn: Mutex<Connection>,
