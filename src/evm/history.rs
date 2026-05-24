@@ -321,19 +321,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         if let Some(t) = to {
             filter = filter.to_block(t);
         }
-        if let Some(t) = self.topics[0] {
-            filter = filter.event_signature(B256::from(t));
-        }
-        if let Some(t) = self.topics[1] {
-            filter = filter.topic1(B256::from(t));
-        }
-        if let Some(t) = self.topics[2] {
-            filter = filter.topic2(B256::from(t));
-        }
-        if let Some(t) = self.topics[3] {
-            filter = filter.topic3(B256::from(t));
-        }
-        filter
+        apply_topics(filter, &self.topics)
     }
 
     async fn latest_block_number(&self) -> Result<u64, HistoryError> {
@@ -494,6 +482,25 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<Evm
 // Free helpers
 // ============================================================
 
+/// Apply `topics[0..3]` to an alloy [`Filter`] in the conventional slots
+/// (`event_signature` / `topic1` / `topic2` / `topic3`). Skips slots that
+/// are `None` (matches anything in that position).
+fn apply_topics(mut filter: Filter, topics: &[Option<[u8; 32]>; 4]) -> Filter {
+    if let Some(t) = topics[0] {
+        filter = filter.event_signature(B256::from(t));
+    }
+    if let Some(t) = topics[1] {
+        filter = filter.topic1(B256::from(t));
+    }
+    if let Some(t) = topics[2] {
+        filter = filter.topic2(B256::from(t));
+    }
+    if let Some(t) = topics[3] {
+        filter = filter.topic3(B256::from(t));
+    }
+    filter
+}
+
 fn log_to_evm_event(log: &Log) -> EvmEvent {
     let addr: [u8; 20] = log.address().0 .0;
     let block_hash: [u8; 32] = log.block_hash.map_or([0; 32], |h| h.0);
@@ -565,22 +572,11 @@ where
         let provider = provider.clone();
         let store = store.clone();
         Box::pin(async move {
-            let mut filter = Filter::new()
+            let filter = Filter::new()
                 .address(Address::from(address))
                 .from_block(from)
                 .to_block(to);
-            if let Some(t) = topics[0] {
-                filter = filter.event_signature(B256::from(t));
-            }
-            if let Some(t) = topics[1] {
-                filter = filter.topic1(B256::from(t));
-            }
-            if let Some(t) = topics[2] {
-                filter = filter.topic2(B256::from(t));
-            }
-            if let Some(t) = topics[3] {
-                filter = filter.topic3(B256::from(t));
-            }
+            let filter = apply_topics(filter, &topics);
             tracing::debug!(from, to, blocks = to - from + 1, "eth_getLogs");
             let logs = provider
                 .get_logs(&filter)
