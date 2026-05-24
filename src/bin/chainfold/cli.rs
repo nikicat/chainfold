@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -58,9 +60,10 @@ pub struct EvmArgs {
     #[arg(long)]
     pub rpc_url: Option<String>,
 
-    /// `SQLite` cache path
-    #[arg(long, default_value = "./chainfold.db")]
-    pub db: String,
+    /// `SQLite` cache path. Defaults to `$XDG_CACHE_HOME/chainfold/chainfold.db`
+    /// (typically `~/.cache/chainfold/chainfold.db`).
+    #[arg(long)]
+    pub db: Option<PathBuf>,
 
     /// Block chunk size for `eth_getLogs`
     #[arg(long, default_value = "1000")]

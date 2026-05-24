@@ -1,6 +1,7 @@
 pub mod erc20;
 pub mod events;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use alloy::providers::{Provider, ProviderBuilder};
@@ -11,6 +12,15 @@ use chainfold::evm::{rpc_retry_layer, versioned_path, LogStore};
 use crate::chains::ChainResolver;
 use crate::cli::{EvmArgs, EvmCommand};
 use crate::config::{Config, ConfigError};
+
+/// Default cache DB location: `$XDG_CACHE_HOME/chainfold/chainfold.db`.
+/// Falls back to `./chainfold.db` if no XDG cache dir is resolvable.
+fn default_db_path() -> PathBuf {
+    dirs::cache_dir().map_or_else(
+        || PathBuf::from("./chainfold.db"),
+        |d| d.join("chainfold").join("chainfold.db"),
+    )
+}
 
 pub async fn run(
     config: &Config,
@@ -63,7 +73,13 @@ pub async fn run(
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);
 
-    let db_path = versioned_path(&args.db);
+    let db_path_buf = args.db.clone().unwrap_or_else(default_db_path);
+    if let Some(parent) = db_path_buf.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = Arc::new(LogStore::open(&db_path)?);
 
     let rpc_chain_id = provider.get_chain_id().await?;
