@@ -48,6 +48,8 @@ pub struct ChainlistEntry {
     pub is_testnet: Option<bool>,
     #[serde(default)]
     pub red_flags: Option<Vec<String>>,
+    #[serde(default)]
+    pub rpc: Vec<RpcEntry>,
     pub native_currency: NativeCurrency,
 }
 
@@ -62,6 +64,21 @@ pub struct NativeCurrency {
     pub name: String,
     pub symbol: String,
     pub decimals: u8,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(
+    dead_code,
+    reason = "url and tracking are read by ChainResolver::public_rpc_for (next task); \
+              #[allow] (not #[expect]) because tests read these fields, which silences \
+              the lint in the test target and would make #[expect] complain there."
+)]
+pub struct RpcEntry {
+    pub url: String,
+    #[serde(default)]
+    pub tracking: Option<String>,
+    // chainlist.org sometimes includes `isOpenSource`, `trackingDetails`,
+    // etc. Not modeled here; serde drops unknown fields silently.
 }
 
 #[derive(Debug, Error)]
@@ -226,6 +243,8 @@ mod tests {
         assert!(entry.info_url.is_none());
         assert!(entry.is_testnet.is_none());
         assert!(entry.red_flags.is_none());
+        // rpc defaults to empty when missing from the JSON.
+        assert!(entry.rpc.is_empty());
     }
 
     const ENRICHED_ENTRY: &str = r#"{
@@ -250,6 +269,9 @@ mod tests {
         assert_eq!(entry.chain_id, 56);
         assert_eq!(entry.short_name, "bnb");
         assert_eq!(entry.chain_slug.as_deref(), Some("binance"));
+        assert_eq!(entry.rpc.len(), 1);
+        assert_eq!(entry.rpc[0].url, "https://bsc-rpc.example");
+        assert_eq!(entry.rpc[0].tracking.as_deref(), Some("none"));
     }
 
     fn fixture_entries() -> Vec<ChainlistEntry> {
@@ -303,6 +325,36 @@ mod tests {
         assert_eq!(r.resolve("ethereum").expect("eth"), 1);
         assert_eq!(r.resolve("binance").expect("bnb"), 56);
         assert_eq!(r.resolve("oeth").expect("op"), 10);
+    }
+
+    const RPC_HEAVY_ENTRY: &str = r#"{
+        "name": "Test Chain",
+        "chain": "TEST",
+        "chainId": 99999,
+        "shortName": "test",
+        "rpc": [
+            {"url": "https://a.example", "tracking": "none"},
+            {"url": "https://b.example", "tracking": "limited"},
+            {"url": "https://c.example"},
+            {"url": "wss://d.example/ws", "tracking": "none"},
+            {"url": "http://e.example", "tracking": "yes"}
+        ],
+        "nativeCurrency": { "name": "T", "symbol": "T", "decimals": 18 }
+    }"#;
+
+    #[test]
+    fn parses_rpc_array_with_mixed_tracking() {
+        let entry: ChainlistEntry = serde_json::from_str(RPC_HEAVY_ENTRY).expect("deserialize");
+        assert_eq!(entry.rpc.len(), 5);
+        assert_eq!(entry.rpc[0].url, "https://a.example");
+        assert_eq!(entry.rpc[0].tracking.as_deref(), Some("none"));
+        assert_eq!(entry.rpc[2].url, "https://c.example");
+        assert!(
+            entry.rpc[2].tracking.is_none(),
+            "missing tracking deserializes to None"
+        );
+        assert_eq!(entry.rpc[3].url, "wss://d.example/ws");
+        assert_eq!(entry.rpc[4].url, "http://e.example");
     }
 
     #[test]
