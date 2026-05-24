@@ -116,23 +116,17 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let mut stream = watch_hist(&merged_hs, merged_pos_for(start));
             let mut count = 0;
             while let Some(item) = stream.next().await {
-                let item = item?;
-                let mi: &MergedItem<EvmEvent> = &item.item;
-                let event_pos = mi.item.position();
-                if Some(event_pos) == last_pos {
-                    continue;
+                if render_transfer(
+                    &item?,
+                    &mut balance,
+                    &mut last_pos,
+                    count,
+                    &ctx,
+                    show_balance,
+                    owner,
+                ) {
+                    count += 1;
                 }
-                last_pos = Some(event_pos);
-                if show_balance {
-                    balance = apply_transfer(owner, balance, &mi.item);
-                }
-                let positioned = Positioned::new(mi.item.clone(), event_pos);
-                if show_balance {
-                    fmt::print_balance(&positioned, balance, count, &ctx);
-                } else {
-                    fmt::print_transfer(&positioned, count, &ctx);
-                }
-                count += 1;
             }
         } else {
             let hist = merged_hs.next().await;
@@ -141,27 +135,21 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let mut stream = window.iter();
             let mut count = 0;
             while let Some(item) = stream.next().await {
-                let item = item?;
-                let mi: &MergedItem<EvmEvent> = &item.item;
-                let event_pos = mi.item.position();
-                if Some(event_pos) == last_pos {
-                    continue;
-                }
-                last_pos = Some(event_pos);
-                if show_balance {
-                    balance = apply_transfer(owner, balance, &mi.item);
-                }
                 if count >= evm_args.limit {
                     println!("... (limit reached, use --limit to show more)");
                     break;
                 }
-                let positioned = Positioned::new(mi.item.clone(), event_pos);
-                if show_balance {
-                    fmt::print_balance(&positioned, balance, count, &ctx);
-                } else {
-                    fmt::print_transfer(&positioned, count, &ctx);
+                if render_transfer(
+                    &item?,
+                    &mut balance,
+                    &mut last_pos,
+                    count,
+                    &ctx,
+                    show_balance,
+                    owner,
+                ) {
+                    count += 1;
                 }
-                count += 1;
             }
             if count == 0 {
                 println!("No transfers involving owner.");
@@ -172,6 +160,38 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     }
 
     Ok(())
+}
+
+/// Render one merged transfer: dedupe on event position (the in/out
+/// pre-filter yields the same log twice when owner == from == to is
+/// theoretically possible, and reorg-edge cases can re-emit), fold the
+/// running balance when enabled, and print. Returns `true` if printed —
+/// the caller increments its count on `true`.
+fn render_transfer(
+    item: &Positioned<MergedItem<EvmEvent>, MergedPos>,
+    balance: &mut U256,
+    last_pos: &mut Option<EvmPosition>,
+    count: usize,
+    ctx: &FmtContext<'_>,
+    show_balance: bool,
+    owner: [u8; 20],
+) -> bool {
+    let mi = &item.item;
+    let event_pos = mi.item.position();
+    if Some(event_pos) == *last_pos {
+        return false;
+    }
+    *last_pos = Some(event_pos);
+    if show_balance {
+        *balance = apply_transfer(owner, *balance, &mi.item);
+    }
+    let positioned = Positioned::new(mi.item.clone(), event_pos);
+    if show_balance {
+        fmt::print_balance(&positioned, *balance, count, ctx);
+    } else {
+        fmt::print_transfer(&positioned, count, ctx);
+    }
+    true
 }
 
 /// Build the two-key `MergedPos` representing `p` for both the `in` and
