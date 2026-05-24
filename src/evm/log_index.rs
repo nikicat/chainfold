@@ -770,14 +770,7 @@ impl LogIndex {
             match next {
                 None => {
                     // No range past cursor — trailing gap (cursor, to].
-                    let notify = Arc::new(Notify::new());
-                    let placeholder = Range {
-                        start: cursor,
-                        end: to,
-                        item: None,
-                        fetch: Some(notify.clone()),
-                    };
-                    tree.insert(to, placeholder);
+                    let notify = install_gap_placeholder(&mut tree, cursor, to);
                     return NextStep::FillGap {
                         start_pos: cursor,
                         end_pos: to,
@@ -786,16 +779,9 @@ impl LogIndex {
                 }
                 Some((start, _end, Some(notify))) => {
                     if start > cursor {
-                        // Gap before the in-flight range — fill the gap (we win the race).
-                        let gap_end = if start < to { start } else { to };
-                        let our_notify = Arc::new(Notify::new());
-                        let placeholder = Range {
-                            start: cursor,
-                            end: gap_end,
-                            item: None,
-                            fetch: Some(our_notify.clone()),
-                        };
-                        tree.insert(gap_end, placeholder);
+                        // Gap before the in-flight range — fill it (we win the race).
+                        let gap_end = start.min(to);
+                        let our_notify = install_gap_placeholder(&mut tree, cursor, gap_end);
                         return NextStep::FillGap {
                             start_pos: cursor,
                             end_pos: gap_end,
@@ -810,15 +796,8 @@ impl LogIndex {
                 Some((start, end, None)) => {
                     if start > cursor {
                         // Gap before this range.
-                        let gap_end = if start < to { start } else { to };
-                        let our_notify = Arc::new(Notify::new());
-                        let placeholder = Range {
-                            start: cursor,
-                            end: gap_end,
-                            item: None,
-                            fetch: Some(our_notify.clone()),
-                        };
-                        tree.insert(gap_end, placeholder);
+                        let gap_end = start.min(to);
+                        let our_notify = install_gap_placeholder(&mut tree, cursor, gap_end);
                         return NextStep::FillGap {
                             start_pos: cursor,
                             end_pos: gap_end,
@@ -979,16 +958,7 @@ impl LogIndex {
             if to <= from {
                 return WalkStep::Done;
             }
-            let notify = Arc::new(Notify::new());
-            tree.insert(
-                to,
-                Range {
-                    start: from,
-                    end: to,
-                    item: None,
-                    fetch: Some(notify.clone()),
-                },
-            );
+            let notify = install_gap_placeholder(&mut tree, from, to);
             return WalkStep::FillGap {
                 start_pos: from,
                 end_pos: to,
@@ -998,17 +968,8 @@ impl LogIndex {
         if let Some(notify) = fetch_opt {
             if start > from {
                 // Gap to fill before the in-flight range.
-                let gap_end = if start < to { start } else { to };
-                let our_notify = Arc::new(Notify::new());
-                tree.insert(
-                    gap_end,
-                    Range {
-                        start: from,
-                        end: gap_end,
-                        item: None,
-                        fetch: Some(our_notify.clone()),
-                    },
-                );
+                let gap_end = start.min(to);
+                let our_notify = install_gap_placeholder(&mut tree, from, gap_end);
                 return WalkStep::FillGap {
                     start_pos: from,
                     end_pos: gap_end,
@@ -1019,17 +980,8 @@ impl LogIndex {
         }
         if start > from {
             // Gap.
-            let gap_end = if start < to { start } else { to };
-            let our_notify = Arc::new(Notify::new());
-            tree.insert(
-                gap_end,
-                Range {
-                    start: from,
-                    end: gap_end,
-                    item: None,
-                    fetch: Some(our_notify.clone()),
-                },
-            );
+            let gap_end = start.min(to);
+            let our_notify = install_gap_placeholder(&mut tree, from, gap_end);
             return WalkStep::FillGap {
                 start_pos: from,
                 end_pos: gap_end,
@@ -1047,6 +999,27 @@ impl LogIndex {
             None => WalkStep::Skip(end),
         }
     }
+}
+
+/// Install an in-flight fetch placeholder at `end` covering `(start, end]`
+/// and return its [`Notify`]. Caller fills `(start, end]` via the fetcher
+/// and replaces the placeholder in `finalize_gap_fill`.
+fn install_gap_placeholder(
+    tree: &mut BTreeMap<BlockPos, Range>,
+    start: BlockPos,
+    end: BlockPos,
+) -> Arc<Notify> {
+    let notify = Arc::new(Notify::new());
+    tree.insert(
+        end,
+        Range {
+            start,
+            end,
+            item: None,
+            fetch: Some(notify.clone()),
+        },
+    );
+    notify
 }
 
 // ============================================================
