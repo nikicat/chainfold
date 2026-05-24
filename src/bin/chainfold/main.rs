@@ -1,3 +1,4 @@
+mod chains;
 mod cli;
 mod config;
 mod evm;
