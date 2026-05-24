@@ -40,10 +40,21 @@ pub enum SignatureError {
     Decode(String),
 }
 
-/// Cache surface used by [`resolve_event_topic`].
-///
-/// `get` returns `(canonical_signature, topic0)` when the (chain, address,
-/// `event_name`) triple is known; `put` stores a freshly resolved entry.
+/// A resolved event entry: the canonical signature, topic0 hash, and (when
+/// available) the JSON of the matched ABI event item. The ABI JSON is what
+/// callers need to decode logs — it carries per-input names, types, and the
+/// indexed flag.
+#[derive(Debug, Clone)]
+pub struct ResolvedEvent {
+    pub signature: String,
+    pub topic0: [u8; 32],
+    /// JSON of the matched event item. Missing for entries cached before
+    /// the column was added; present for every entry written by
+    /// [`resolve_event`].
+    pub abi_json: Option<String>,
+}
+
+/// Cache surface used by [`resolve_event`].
 #[async_trait]
 pub trait SignatureCache: Send + Sync {
     async fn get(
@@ -51,23 +62,51 @@ pub trait SignatureCache: Send + Sync {
         chain_id: u64,
         address: [u8; 20],
         event_name: &str,
-    ) -> Result<Option<(String, [u8; 32])>, SignatureError>;
+    ) -> Result<Option<ResolvedEvent>, SignatureError>;
 
     async fn put(
         &self,
         chain_id: u64,
         address: [u8; 20],
         event_name: &str,
-        signature: &str,
-        topic0: [u8; 32],
+        entry: &ResolvedEvent,
     ) -> Result<(), SignatureError>;
 }
 
-/// Resolve `(chain_id, contract address, event_name) → (signature, topic0)`.
+/// Resolve `(chain_id, contract address, event_name) → ResolvedEvent`.
 ///
-/// Consults `cache` first; on miss, fetches the contract ABI from Sourcify
-/// (always tried) and falls back to Etherscan (when `etherscan_api_key`
-/// is `Some`). Writes any successful resolution back through `cache`.
+/// Consults `cache` first; on miss (or on a cache hit missing `abi_json`),
+/// fetches the contract ABI from Sourcify (always tried) and falls back to
+/// Etherscan (when `etherscan_api_key` is `Some`). Writes any successful
+/// resolution back through `cache`.
+pub async fn resolve_event(
+    cache: &dyn SignatureCache,
+    chain_id: u64,
+    address: [u8; 20],
+    event_name: &str,
+    etherscan_api_key: Option<&str>,
+) -> Result<ResolvedEvent, SignatureError> {
+    if let Some(hit) = cache.get(chain_id, address, event_name).await? {
+        if hit.abi_json.is_some() {
+            return Ok(hit);
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let abi_json = fetch_abi_json(&client, chain_id, address, etherscan_api_key).await?;
+    let (signature, topic0, item_json) = event_from_abi(&abi_json, event_name)?;
+    let entry = ResolvedEvent {
+        signature,
+        topic0,
+        abi_json: Some(item_json),
+    };
+    cache.put(chain_id, address, event_name, &entry).await?;
+    Ok(entry)
+}
+
+/// Resolve only the canonical signature + topic0. Convenience wrapper around
+/// [`resolve_event`] for callers that don't need decoding.
 pub async fn resolve_event_topic(
     cache: &dyn SignatureCache,
     chain_id: u64,
@@ -75,18 +114,8 @@ pub async fn resolve_event_topic(
     event_name: &str,
     etherscan_api_key: Option<&str>,
 ) -> Result<(String, [u8; 32]), SignatureError> {
-    if let Some(hit) = cache.get(chain_id, address, event_name).await? {
-        return Ok(hit);
-    }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let abi_json = fetch_abi_json(&client, chain_id, address, etherscan_api_key).await?;
-    let (sig, topic0) = event_topic_from_abi(&abi_json, event_name)?;
-    cache
-        .put(chain_id, address, event_name, &sig, topic0)
-        .await?;
-    Ok((sig, topic0))
+    let r = resolve_event(cache, chain_id, address, event_name, etherscan_api_key).await?;
+    Ok((r.signature, r.topic0))
 }
 
 /// Compute topic0 from a canonical event signature like
@@ -215,8 +244,6 @@ async fn fetch_etherscan(
 
 #[derive(Deserialize)]
 struct AbiItem {
-    #[serde(rename = "type", default)]
-    kind: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -231,19 +258,35 @@ struct AbiParam {
     components: Vec<AbiParam>,
 }
 
+fn event_from_abi(
+    abi_json: &str,
+    event_name: &str,
+) -> Result<(String, [u8; 32], String), SignatureError> {
+    let items: Vec<serde_json::Value> = serde_json::from_str(abi_json)
+        .map_err(|e| SignatureError::Decode(format!("ABI JSON: {e}")))?;
+    let raw = items
+        .into_iter()
+        .find(|v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("event")
+                && v.get("name").and_then(|n| n.as_str()) == Some(event_name)
+        })
+        .ok_or_else(|| SignatureError::EventNotFound(event_name.into()))?;
+    let parsed: AbiItem = serde_json::from_value(raw.clone())
+        .map_err(|e| SignatureError::Decode(format!("event item: {e}")))?;
+    let signature = canonical_signature(&parsed.name, &parsed.inputs);
+    let topic0 = keccak256(signature.as_bytes());
+    let item_json = serde_json::to_string(&raw)
+        .map_err(|e| SignatureError::Decode(format!("re-serialize event item: {e}")))?;
+    Ok((signature, topic0, item_json))
+}
+
+#[cfg(test)]
 fn event_topic_from_abi(
     abi_json: &str,
     event_name: &str,
 ) -> Result<(String, [u8; 32]), SignatureError> {
-    let items: Vec<AbiItem> = serde_json::from_str(abi_json)
-        .map_err(|e| SignatureError::Decode(format!("ABI JSON: {e}")))?;
-    let event = items
-        .iter()
-        .find(|i| i.kind == "event" && i.name == event_name)
-        .ok_or_else(|| SignatureError::EventNotFound(event_name.into()))?;
-    let signature = canonical_signature(&event.name, &event.inputs);
-    let topic0 = keccak256(signature.as_bytes());
-    Ok((signature, topic0))
+    let (sig, topic, _json) = event_from_abi(abi_json, event_name)?;
+    Ok((sig, topic))
 }
 
 fn canonical_signature(name: &str, inputs: &[AbiParam]) -> String {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chainfold::evm::LogStore;
-use chainfold::signatures::{SignatureCache, SignatureError};
+use chainfold::signatures::{ResolvedEvent, SignatureCache, SignatureError};
 
 pub struct LogStoreSignatureCache {
     store: Arc<LogStore>,
@@ -24,9 +24,16 @@ impl SignatureCache for LogStoreSignatureCache {
         chain_id: u64,
         address: [u8; 20],
         event_name: &str,
-    ) -> Result<Option<(String, [u8; 32])>, SignatureError> {
+    ) -> Result<Option<ResolvedEvent>, SignatureError> {
         self.store
             .get_event_signature(chain_id, &address, event_name)
+            .map(|opt| {
+                opt.map(|(signature, topic0, abi_json)| ResolvedEvent {
+                    signature,
+                    topic0,
+                    abi_json,
+                })
+            })
             .map_err(|e| SignatureError::Cache(e.to_string()))
     }
 
@@ -35,11 +42,17 @@ impl SignatureCache for LogStoreSignatureCache {
         chain_id: u64,
         address: [u8; 20],
         event_name: &str,
-        signature: &str,
-        topic0: [u8; 32],
+        entry: &ResolvedEvent,
     ) -> Result<(), SignatureError> {
         self.store
-            .insert_event_signature(chain_id, &address, event_name, signature, &topic0)
+            .insert_event_signature(
+                chain_id,
+                &address,
+                event_name,
+                &entry.signature,
+                &entry.topic0,
+                entry.abi_json.as_deref(),
+            )
             .map_err(|e| SignatureError::Cache(e.to_string()))
     }
 }

@@ -1,12 +1,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use alloy::dyn_abi::{DecodedEvent, DynSolValue, EventExt};
+use alloy::json_abi::Event;
 use alloy::network::Ethereum;
+use alloy::primitives::B256;
 use alloy::providers::Provider;
 use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Hist, HistBackend, HistStore, Positioned};
 use chainfold::evm::{EvmLogHistory, LogStore, SubscribeTransport};
-use chainfold::signatures::{resolve_event_topic, topic_from_signature};
+use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 
 use crate::cli::{EventsArgs, EvmArgs};
@@ -14,6 +17,11 @@ use crate::config::Config;
 use crate::fmt::format_timestamp;
 use crate::signature_cache::LogStoreSignatureCache;
 use crate::util::{parse_datetime, parse_hex_address};
+
+struct PrintOpts {
+    full: bool,
+    decoder: Option<Event>,
+}
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     provider: &P,
@@ -27,9 +35,19 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     follow: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let address = parse_hex_address(&events_args.address)?;
-    let (signature, topic0) = resolve_topic0(cache, config, chain_id, address, events_args).await?;
+    let resolved = resolve_lookup(cache, config, chain_id, address, events_args).await?;
 
-    let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
+    let decoder = if events_args.decode {
+        Some(build_decoder(&resolved)?)
+    } else {
+        None
+    };
+    let opts = PrintOpts {
+        full: events_args.full,
+        decoder,
+    };
+
+    let topics: [Option<[u8; 32]>; 4] = [Some(resolved.topic0), None, None, None];
     let backend = EvmLogHistory::with_options(
         provider.clone(),
         cache.clone(),
@@ -43,10 +61,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let (start, end) = resolve_range(evm_args, &hist_store).await?;
 
     println!("  Address:  0x{}", hex::encode(address));
-    if let Some(sig) = &signature {
+    if let Some(sig) = &resolved.signature {
         println!("  Event:    {sig}");
     }
-    println!("  Topic0:   0x{}", hex::encode(topic0));
+    println!("  Topic0:   0x{}", hex::encode(resolved.topic0));
     println!("  Chain:    {chain_id}");
     println!("  Range:    block {} .. {}", start.block, end.block);
     println!("  DB:       {db_path}");
@@ -63,7 +81,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         let mut count = 0;
         while let Some(item) = stream.next().await {
             let item = item?;
-            print_event(&item, count);
+            print_event(&item, count, &opts);
             count += 1;
         }
         println!("\nHistory closed ({count} events).");
@@ -78,7 +96,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 println!("... (limit reached, use --limit to show more)");
                 break;
             }
-            print_event(&item, count);
+            print_event(&item, count, &opts);
             count += 1;
         }
         if count == 0 {
@@ -91,29 +109,60 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     Ok(())
 }
 
-/// Resolve `--topic0` / `--event-sig` / `--event` to `(signature?, topic0)`.
-/// `signature` is `None` only when the user supplied `--topic0` directly.
-async fn resolve_topic0(
+/// Result of `--topic0` / `--event-sig` / `--event` resolution.
+struct Lookup {
+    /// Canonical signature, when known (always present unless the user
+    /// supplied `--topic0` directly).
+    signature: Option<String>,
+    topic0: [u8; 32],
+    /// ABI item JSON for the matched event. Only populated when `--event`
+    /// was used and Sourcify/Etherscan returned an ABI.
+    abi_json: Option<String>,
+}
+
+async fn resolve_lookup(
     cache: &Arc<LogStore>,
     config: &Config,
     chain_id: u64,
     address: [u8; 20],
     args: &EventsArgs,
-) -> Result<(Option<String>, [u8; 32]), Box<dyn std::error::Error>> {
+) -> Result<Lookup, Box<dyn std::error::Error>> {
     if let Some(hex) = &args.topic0 {
-        return Ok((None, parse_topic_hex(hex)?));
+        return Ok(Lookup {
+            signature: None,
+            topic0: parse_topic_hex(hex)?,
+            abi_json: None,
+        });
     }
     if let Some(sig) = &args.event_sig {
-        return Ok((Some(sig.clone()), topic_from_signature(sig)));
+        return Ok(Lookup {
+            signature: Some(sig.clone()),
+            topic0: topic_from_signature(sig),
+            abi_json: None,
+        });
     }
     if let Some(name) = &args.event {
-        let cache = LogStoreSignatureCache::new(cache.clone());
-        let (sig, topic) =
-            resolve_event_topic(&cache, chain_id, address, name, config.etherscan_api_key())
-                .await?;
-        return Ok((Some(sig), topic));
+        let sig_cache = LogStoreSignatureCache::new(cache.clone());
+        let resolved =
+            resolve_event(&sig_cache, chain_id, address, name, config.etherscan_api_key()).await?;
+        return Ok(Lookup {
+            signature: Some(resolved.signature),
+            topic0: resolved.topic0,
+            abi_json: resolved.abi_json,
+        });
     }
     Err("provide one of --topic0, --event-sig, or --event".into())
+}
+
+/// Build an `alloy_json_abi::Event` from a resolved lookup, for `--decode`.
+fn build_decoder(lookup: &Lookup) -> Result<Event, Box<dyn std::error::Error>> {
+    let json = lookup.abi_json.as_deref().ok_or(
+        "--decode requires --event (the ABI item is fetched and cached by name; \
+         --topic0 and --event-sig do not carry indexed/non-indexed info)",
+    )?;
+    let event: Event =
+        serde_json::from_str(json).map_err(|e| format!("ABI event item JSON: {e}"))?;
+    Ok(event)
 }
 
 fn parse_topic_hex(s: &str) -> Result<[u8; 32], String> {
@@ -164,34 +213,110 @@ async fn resolve_range(
     }
 }
 
-fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
+fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize, opts: &PrintOpts) {
     let e = &item.item;
-    let topics: Vec<String> = e
-        .topics
-        .iter()
-        .skip(1) // topic0 is fixed by the filter
-        .map(|t| format!("0x{}…{}", hex::encode(&t[..4]), hex::encode(&t[28..])))
-        .collect();
-    let topics_str = if topics.is_empty() {
-        String::new()
+    let tx_str = if opts.full {
+        format!("0x{}", hex::encode(e.tx_hash))
     } else {
-        format!("  topics=[{}]", topics.join(", "))
+        format!(
+            "0x{}…{}",
+            hex::encode(&e.tx_hash[..4]),
+            hex::encode(&e.tx_hash[30..])
+        )
     };
-    let data_preview = if e.data.is_empty() {
-        String::new()
-    } else {
-        let n = e.data.len().min(16);
-        let suffix = if e.data.len() > n { "…" } else { "" };
-        format!("  data=0x{}{}", hex::encode(&e.data[..n]), suffix)
-    };
+    let topics_str = format_topics(&e.topics, opts.full);
+    let data_str = format_data(&e.data, opts.full);
     println!(
-        "[{:>4}] {:<10} {}  0x{}…{}{}{}",
+        "[{:>4}] {:<10} {}  {}{}{}",
         index,
         e.block_number,
         format_timestamp(e.timestamp),
-        hex::encode(&e.tx_hash[..4]),
-        hex::encode(&e.tx_hash[30..]),
+        tx_str,
         topics_str,
-        data_preview,
+        data_str,
     );
+    if let Some(event) = &opts.decoder {
+        print_decoded(event, e);
+    }
+}
+
+fn format_topics(topics: &[[u8; 32]], full: bool) -> String {
+    // topic0 is the event selector — fixed by the filter, redundant.
+    let rest = topics.iter().skip(1);
+    let parts: Vec<String> = if full {
+        rest.map(|t| format!("0x{}", hex::encode(t))).collect()
+    } else {
+        rest.map(|t| format!("0x{}…{}", hex::encode(&t[..4]), hex::encode(&t[28..])))
+            .collect()
+    };
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  topics=[{}]", parts.join(", "))
+    }
+}
+
+fn format_data(data: &[u8], full: bool) -> String {
+    if data.is_empty() {
+        return String::new();
+    }
+    if full {
+        return format!("  data=0x{}", hex::encode(data));
+    }
+    let n = data.len().min(16);
+    let suffix = if data.len() > n { "…" } else { "" };
+    format!("  data=0x{}{}", hex::encode(&data[..n]), suffix)
+}
+
+fn print_decoded(event: &Event, log: &EvmEvent) {
+    let topics: Vec<B256> = log.topics.iter().map(|t| B256::from(*t)).collect();
+    let decoded = match event.decode_log_parts(topics.iter().copied(), &log.data) {
+        Ok(d) => d,
+        Err(err) => {
+            println!("       decode error: {err}");
+            return;
+        }
+    };
+    let DecodedEvent { indexed, body, .. } = decoded;
+    let mut idx_iter = indexed.into_iter();
+    let mut body_iter = body.into_iter();
+    for param in &event.inputs {
+        let value = if param.indexed {
+            idx_iter.next()
+        } else {
+            body_iter.next()
+        };
+        let Some(value) = value else { continue };
+        let name = if param.name.is_empty() {
+            "_".to_string()
+        } else {
+            param.name.clone()
+        };
+        let ty = param.selector_type();
+        let kind = if param.indexed {
+            format!("{ty} indexed")
+        } else {
+            ty.into_owned()
+        };
+        println!("       {name} ({kind}) = {}", format_value(&value));
+    }
+}
+
+fn format_value(v: &DynSolValue) -> String {
+    match v {
+        DynSolValue::Bool(b) => b.to_string(),
+        DynSolValue::Int(i, _) => i.to_string(),
+        DynSolValue::Uint(u, _) => u.to_string(),
+        DynSolValue::Address(a) => format!("0x{}", hex::encode(a.as_slice())),
+        DynSolValue::Function(f) => format!("0x{}", hex::encode(f.as_slice())),
+        DynSolValue::FixedBytes(b, n) => format!("0x{}", hex::encode(&b.as_slice()[..*n])),
+        DynSolValue::Bytes(b) => format!("0x{}", hex::encode(b)),
+        DynSolValue::String(s) => format!("\"{s}\""),
+        DynSolValue::Array(items)
+        | DynSolValue::FixedArray(items)
+        | DynSolValue::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(format_value).collect();
+            format!("[{}]", parts.join(", "))
+        }
+    }
 }

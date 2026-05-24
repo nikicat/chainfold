@@ -28,7 +28,7 @@ pub use history::EvmLogHistory;
 pub use log_index::{BlockPos, LogIndex, LogPage, LogRef};
 pub use log_store::{
     compute_filter_hash, compute_gaps, versioned_path, BlockHeader, CacheError,
-    CachedErc20Metadata, LogStore, CACHE_VERSION,
+    CachedErc20Metadata, EventSignatureRow, LogStore, CACHE_VERSION,
 };
 pub use owned_erc20::{OwnedErc20, IN_KEY, OUT_KEY};
 pub use retry::rpc_retry_layer;

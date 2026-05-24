@@ -123,6 +123,16 @@ pub struct EventsArgs {
     /// Example: --topic0 0xddf252ad...
     #[arg(long, conflicts_with_all = ["event", "event_sig"])]
     pub topic0: Option<String>,
+
+    /// Print full topic and data hex instead of the truncated preview.
+    #[arg(long)]
+    pub full: bool,
+
+    /// Decode topics and data using the event ABI (requires `--event`,
+    /// which fetches and caches the matching ABI item from Sourcify or
+    /// Etherscan).
+    #[arg(long)]
+    pub decode: bool,
 }
 
 #[derive(Parser)]
