@@ -16,12 +16,12 @@
 //! * Each delivered page is fed to [`LogIndex::insert_page`] (in-memory
 //!   tree update synchronous) and drained asynchronously to [`LogStore`].
 //! * Tip advances bump `latest_store`, which drives
-//!   [`HistStore::gen`](crate::arch::HistStore::gen).
+//!   [`HistStore::snapshots`](crate::arch::HistStore::snapshots).
 //! * On reconnect after a transport error the subscriber fills the gap via
 //!   [`LogIndex::ensure_cached`]; duplicates are absorbed by the late-item
 //!   rules.
 //!
-//! Without an active subscription, [`HistStore::gen`] still yields the
+//! Without an active subscription, [`HistStore::snapshots`] still yields the
 //! current snapshot but will not advance until a tip update arrives —
 //! callers can also drive the tip manually via [`Self::poll_tip`].
 

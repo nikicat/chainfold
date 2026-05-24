@@ -3,7 +3,7 @@
 //! Source-agnostic core: a stream of items is exposed as a sequence of
 //! [`Hist`] snapshots produced by a [`HistStore`]. Each [`Hist`] is finite,
 //! immutable, and iterates items in the half-open interval `(start, end]`.
-//! [`HistStore::gen`] yields a fresh [`Hist`] each time the source's tip
+//! [`HistStore::snapshots`] yields a fresh [`Hist`] each time the source's tip
 //! advances; consumers resume by [`split`](Hist::split)ing at a saved
 //! position.
 //!
@@ -47,7 +47,7 @@ pub type Subscription<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 /// Stream of items yielded by [`Hist::iter`].
 pub type ItemStream<T, P> = Subscription<Result<Positioned<T, P>, HistoryError>>;
 
-/// Stream of snapshots yielded by [`HistStore::gen`].
+/// Stream of snapshots yielded by [`HistStore::snapshots`].
 pub type HistStream<T, P> = Subscription<Hist<T, P>>;
 
 // ============================================================
@@ -204,7 +204,7 @@ impl Drop for AsyncDisposable {
 /// Iterates items in `(start, end]`. The snapshot is fixed at construction
 /// — even if new items arrive at the source, this `Hist` continues to
 /// reflect the same window. Get a fresh window via
-/// [`HistStore::next`]/[`HistStore::gen`].
+/// [`HistStore::next`]/[`HistStore::snapshots`].
 pub struct Hist<T, P: Position> {
     backend: Arc<dyn HistBackend<T, P>>,
     start: P,
