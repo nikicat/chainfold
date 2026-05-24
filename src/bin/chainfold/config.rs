@@ -153,15 +153,29 @@ fn interpolate_env(input: &str) -> Result<String, ConfigError> {
     while let Some(c) = chars.next() {
         if c == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
-            let mut var_name = String::new();
+            let mut content = String::new();
             for ch in chars.by_ref() {
                 if ch == '}' {
                     break;
                 }
-                var_name.push(ch);
+                content.push(ch);
             }
-            let value = std::env::var(&var_name)
-                .map_err(|_| ConfigError::MissingEnvVar { var: var_name })?;
+            // Support shell-style `${VAR:-fallback}`: split on `:-`. If the
+            // env var is unset, substitute the fallback (which may be empty).
+            // Without `:-`, the env var is mandatory (existing strict behavior).
+            let (var_name, fallback) = match content.split_once(":-") {
+                Some((name, fb)) => (name, Some(fb)),
+                None => (content.as_str(), None),
+            };
+            let value = match (std::env::var(var_name), fallback) {
+                (Ok(v), _) => v,
+                (Err(_), Some(fb)) => fb.to_owned(),
+                (Err(_), None) => {
+                    return Err(ConfigError::MissingEnvVar {
+                        var: var_name.to_owned(),
+                    });
+                }
+            };
             result.push_str(&value);
         } else {
             result.push(c);
@@ -195,5 +209,39 @@ mod tests {
             alchemy_chain_slug(56).expect("bsc supported"),
             "bnb-mainnet"
         );
+    }
+
+    #[test]
+    fn interpolate_strict_var_still_errors_when_unset() {
+        // Unique name to avoid env collisions across parallel tests.
+        std::env::remove_var("CHAINFOLD_TEST_STRICT_UNSET");
+        let err = interpolate_env("x=${CHAINFOLD_TEST_STRICT_UNSET}").expect_err("should error");
+        assert!(
+            matches!(err, ConfigError::MissingEnvVar { ref var } if var == "CHAINFOLD_TEST_STRICT_UNSET")
+        );
+    }
+
+    #[test]
+    fn interpolate_default_syntax_empty_when_unset() {
+        std::env::remove_var("CHAINFOLD_TEST_EMPTY_DEFAULT");
+        let out = interpolate_env("x=${CHAINFOLD_TEST_EMPTY_DEFAULT:-}").expect("should not error");
+        assert_eq!(out, "x=");
+    }
+
+    #[test]
+    fn interpolate_default_syntax_fallback_when_unset() {
+        std::env::remove_var("CHAINFOLD_TEST_FALLBACK");
+        let out =
+            interpolate_env("x=${CHAINFOLD_TEST_FALLBACK:-hello world}").expect("should not error");
+        assert_eq!(out, "x=hello world");
+    }
+
+    #[test]
+    fn interpolate_default_syntax_env_wins_when_set() {
+        std::env::set_var("CHAINFOLD_TEST_ENV_WINS", "from-env");
+        let out =
+            interpolate_env("x=${CHAINFOLD_TEST_ENV_WINS:-fallback}").expect("should not error");
+        assert_eq!(out, "x=from-env");
+        std::env::remove_var("CHAINFOLD_TEST_ENV_WINS");
     }
 }
