@@ -90,6 +90,25 @@ impl Config {
         paths
     }
 
+    /// Build the Alchemy RPC URL for `chain_id` if both an Alchemy API key
+    /// is configured and the chain has an Alchemy slug. Returns `None`
+    /// otherwise (caller decides on fallback).
+    ///
+    /// An empty `api_key` (e.g. from the default config when
+    /// `ALCHEMY_KEY` env var is unset, via `${ALCHEMY_KEY:-}`) counts as
+    /// "no Alchemy configured" and yields `None`.
+    pub fn alchemy_url(&self, chain_id: u64) -> Option<String> {
+        let alchemy = self.provider.as_ref()?.alchemy.as_ref()?;
+        if alchemy.api_key.is_empty() {
+            return None;
+        }
+        let slug = alchemy_chain_slug(chain_id)?;
+        Some(format!(
+            "https://{slug}.g.alchemy.com/v2/{}",
+            alchemy.api_key
+        ))
+    }
+
     /// Resolve RPC URL: explicit `--rpc-url` > Alchemy config > error.
     pub fn rpc_url(
         &self,
@@ -99,14 +118,8 @@ impl Config {
         if let Some(url) = explicit_url {
             return Ok(url.to_string());
         }
-        if let Some(ref provider) = self.provider {
-            if let Some(ref alchemy) = provider.alchemy {
-                let slug = alchemy_chain_slug(chain_id)?;
-                return Ok(format!(
-                    "https://{}.g.alchemy.com/v2/{}",
-                    slug, alchemy.api_key
-                ));
-            }
+        if let Some(url) = self.alchemy_url(chain_id) {
+            return Ok(url);
         }
         Err(ConfigError::UnsupportedChain(chain_id))
     }
@@ -185,17 +198,17 @@ fn interpolate_env(input: &str) -> Result<String, ConfigError> {
     Ok(result)
 }
 
-fn alchemy_chain_slug(chain_id: u64) -> Result<&'static str, ConfigError> {
+fn alchemy_chain_slug(chain_id: u64) -> Option<&'static str> {
     match chain_id {
-        1 => Ok("eth-mainnet"),
-        10 => Ok("opt-mainnet"),
-        56 => Ok("bnb-mainnet"),
-        137 => Ok("polygon-mainnet"),
-        8453 => Ok("base-mainnet"),
-        11_155_111 => Ok("eth-sepolia"),
-        42161 => Ok("arb-mainnet"),
-        43114 => Ok("avax-mainnet"),
-        _ => Err(ConfigError::UnsupportedChain(chain_id)),
+        1 => Some("eth-mainnet"),
+        10 => Some("opt-mainnet"),
+        56 => Some("bnb-mainnet"),
+        137 => Some("polygon-mainnet"),
+        8453 => Some("base-mainnet"),
+        11_155_111 => Some("eth-sepolia"),
+        42161 => Some("arb-mainnet"),
+        43114 => Some("avax-mainnet"),
+        _ => None,
     }
 }
 
@@ -205,10 +218,75 @@ mod tests {
 
     #[test]
     fn alchemy_slug_bnb_mainnet() {
+        assert_eq!(alchemy_chain_slug(56), Some("bnb-mainnet"));
+    }
+
+    fn alchemy_config(key: &str) -> Config {
+        Config {
+            provider: Some(ProviderConfig {
+                alchemy: Some(AlchemyConfig {
+                    api_key: key.to_string(),
+                }),
+            }),
+            etherscan: None,
+        }
+    }
+
+    #[test]
+    fn alchemy_url_returns_some_for_supported_chain_with_key() {
+        let c = alchemy_config("test-key-123");
         assert_eq!(
-            alchemy_chain_slug(56).expect("bsc supported"),
-            "bnb-mainnet"
+            c.alchemy_url(1).as_deref(),
+            Some("https://eth-mainnet.g.alchemy.com/v2/test-key-123")
         );
+        assert_eq!(
+            c.alchemy_url(56).as_deref(),
+            Some("https://bnb-mainnet.g.alchemy.com/v2/test-key-123")
+        );
+    }
+
+    #[test]
+    fn alchemy_url_returns_none_for_unsupported_chain() {
+        let c = alchemy_config("test-key");
+        assert!(c.alchemy_url(99_999).is_none());
+    }
+
+    #[test]
+    fn alchemy_url_returns_none_when_no_provider() {
+        let c = Config {
+            provider: None,
+            etherscan: None,
+        };
+        assert!(c.alchemy_url(1).is_none());
+    }
+
+    #[test]
+    fn alchemy_url_returns_none_when_no_alchemy_in_provider() {
+        let c = Config {
+            provider: Some(ProviderConfig { alchemy: None }),
+            etherscan: None,
+        };
+        assert!(c.alchemy_url(1).is_none());
+    }
+
+    #[test]
+    fn alchemy_url_returns_none_when_api_key_is_empty() {
+        // Important for the `${ALCHEMY_KEY:-}` default config path:
+        // empty key means "no Alchemy effectively", fall through to public RPC.
+        let c = alchemy_config("");
+        assert!(c.alchemy_url(1).is_none());
+    }
+
+    #[test]
+    fn alchemy_chain_slug_returns_some_for_known_chains() {
+        assert_eq!(alchemy_chain_slug(1), Some("eth-mainnet"));
+        assert_eq!(alchemy_chain_slug(56), Some("bnb-mainnet"));
+        assert_eq!(alchemy_chain_slug(42161), Some("arb-mainnet"));
+    }
+
+    #[test]
+    fn alchemy_chain_slug_returns_none_for_unknown_chains() {
+        assert!(alchemy_chain_slug(99_999).is_none());
     }
 
     #[test]
