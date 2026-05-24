@@ -383,4 +383,33 @@ mod tests {
         let err = event_topic_from_abi(abi, "Transfer").unwrap_err();
         assert!(matches!(err, SignatureError::EventNotFound(_)));
     }
+
+    #[test]
+    fn event_from_abi_returns_matched_item_json() {
+        // Two events in the ABI — only the matched one should be returned,
+        // and its JSON should round-trip parseable.
+        let abi = r#"[
+            {"type":"function","name":"transfer","inputs":[]},
+            {"type":"event","name":"Approval","inputs":[
+                {"type":"address","name":"owner","indexed":true},
+                {"type":"address","name":"spender","indexed":true},
+                {"type":"uint256","name":"value","indexed":false}
+            ]},
+            {"type":"event","name":"Transfer","inputs":[
+                {"type":"address","name":"from","indexed":true},
+                {"type":"address","name":"to","indexed":true},
+                {"type":"uint256","name":"value","indexed":false}
+            ],"anonymous":false}
+        ]"#;
+        let (sig, _, item_json) = event_from_abi(abi, "Transfer").unwrap();
+        assert_eq!(sig, "Transfer(address,address,uint256)");
+        let v: serde_json::Value = serde_json::from_str(&item_json).unwrap();
+        assert_eq!(v["name"], "Transfer");
+        assert_eq!(v["type"], "event");
+        // The non-matching event must not bleed through.
+        assert_ne!(v["name"], "Approval");
+        // Indexed flags must be preserved (decoding depends on this).
+        assert_eq!(v["inputs"][0]["indexed"], true);
+        assert_eq!(v["inputs"][2]["indexed"], false);
+    }
 }
