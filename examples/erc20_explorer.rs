@@ -33,7 +33,7 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Position, watch_hist};
 use chainfold::evm::{
-    Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, LogStore, OUT_KEY, OwnedErc20,
+    CacheDb, Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, OUT_KEY, OwnedErc20,
     SubscribeTransport, apply_transfer, decode_transfer, fetch_erc20_metadata, rpc_retry_layer,
     versioned_path,
 };
@@ -277,14 +277,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);
     let db_path = versioned_path(&args.db);
-    let cache = Arc::new(LogStore::open(&db_path)?);
+    let cache = CacheDb::open(&db_path)?;
+    // Per-concern views over the one shared cache connection.
+    let erc20_cache = cache.erc20();
+    let log_cache = Arc::new(cache.logs());
 
     let chain_id = provider.get_chain_id().await?;
     let base_url = explorer_base_url(chain_id);
     println!("Fetching token metadata...");
     let meta_futures = addresses
         .iter()
-        .map(|addr| fetch_erc20_metadata(&provider, *addr, chain_id, &cache));
+        .map(|addr| fetch_erc20_metadata(&provider, *addr, chain_id, &erc20_cache));
     let meta_results = join_all(meta_futures).await;
 
     let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
@@ -313,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for address in &addresses {
         let owned = OwnedErc20::with_options(
             provider.clone(),
-            cache.clone(),
+            log_cache.clone(),
             owner,
             *address,
             args.chunk_size,

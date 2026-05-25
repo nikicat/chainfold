@@ -4,7 +4,7 @@
 //!
 //! Instead of fetching every Transfer on a token and filtering for the
 //! owner client-side, this opens two [`EvmLogHistory`] instances against
-//! the same [`LogStore`]:
+//! the same [`LogCache`]:
 //!
 //! * **out**: `topics = [Transfer, owner_topic, None, None]` — outgoing
 //!   transfers (owner = `from`).
@@ -20,7 +20,7 @@
 //!
 //! ## Re-entry
 //!
-//! Both inner histories share the same `Arc<LogStore>`, but each writes
+//! Both inner histories share the same `Arc<LogCache>`, but each writes
 //! into its own filter-hash-scoped slot (logs are keyed by filter, scanned
 //! ranges and reorg state too). Restarting picks up cached state per
 //! filter so cold-start is paid once per `(owner, token, direction)` tuple.
@@ -32,7 +32,7 @@ use alloy::network::Ethereum;
 use alloy::providers::Provider;
 
 use crate::arch::{HistStore, HistoryError};
-use crate::evm::{EvmEvent, EvmLogHistory, LogStore, TRANSFER_TOPIC};
+use crate::evm::{EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC};
 use crate::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 
 /// Source key for outgoing transfers (`owner == from`).
@@ -65,7 +65,7 @@ where
     /// bookkeeping stays separate.
     pub async fn new(
         provider: P,
-        store: Arc<LogStore>,
+        store: Arc<LogCache>,
         owner: [u8; 20],
         token_address: [u8; 20],
     ) -> Result<Self, HistoryError> {
@@ -74,7 +74,7 @@ where
 
     pub async fn with_options(
         provider: P,
-        store: Arc<LogStore>,
+        store: Arc<LogCache>,
         owner: [u8; 20],
         token_address: [u8; 20],
         chunk_size: u64,

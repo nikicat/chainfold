@@ -1,5 +1,5 @@
 //! `EvmLogHistory` — [`HistStoreBackend`] over an alloy [`Provider`],
-//! [`LogStore`], and [`LogIndex`].
+//! [`LogCache`], and [`LogIndex`].
 //!
 //! Each instance is scoped to a single log filter (address + topics) on a
 //! single chain. The chain identity stays on the history (`chain_id()`) —
@@ -14,7 +14,7 @@
 //! delivers fresh log pages and tip updates:
 //!
 //! * Each delivered page is fed to [`LogIndex::insert_page`] (in-memory
-//!   tree update synchronous) and drained asynchronously to [`LogStore`].
+//!   tree update synchronous) and drained asynchronously to [`LogCache`].
 //! * Tip advances bump `latest_store`, which drives
 //!   [`HistStore::snapshots`](crate::arch::HistStore::snapshots).
 //! * On reconnect after a transport error the subscriber fills the gap via
@@ -42,8 +42,8 @@ use crate::arch::{
     AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
     ItemStream, Positioned, Store, Timestamp,
 };
+use crate::evm::cache::{BlockHeader, LogCache, compute_filter_hash};
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
-use crate::evm::log_store::{BlockHeader, LogStore, compute_filter_hash};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
 use crate::evm::types::{EvmEvent, EvmPosition};
 
@@ -66,7 +66,7 @@ const DEFAULT_BLOCK_TIME: u64 = 12;
 
 pub struct EvmLogHistory<P> {
     provider: P,
-    store: Arc<LogStore>,
+    store: Arc<LogCache>,
     index: Arc<LogIndex>,
     filter_hash: [u8; 32],
     address: [u8; 20],
@@ -95,7 +95,7 @@ pub struct EvmLogHistory<P> {
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     pub async fn new(
         provider: P,
-        store: Arc<LogStore>,
+        store: Arc<LogCache>,
         address: [u8; 20],
         topics: [Option<[u8; 32]>; 4],
     ) -> Result<Arc<Self>, HistoryError> {
@@ -112,7 +112,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
 
     pub async fn with_options(
         provider: P,
-        store: Arc<LogStore>,
+        store: Arc<LogCache>,
         address: [u8; 20],
         topics: [Option<[u8; 32]>; 4],
         chunk_size: u64,
@@ -208,11 +208,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
 
     pub fn latest_store(&self) -> &Store<EvmPosition> {
         &self.latest_store
-    }
-
-    /// Underlying [`LogStore`]. Used by erc20 metadata/balance helpers.
-    pub fn store(&self) -> &Arc<LogStore> {
-        &self.store
     }
 
     /// Underlying [`LogIndex`]. Tests + manual cache-priming callers.
@@ -525,7 +520,7 @@ fn log_to_evm_event(log: &Log) -> EvmEvent {
 /// Cache-first block-header lookup. Falls back to RPC and persists.
 pub(crate) async fn ensure_block_header_via<P>(
     provider: &P,
-    store: &LogStore,
+    store: &LogCache,
     block_number: u64,
 ) -> Result<BlockHeader, HistoryError>
 where
@@ -565,7 +560,7 @@ where
 
 fn build_fetcher<P>(
     provider: P,
-    store: Arc<LogStore>,
+    store: Arc<LogCache>,
     address: [u8; 20],
     topics: [Option<[u8; 32]>; 4],
 ) -> Fetcher
@@ -648,8 +643,8 @@ mod tests {
         }
     }
 
-    fn warm_cache() -> (Arc<LogStore>, [u8; 32]) {
-        let cache = Arc::new(LogStore::open_in_memory().unwrap());
+    fn warm_cache() -> (Arc<LogCache>, [u8; 32]) {
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 
         cache
@@ -676,7 +671,7 @@ mod tests {
     }
 
     async fn make_history(
-        store: Arc<LogStore>,
+        store: Arc<LogCache>,
     ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>> {
         let asserter = Asserter::new();
         // get_chain_id, get_block_number for anchor

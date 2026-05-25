@@ -1,8 +1,10 @@
 # Chainfold refactoring plan
 
-> **Status as of 2026-05-23.** Phases 0–6 shipped; the post-Phase-5 OwnedErc20
-> follow-up also shipped. Phase 7 (pruning + best/safe wiring) is the next
-> eligible chunk. Currently-deferred follow-ups: real bridge decoder for
+> **Status as of 2026-05-26.** Phases 0–6 shipped; the post-Phase-5 OwnedErc20
+> follow-up also shipped. The post-Phase-6 structural-debt cleanup (formerly
+> tracked in `REFACTOR.md`, now folded in below) is fully landed. Phase 7
+> (pruning + best/safe wiring + deprecated-facade removal) is the next eligible
+> chunk. Currently-deferred follow-ups: real bridge decoder for
 > `bridge_matcher`, same-`P` typed merge alias, `Reducer` rebuild.
 > See [`arch.md`](./arch.md) for the *shipped* design and
 > `~/.claude-personal/projects/-home-nb-src-chainfold/memory/` for per-phase
@@ -18,12 +20,32 @@
 > | 5 — Heterogeneous merge | ✅ Done (2026-05-22) | 84 (+8) | phase5_merge (8) | `MergedPos`, `ErasedHistStore`; clamp_pos override. |
 > | 5b — OwnedErc20 follow-up | ✅ Done (2026-05-23) | 95 (+2) | owned_erc20 (2 × #[ignore]) | Two narrow filters + merge; `erc20_explorer --owner` rewired. |
 > | 6 — Matcher | ✅ Done (2026-05-23) | 95 (+9) | phase6_matcher (6) | `BaseMatcher` / `AnchoredMatcher` / `AnchorStore` (in-mem + SQLite). |
+> | Structural cleanup | ✅ Done (2026-05-26) | 106 | — | Function-level dedup + 3 module-tree splits (see below). Was `REFACTOR.md`. |
 > | 7 — Pruning + best/safe + facade removal | ⏳ Pending | — | phase7_soak (planned) | Not started. |
 > | Bridge decoder | ⏳ Deferred | — | — | Generic `--match-on` extractor ships; ABI-aware impls per bridge are app-specific. |
 > | Same-`P` merge alias | ⏳ Deferred | — | — | Not load-bearing; `MergedItem.source_key` is useful as-is. |
 > | Reducer | ⏳ Deferred (Phase 6 spec) | — | — | Sibling of Matcher; `Erc20Balance` rebuild gates on it. |
 >
-> **Test totals after Phase 6 + OwnedErc20:** 95 lib + 31 active integration (anvil_smoke + mock_provider_smoke + 9 phase3 + 6 phase4 + 8 phase5 + 6 phase6) = 126 active, 7 ignored (anvil/fork-only).
+> **Test totals (2026-05-26):** 106 lib + 49 CLI-bin unit + 31 active
+> integration (anvil_smoke + mock_provider_smoke + 9 phase3 + 6 phase4 +
+> 8 phase5 + 6 phase6) = 186 active, 7 ignored (anvil/fork-only).
+>
+> **Post-Phase-6 structural cleanup (done, was `REFACTOR.md`).** The
+> structural-debt inventory accumulated over Phases 0–6 has all landed on
+> `main`:
+> - Function-level dedup: `resolve_range`, `apply_topics`, `render_transfer`,
+>   `install_gap_placeholder`, `merge_step` decomposition, `walk_step`
+>   unification, `cached_navigate` forward/backward split, `tip_pos(TipKind)`
+>   collapse, `find_event_item` extraction, and stale-tag/citation removal.
+> - `arch::evm` types (`EvmPosition`/`EvmEvent`/`Erc20*`/…) moved out of
+>   `arch.rs` into `src/evm/types.rs` — source-agnostic core no longer names EVM.
+> - Three module-tree splits: `matcher.rs` → `matcher/` (extracting
+>   `SqliteAnchorStore`); `evm/log_index.rs` → `evm/log_index/`
+>   (`block_pos`/`range_tree`/`nav`/`gap_fill`); and `evm/log_store.rs` →
+>   `evm/cache/` — a `CacheDb` opener vending `LogCache` (logs + ranges +
+>   reorg + headers), `Erc20Cache`, and `EventSignatureCache` over one shared
+>   `Arc<Mutex<Connection>>` (one SQLite file). The misleading single-`LogStore`
+>   god-object is gone; each consumer holds one narrow view.
 
 ---
 
@@ -44,10 +66,10 @@ layering. Built on three locked-in structural shifts:
 
 Project context:
 - `arch.md` — canonical vision; this plan realizes parts of it
-- `src/arch.rs` — current public API (Position, Cursor, History, Store, HistoryBackend)
-- `src/merge.rs`, `src/reduce.rs` — current combinators
-- `src/evm/history.rs`, `src/evm/log_cache.rs` — restructured in Phase 1
-- `src/evm/erc20.rs` — current `Erc20BalanceReducer`
+- `src/arch.rs` — current public API (`Position`, `Hist`, `HistStore`, `Store`, `HistBackend`/`HistStoreBackend`; `Cursor`/`History` were removed in Phase 3)
+- `src/merge.rs`, `src/matcher/` — current combinators
+- `src/evm/history.rs`, `src/evm/cache/` (`LogCache`/`Erc20Cache`/`EventSignatureCache`), `src/evm/log_index/` — the layered cache + in-memory range tree
+- `src/evm/erc20.rs`, `src/evm/owned_erc20.rs` — ERC20 metadata/balance helpers + the `OwnedErc20` merge
 - `examples/history_explorer.rs`, `examples/erc20_explorer.rs` — current CLI shape
 
 Production patterns to translate:

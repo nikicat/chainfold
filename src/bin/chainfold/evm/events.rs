@@ -7,14 +7,14 @@ use alloy::network::Ethereum;
 use alloy::primitives::B256;
 use alloy::providers::Provider;
 use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
-use chainfold::evm::{EvmEvent, EvmLogHistory, EvmPosition, LogStore, SubscribeTransport};
+use chainfold::evm::{CacheDb, EvmEvent, EvmLogHistory, EvmPosition, SubscribeTransport};
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 
 use crate::cli::{EventsArgs, EvmArgs};
 use crate::config::Config;
 use crate::fmt::format_timestamp;
-use crate::signature_cache::LogStoreSignatureCache;
+use crate::signature_cache::SqliteSignatureCache;
 use crate::util::{parse_hex_address, resolve_range};
 
 struct PrintOpts {
@@ -24,7 +24,7 @@ struct PrintOpts {
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     provider: &P,
-    cache: &Arc<LogStore>,
+    cache: &CacheDb,
     db_path: &str,
     config: &Config,
     evm_args: &EvmArgs,
@@ -49,7 +49,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let topics: [Option<[u8; 32]>; 4] = [Some(resolved.topic0), None, None, None];
     let backend = EvmLogHistory::with_options(
         provider.clone(),
-        cache.clone(),
+        Arc::new(cache.logs()),
         address,
         topics,
         evm_args.chunk_size,
@@ -120,7 +120,7 @@ struct Lookup {
 }
 
 async fn resolve_lookup(
-    cache: &Arc<LogStore>,
+    cache: &CacheDb,
     config: &Config,
     chain_id: u64,
     address: [u8; 20],
@@ -141,7 +141,7 @@ async fn resolve_lookup(
         });
     }
     if let Some(name) = &args.event {
-        let sig_cache = LogStoreSignatureCache::new(cache.clone());
+        let sig_cache = SqliteSignatureCache::new(cache.signatures());
         let resolved = resolve_event(
             &sig_cache,
             chain_id,

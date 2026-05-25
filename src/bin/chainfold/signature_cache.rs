@@ -1,31 +1,30 @@
-//! Adapter: implements [`SignatureCache`] over [`LogStore`] so the CLI
-//! reuses the same `SQLite` file for event-signature caching.
-
-use std::sync::Arc;
+//! Adapter: implements the [`SignatureCache`] resolver trait over the
+//! SQLite-backed [`EventSignatureCache`] so the CLI reuses the same cache
+//! file for event-signature caching.
 
 use async_trait::async_trait;
-use chainfold::evm::LogStore;
+use chainfold::evm::EventSignatureCache;
 use chainfold::signatures::{ResolvedEvent, SignatureCache, SignatureError};
 
-pub struct LogStoreSignatureCache {
-    store: Arc<LogStore>,
+pub struct SqliteSignatureCache {
+    cache: EventSignatureCache,
 }
 
-impl LogStoreSignatureCache {
-    pub fn new(store: Arc<LogStore>) -> Self {
-        Self { store }
+impl SqliteSignatureCache {
+    pub fn new(cache: EventSignatureCache) -> Self {
+        Self { cache }
     }
 }
 
 #[async_trait]
-impl SignatureCache for LogStoreSignatureCache {
+impl SignatureCache for SqliteSignatureCache {
     async fn get(
         &self,
         chain_id: u64,
         address: [u8; 20],
         event_name: &str,
     ) -> Result<Option<ResolvedEvent>, SignatureError> {
-        self.store
+        self.cache
             .get_event_signature(chain_id, &address, event_name)
             .map(|opt| {
                 opt.map(|(signature, topic0, abi_json)| ResolvedEvent {
@@ -44,7 +43,7 @@ impl SignatureCache for LogStoreSignatureCache {
         event_name: &str,
         entry: &ResolvedEvent,
     ) -> Result<(), SignatureError> {
-        self.store
+        self.cache
             .insert_event_signature(
                 chain_id,
                 &address,

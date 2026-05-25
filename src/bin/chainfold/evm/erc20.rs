@@ -7,8 +7,8 @@ use alloy::primitives::U256;
 use alloy::providers::Provider;
 use chainfold::arch::{Position, Positioned, watch_hist};
 use chainfold::evm::{
-    Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, LogStore, OUT_KEY, OwnedErc20,
-    SubscribeTransport, apply_transfer, fetch_erc20_metadata,
+    CacheDb, Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, OUT_KEY, OwnedErc20, SubscribeTransport,
+    apply_transfer, fetch_erc20_metadata,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -20,7 +20,7 @@ use crate::util::{parse_hex_address, resolve_range};
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     provider: &P,
-    cache: &Arc<LogStore>,
+    cache: &CacheDb,
     db_path: &str,
     evm_args: &EvmArgs,
     erc20_args: &Erc20Args,
@@ -35,10 +35,14 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         .collect::<Result<_, _>>()?;
     let owner = parse_hex_address(&erc20_args.owner)?;
 
+    // Per-concern views over the one shared cache connection.
+    let erc20_cache = cache.erc20();
+    let log_cache = Arc::new(cache.logs());
+
     println!("Fetching token metadata...");
     let meta_futures = addresses
         .iter()
-        .map(|addr| fetch_erc20_metadata(provider, *addr, chain_id, cache));
+        .map(|addr| fetch_erc20_metadata(provider, *addr, chain_id, &erc20_cache));
     let meta_results = join_all(meta_futures).await;
 
     let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
@@ -82,7 +86,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             .unwrap_or_default();
         let owned = OwnedErc20::with_options(
             provider.clone(),
-            cache.clone(),
+            log_cache.clone(),
             owner,
             *address,
             evm_args.chunk_size,

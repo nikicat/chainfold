@@ -1,7 +1,7 @@
 //! Fetcher-driven gap filling: the [`Fetcher`] type, `ensure_cached`, the
 //! `items()` async stream, and the singleflight `walk_step` shared by both.
 //! This is the only path that calls out to `eth_getLogs` (via the fetcher)
-//! and the only path that writes fetched pages back into [`LogStore`].
+//! and the only path that writes fetched pages back into [`LogCache`].
 
 use std::future::Future;
 use std::ops::Bound;
@@ -119,7 +119,7 @@ impl LogIndex {
         if end_pos > prev {
             tree.insert(end_pos, Range::empty(prev, end_pos));
         }
-        // Persist to LogStore so the next process sees the same shape.
+        // Persist to LogCache so the next process sees the same shape.
         drop(tree);
         if !page.items.is_empty() {
             self.store

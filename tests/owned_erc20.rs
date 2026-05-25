@@ -17,7 +17,7 @@ use std::sync::Arc;
 use alloy::providers::ProviderBuilder;
 use chainfold::arch::{Hist, HistBackend, Position};
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, LogStore, OUT_KEY, OwnedErc20, TRANSFER_TOPIC,
+    EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, LogCache, OUT_KEY, OwnedErc20, TRANSFER_TOPIC,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -53,7 +53,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20.v3.db");
     let endpoint = anvil.endpoint_url();
-    let store = Arc::new(LogStore::open(db_path.to_str().unwrap()).expect("open store"));
+    let store = Arc::new(LogCache::open(db_path.to_str().unwrap()).expect("open store"));
     let provider = ProviderBuilder::new().connect_http(endpoint);
 
     // Phase A — broad filter to discover an active owner in the window.
@@ -177,7 +177,7 @@ async fn owned_erc20_empty_for_inactive_address() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20_empty.v3.db");
     let endpoint = anvil.endpoint_url();
-    let store = Arc::new(LogStore::open(db_path.to_str().unwrap()).expect("open store"));
+    let store = Arc::new(LogCache::open(db_path.to_str().unwrap()).expect("open store"));
     let provider = ProviderBuilder::new().connect_http(endpoint);
 
     // An address with no real-world USDC activity (literally the zero

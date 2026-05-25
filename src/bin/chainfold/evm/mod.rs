@@ -2,12 +2,11 @@ pub mod erc20;
 pub mod events;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::evm::{LogStore, rpc_retry_layer, versioned_path};
+use chainfold::evm::{CacheDb, rpc_retry_layer, versioned_path};
 
 use crate::chains::ChainResolver;
 use crate::cli::{EvmArgs, EvmCommand};
@@ -80,7 +79,7 @@ pub async fn run(
         std::fs::create_dir_all(parent)?;
     }
     let db_path = versioned_path(&db_path_buf.to_string_lossy());
-    let cache = Arc::new(LogStore::open(&db_path)?);
+    let cache = CacheDb::open(&db_path)?;
 
     let rpc_chain_id = provider.get_chain_id().await?;
     if rpc_chain_id != chain_id {

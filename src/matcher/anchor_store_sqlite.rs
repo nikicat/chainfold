@@ -15,7 +15,7 @@ use crate::arch::HistoryError;
 use super::AnchorStore;
 
 /// SQLite-backed [`AnchorStore`]. Opens (or creates) a 2-column kv table
-/// at the given path. Owns its own DB file — independent of `LogStore`.
+/// at the given path. Owns its own DB file — independent of the EVM cache.
 pub struct SqliteAnchorStore {
     conn: Arc<std::sync::Mutex<rusqlite::Connection>>,
 }

@@ -1,13 +1,13 @@
-//! In-memory range tree backed by [`LogStore`].
+//! In-memory range tree backed by [`LogCache`].
 //!
 //! A `BTreeMap` keyed by the *end* position of each [`Range`], with
 //! singleflight + late-item handling. Items themselves live in
-//! [`LogStore`]; the tree only holds [`LogRef`]s, so a long-running
+//! [`LogCache`]; the tree only holds [`LogRef`]s, so a long-running
 //! history's resident memory is bounded by the number of distinct
 //! positions (eviction is a future addition).
 //!
 //! Lazy loading: rather than slurping every `scanned_range` from
-//! [`LogStore`] on first access, the tree materializes per-window on
+//! [`LogCache`] on first access, the tree materializes per-window on
 //! demand via [`LogIndex::ensure_window_loaded`]. This caps startup cost
 //! at the cost of one bookkeeping `Vec<(u64, u64)>` of windows already
 //! pulled in.
@@ -24,14 +24,14 @@
 //!   stream, and the fetcher-driven singleflight.
 //!
 //! This `mod.rs` owns the [`LogIndex`] struct itself, its constructors and
-//! accessors, and the async drain to [`LogStore`].
+//! accessors, and the async drain to [`LogCache`].
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-use super::log_store::LogStore;
+use super::cache::LogCache;
 use std::sync::Arc;
 
 mod block_pos;
@@ -48,27 +48,27 @@ use range_tree::Range;
 // LogIndex
 // ============================================================
 
-/// Per-filter in-memory range tree on top of [`LogStore`].
+/// Per-filter in-memory range tree on top of [`LogCache`].
 ///
-/// One instance per `(LogStore, filter_hash)` pair. Cheap to construct
+/// One instance per `(LogCache, filter_hash)` pair. Cheap to construct
 /// — actual `scanned_ranges` rows are pulled into the tree on demand by
 /// [`Self::ensure_window_loaded`].
 pub struct LogIndex {
-    store: Arc<LogStore>,
+    store: Arc<LogCache>,
     filter_hash: [u8; 32],
     fetcher: Fetcher,
     /// Aligned scanned-range chunk size (blocks). Determines the
     /// granularity at which gaps get fetched and the alignment of
-    /// `scanned_ranges` rows recorded in [`LogStore`].
+    /// `scanned_ranges` rows recorded in [`LogCache`].
     chunk_size: u64,
     tree: Mutex<BTreeMap<BlockPos, Range>>,
     /// Block-level windows already materialized into the tree from
-    /// `LogStore::get_scanned_ranges`. Tracked so a second visit to the
+    /// `LogCache::get_scanned_ranges`. Tracked so a second visit to the
     /// same window does not re-slurp.
     loaded_windows: Mutex<Vec<(u64, u64)>>,
     /// Optional async drain. When attached, every page passed to
     /// [`Self::insert_page`] is cloned onto the channel and persisted to
-    /// [`LogStore`] by a background task. None means the index is purely
+    /// [`LogCache`] by a background task. None means the index is purely
     /// in-memory (tests, or the legacy fetcher-driven path which writes
     /// inline in [`Self::finalize_gap_fill`]).
     drain_tx: Mutex<Option<UnboundedSender<LogPage>>>,
@@ -77,13 +77,13 @@ pub struct LogIndex {
 impl LogIndex {
     /// Construct a fresh, empty index over `store` for `filter_hash`.
     /// Aligned chunk size defaults to `1000` blocks via [`Self::with_chunk_size`].
-    pub fn new(store: Arc<LogStore>, filter_hash: [u8; 32], fetcher: Fetcher) -> Self {
+    pub fn new(store: Arc<LogCache>, filter_hash: [u8; 32], fetcher: Fetcher) -> Self {
         Self::with_chunk_size(store, filter_hash, fetcher, 1000)
     }
 
     /// Like [`Self::new`] but with an explicit aligned chunk size.
     pub fn with_chunk_size(
-        store: Arc<LogStore>,
+        store: Arc<LogCache>,
         filter_hash: [u8; 32],
         fetcher: Fetcher,
         chunk_size: u64,
@@ -101,11 +101,11 @@ impl LogIndex {
     }
 
     /// Spawn a background task that persists every page passed to
-    /// [`Self::insert_page`] to [`LogStore`]. Returns `false` (and skips
+    /// [`Self::insert_page`] to [`LogCache`]. Returns `false` (and skips
     /// spawning) if a drain is already attached.
     ///
-    /// Items are written via [`LogStore::insert_logs`]; the scanned range
-    /// is recorded via [`LogStore::record_scanned_range`]. Failures are
+    /// Items are written via [`LogCache::insert_logs`]; the scanned range
+    /// is recorded via [`LogCache::record_scanned_range`]. Failures are
     /// logged but never propagated — the in-memory tree remains the source
     /// of truth on the live-event path.
     pub fn attach_drain(&self) -> bool {
@@ -180,7 +180,7 @@ mod tests {
     use super::gap_fill::never_fetch;
     use super::range_tree::align_window;
     use super::*;
-    use crate::evm::log_store::LogStore;
+    use crate::evm::cache::LogCache;
     use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
     use alloy::rpc::types::Log;
     use std::sync::Arc;
@@ -213,7 +213,7 @@ mod tests {
 
     pub(super) fn mk_index() -> LogIndex {
         LogIndex::new(
-            Arc::new(LogStore::open_in_memory().unwrap()),
+            Arc::new(LogCache::open_in_memory().unwrap()),
             FH,
             never_fetch(),
         )
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn is_loaded_lazy_first_access_only() {
-        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let store = Arc::new(LogCache::open_in_memory().unwrap());
         // Pre-populate the store as if a previous process had scanned [100, 200]
         // with one log at (150, 0).
         store.insert_logs(&FH, &[mk_log(150, 0, HASH_A)]).unwrap();
@@ -461,7 +461,7 @@ mod tests {
             items: vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)],
             end_block_hash: HASH_B,
         });
-        // We need the logs to exist in LogStore for resolve() to find them.
+        // We need the logs to exist in LogCache for resolve() to find them.
         idx.store
             .insert_logs(&FH, &[mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)])
             .unwrap();
@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn items_walks_filled_ranges_yields_in_order() {
         use futures_util::StreamExt;
-        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let store = Arc::new(LogCache::open_in_memory().unwrap());
         let logs = vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)];
         store.insert_logs(&FH, &logs).unwrap();
         let idx = Arc::new(LogIndex::new(store, FH, never_fetch()));
@@ -534,7 +534,7 @@ mod tests {
         use futures_util::StreamExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let store = Arc::new(LogCache::open_in_memory().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: Fetcher = {
             let calls = calls.clone();
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         // Second walk over the same range should NOT refetch — the gap has
-        // been backfilled both in the in-memory tree and in LogStore.
+        // been backfilled both in the in-memory tree and in LogCache.
         let mut stream2 = idx
             .clone()
             .items(BlockPos::before_block(100), BlockPos::end_of_block(200));
@@ -583,7 +583,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
-        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let store = Arc::new(LogCache::open_in_memory().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: Fetcher = {
             let calls = calls.clone();
@@ -628,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_page_drains_to_store_asynchronously() {
-        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let store = Arc::new(LogCache::open_in_memory().unwrap());
         let idx = LogIndex::new(store.clone(), FH, never_fetch());
         assert!(idx.attach_drain(), "first attach succeeds");
         assert!(!idx.attach_drain(), "second attach is a no-op");
@@ -664,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_page_without_drain_does_not_touch_store() {
-        let store = Arc::new(LogStore::open_in_memory().unwrap());
+        let store = Arc::new(LogCache::open_in_memory().unwrap());
         let idx = LogIndex::new(store.clone(), FH, never_fetch());
         assert!(!idx.has_drain());
 

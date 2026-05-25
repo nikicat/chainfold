@@ -23,7 +23,7 @@ use crate::arch::{Position, Timestamp};
 /// Layer note: this struct carries *only* the coordinates needed to
 /// totally-order events on one chain. Chain identity lives on the
 /// [`EvmLogHistory`](crate::evm::EvmLogHistory) producing the stream;
-/// block hashes live in [`LogStore`](crate::evm::LogStore); timestamps
+/// block hashes live in [`LogCache`](crate::evm::LogCache); timestamps
 /// live on [`EvmEvent`].
 #[derive(
     Debug,

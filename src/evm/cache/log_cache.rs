@@ -1,184 +1,17 @@
-//! Durable SQLite-backed store for EVM log cache, scanned-range tracking,
-//! block headers, and ERC20 sidecar tables.
+//! [`LogCache`] — the durable EVM log cache.
 //!
-//! Exposes only the narrow durable surface — bulk read/write,
-//! scanned-range bookkeeping, and reorg invalidation. Navigation queries
-//! (first/last log) live in the in-memory [`LogIndex`](super::log_index).
+//! Owns the reorg-coherent set of tables: raw logs (`cached_logs`),
+//! scanned-range bookkeeping (`scanned_ranges`), reorg tombstones
+//! (`reorged_blocks`), and cached block headers (`cached_block_headers`).
+//!
+//! Exposes only the narrow durable surface — bulk read/write, scanned-range
+//! bookkeeping, reorg invalidation, and header lookup. Navigation queries
+//! (first/last log) live in the in-memory [`LogIndex`](crate::evm::LogIndex).
 
-use std::sync::Mutex;
-
-use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U256};
+use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
 use alloy::rpc::types::Log;
-use rusqlite::Connection;
 
-// ============================================================
-// Versioning
-// ============================================================
-
-/// Bump this when cache schema or semantics change.
-/// The version is appended to the DB filename so stale caches are bypassed.
-pub const CACHE_VERSION: u32 = 3;
-
-/// Inserts the cache version before the file extension.
-/// `"./foo.db"` → `"./foo.v3.db"`, `"./foo"` → `"./foo.v3"`
-pub fn versioned_path(base: &str) -> String {
-    match base.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem}.v{CACHE_VERSION}.{ext}"),
-        None => format!("{base}.v{CACHE_VERSION}"),
-    }
-}
-
-// ============================================================
-// Error
-// ============================================================
-
-#[derive(Debug, thiserror::Error)]
-pub enum CacheError {
-    #[error("sqlite: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("migration: {0}")]
-    Migration(#[from] rusqlite_migration::Error),
-}
-
-/// A single row from `event_signatures`: canonical signature, topic0,
-/// and (when populated) the matched ABI event item JSON.
-pub type EventSignatureRow = (String, [u8; 32], Option<String>);
-
-// ============================================================
-// Schema
-// ============================================================
-
-pub(crate) fn migrations() -> rusqlite_migration::Migrations<'static> {
-    rusqlite_migration::Migrations::new(vec![
-        rusqlite_migration::M::up(
-            "
-        -- Raw EVM log entries returned by eth_getLogs, keyed by filter.
-        -- Each row is a 1:1 copy of an alloy Log struct (minus 'removed').
-        -- filter_hash: BLAKE3(address ++ topic0..3) — groups logs by the
-        --   eth_getLogs filter that produced them. Different filters for the
-        --   same contract (e.g. Transfer vs Approval) get separate partitions.
-        -- Uniqueness is (filter_hash, block_hash, log_index) — not block_number —
-        --   so that the same log_index on different forks (reorgs) can coexist.
-        --   Reorged logs remain in the table and are filtered out at query time
-        --   via the reorged_blocks table.
-        CREATE TABLE cached_logs (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            filter_hash       BLOB    NOT NULL,
-            block_number      INTEGER NOT NULL,
-            log_index         INTEGER NOT NULL,
-            address           BLOB    NOT NULL,
-            topic0            BLOB,
-            topic1            BLOB,
-            topic2            BLOB,
-            topic3            BLOB,
-            data              BLOB    NOT NULL,
-            block_hash        BLOB    NOT NULL,
-            transaction_hash  BLOB    NOT NULL,
-            transaction_index INTEGER NOT NULL,
-            UNIQUE(filter_hash, block_hash, log_index)
-        );
-        -- Index for range queries by block_number. May return logs from
-        -- reorged blocks — caller joins against reorged_blocks to filter.
-        CREATE INDEX idx_cached_logs_filter_block
-            ON cached_logs(filter_hash, block_number, log_index);
-
-        -- Block hashes that have been reorged out of the canonical chain.
-        -- Small table — typically empty or a handful of entries.
-        -- block_number is stored for efficient range-based cleanup.
-        -- Logs from these blocks are excluded from all cache queries.
-        CREATE TABLE reorged_blocks (
-            block_hash   BLOB    NOT NULL PRIMARY KEY,
-            block_number INTEGER NOT NULL
-        );
-
-        -- Tracks which block ranges have been scanned (via eth_getLogs) for
-        -- a given filter_hash, even if zero logs were returned.
-        -- Used to compute gaps: when the user requests [A, B], we diff
-        -- against scanned_ranges to find sub-ranges we haven't fetched yet.
-        -- Ranges are inclusive [start_block, end_block].
-        -- end_block_hash identifies the block at end_block — if it appears
-        --   in reorged_blocks, this range must be rescanned.
-        -- Ranges are NOT eagerly merged on insert. Only finalized ranges
-        --   should be compacted (via compact_ranges) to prevent a single
-        --   reorg at the tip from invalidating a huge merged range.
-        CREATE TABLE scanned_ranges (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            filter_hash     BLOB    NOT NULL,
-            start_block     INTEGER NOT NULL,
-            end_block       INTEGER NOT NULL,
-            end_block_hash  BLOB    NOT NULL
-        );
-        CREATE INDEX idx_scanned_ranges_filter
-            ON scanned_ranges(filter_hash, start_block, end_block);
-
-        -- Block headers cached from eth_getBlockByNumber.
-        -- Shared across all filters (not partitioned by filter_hash).
-        CREATE TABLE cached_block_headers (
-            height       INTEGER PRIMARY KEY,
-            hash         BLOB    NOT NULL,
-            parent_hash  BLOB    NOT NULL,
-            timestamp    INTEGER NOT NULL
-        );
-        ",
-        ),
-        rusqlite_migration::M::up(
-            "
-        CREATE TABLE erc20_metadata (
-            address    BLOB    NOT NULL,
-            chain_id   INTEGER NOT NULL,
-            name       TEXT    NOT NULL,
-            symbol     TEXT    NOT NULL,
-            decimals   INTEGER NOT NULL,
-            PRIMARY KEY (address, chain_id)
-        );
-        ",
-        ),
-        rusqlite_migration::M::up(
-            "
-        CREATE TABLE erc20_balances (
-            chain_id     INTEGER NOT NULL,
-            address      BLOB    NOT NULL,
-            owner        BLOB    NOT NULL,
-            block_number INTEGER NOT NULL,
-            balance      BLOB    NOT NULL,
-            PRIMARY KEY (chain_id, address, owner, block_number)
-        );
-        ",
-        ),
-        rusqlite_migration::M::up(
-            "
-        -- Resolved (event name) → (canonical signature, topic0) for a given
-        -- contract on a given chain. Populated by the signature resolver
-        -- (Sourcify → Etherscan) so subsequent lookups are zero-network.
-        CREATE TABLE event_signatures (
-            chain_id    INTEGER NOT NULL,
-            address     BLOB    NOT NULL,
-            event_name  TEXT    NOT NULL,
-            signature   TEXT    NOT NULL,
-            topic0      BLOB    NOT NULL,
-            PRIMARY KEY (chain_id, address, event_name)
-        );
-        ",
-        ),
-        rusqlite_migration::M::up(
-            "
-        -- Matched ABI event item JSON (the {\"type\":\"event\",...} object)
-        -- needed for typed log decoding. Nullable for rows written before
-        -- the resolver started populating it.
-        ALTER TABLE event_signatures ADD COLUMN abi_json TEXT;
-        ",
-        ),
-    ])
-}
-
-pub(crate) fn configure_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;",
-    )
-}
+use super::{CacheError, SharedConn};
 
 // ============================================================
 // Helpers
@@ -229,7 +62,7 @@ pub fn compute_gaps(requested: (u64, u64), scanned: &[(u64, u64)]) -> Vec<(u64, 
 }
 
 // ============================================================
-// LogStore
+// Types
 // ============================================================
 
 /// A cached block header.
@@ -241,45 +74,36 @@ pub struct BlockHeader {
     pub timestamp: u64,
 }
 
-/// Cached ERC20 token metadata (name, symbol, decimals).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CachedErc20Metadata {
-    pub name: String,
-    pub symbol: String,
-    pub decimals: u8,
-}
+// ============================================================
+// LogCache
+// ============================================================
 
-/// Durable SQLite-backed log + range + header + erc20 store.
+/// Durable SQLite-backed log + range + reorg + header cache.
 ///
-/// Self-contained `SQLite` database. WAL mode supports concurrent readers.
-/// Logs are append-only; reorgs are handled by marking blocks in
-/// `reorged_blocks` and filtering them out at query time.
+/// A cheap handle over the shared connection vended by
+/// [`CacheDb`](super::CacheDb). Logs are append-only; reorgs are handled by
+/// marking blocks in `reorged_blocks` and filtering them out at query time.
 ///
 /// Navigation queries (first/last log) live in
-/// [`LogIndex`](super::log_index), not here.
-pub struct LogStore {
-    conn: Mutex<Connection>,
+/// [`LogIndex`](crate::evm::LogIndex), not here.
+pub struct LogCache {
+    conn: SharedConn,
 }
 
-impl LogStore {
-    /// Open a log store at the given path. Creates DB and runs migrations if needed.
-    pub fn open(path: &str) -> Result<Self, CacheError> {
-        let mut conn = Connection::open(path)?;
-        configure_connection(&conn)?;
-        migrations().to_latest(&mut conn)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+impl LogCache {
+    pub(super) fn from_conn(conn: SharedConn) -> Self {
+        Self { conn }
     }
 
-    /// Open an in-memory log store. Useful for tests.
+    /// Open a standalone log cache at the given path. Creates the DB and runs
+    /// migrations if needed. Equivalent to `CacheDb::open(path)?.logs()`.
+    pub fn open(path: &str) -> Result<Self, CacheError> {
+        Ok(super::CacheDb::open(path)?.logs())
+    }
+
+    /// Open a standalone in-memory log cache. Useful for tests.
     pub fn open_in_memory() -> Result<Self, CacheError> {
-        let mut conn = Connection::open_in_memory()?;
-        configure_connection(&conn)?;
-        migrations().to_latest(&mut conn)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        Ok(super::CacheDb::open_in_memory()?.logs())
     }
 
     // --------------------------------------------------------
@@ -595,213 +419,13 @@ impl LogStore {
             None => Ok(None),
         }
     }
-
-    // --------------------------------------------------------
-    // ERC20 metadata
-    // --------------------------------------------------------
-
-    pub fn get_erc20_metadata(
-        &self,
-        address: &[u8; 20],
-        chain_id: u64,
-    ) -> Result<Option<CachedErc20Metadata>, CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached(
-            "SELECT name, symbol, decimals FROM erc20_metadata
-             WHERE address = ?1 AND chain_id = ?2",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![&address[..], chain_id as i64], |row| {
-            Ok(CachedErc20Metadata {
-                name: row.get(0)?,
-                symbol: row.get(1)?,
-                decimals: row.get::<_, i64>(2)? as u8,
-            })
-        })?;
-        match rows.next() {
-            Some(row) => Ok(Some(row?)),
-            None => Ok(None),
-        }
-    }
-
-    pub fn insert_erc20_metadata(
-        &self,
-        address: &[u8; 20],
-        chain_id: u64,
-        name: &str,
-        symbol: &str,
-        decimals: u8,
-    ) -> Result<(), CacheError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO erc20_metadata (address, chain_id, name, symbol, decimals)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![&address[..], chain_id as i64, name, symbol, decimals as i64],
-        )?;
-        Ok(())
-    }
-
-    // --------------------------------------------------------
-    // ERC20 balances
-    // --------------------------------------------------------
-
-    pub fn get_erc20_balance(
-        &self,
-        chain_id: u64,
-        address: &[u8; 20],
-        owner: &[u8; 20],
-        block_number: u64,
-    ) -> Result<Option<U256>, CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached(
-            "SELECT balance FROM erc20_balances
-             WHERE chain_id = ?1 AND address = ?2 AND owner = ?3 AND block_number = ?4",
-        )?;
-        let mut rows = stmt.query_map(
-            rusqlite::params![
-                chain_id as i64,
-                &address[..],
-                &owner[..],
-                block_number as i64
-            ],
-            |row| {
-                let bytes: Vec<u8> = row.get(0)?;
-                Ok(bytes)
-            },
-        )?;
-        match rows.next() {
-            Some(Ok(bytes)) if bytes.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Ok(Some(U256::from_be_bytes(arr)))
-            }
-            Some(Err(e)) => Err(e.into()),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn get_erc20_balance_floor(
-        &self,
-        chain_id: u64,
-        address: &[u8; 20],
-        owner: &[u8; 20],
-        max_block: u64,
-    ) -> Result<Option<(u64, U256)>, CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached(
-            "SELECT block_number, balance FROM erc20_balances
-             WHERE chain_id = ?1 AND address = ?2 AND owner = ?3 AND block_number <= ?4
-             ORDER BY block_number DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query_map(
-            rusqlite::params![chain_id as i64, &address[..], &owner[..], max_block as i64],
-            |row| {
-                let block: i64 = row.get(0)?;
-                let balance: Vec<u8> = row.get(1)?;
-                Ok((block as u64, balance))
-            },
-        )?;
-        match rows.next() {
-            Some(Ok((block, bytes))) if bytes.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Ok(Some((block, U256::from_be_bytes(arr))))
-            }
-            Some(Err(e)) => Err(e.into()),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn insert_erc20_balance(
-        &self,
-        chain_id: u64,
-        address: &[u8; 20],
-        owner: &[u8; 20],
-        block_number: u64,
-        balance: U256,
-    ) -> Result<(), CacheError> {
-        let bytes: [u8; 32] = balance.to_be_bytes();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO erc20_balances (chain_id, address, owner, block_number, balance)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                chain_id as i64,
-                &address[..],
-                &owner[..],
-                block_number as i64,
-                &bytes[..]
-            ],
-        )?;
-        Ok(())
-    }
-
-    // --------------------------------------------------------
-    // Event signatures (resolver cache)
-    // --------------------------------------------------------
-
-    pub fn get_event_signature(
-        &self,
-        chain_id: u64,
-        address: &[u8; 20],
-        event_name: &str,
-    ) -> Result<Option<EventSignatureRow>, CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached(
-            "SELECT signature, topic0, abi_json FROM event_signatures
-             WHERE chain_id = ?1 AND address = ?2 AND event_name = ?3",
-        )?;
-        let mut rows = stmt.query_map(
-            rusqlite::params![chain_id as i64, &address[..], event_name],
-            |row| {
-                let sig: String = row.get(0)?;
-                let topic: Vec<u8> = row.get(1)?;
-                let abi: Option<String> = row.get(2)?;
-                Ok((sig, topic, abi))
-            },
-        )?;
-        match rows.next() {
-            Some(Ok((sig, topic, abi))) if topic.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&topic);
-                Ok(Some((sig, arr, abi)))
-            }
-            Some(Err(e)) => Err(e.into()),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn insert_event_signature(
-        &self,
-        chain_id: u64,
-        address: &[u8; 20],
-        event_name: &str,
-        signature: &str,
-        topic0: &[u8; 32],
-        abi_json: Option<&str>,
-    ) -> Result<(), CacheError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO event_signatures
-             (chain_id, address, event_name, signature, topic0, abi_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                chain_id as i64,
-                &address[..],
-                event_name,
-                signature,
-                &topic0[..],
-                abi_json,
-            ],
-        )?;
-        Ok(())
-    }
 }
 
 // ============================================================
-// Row decoding (also reused by the legacy navigation methods)
+// Row decoding
 // ============================================================
 
-pub(crate) fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
+fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
     let block_number: i64 = row.get(0)?;
     let log_index: i64 = row.get(1)?;
     let address_bytes: Vec<u8> = row.get(2)?;
@@ -905,7 +529,7 @@ mod tests {
 
     #[test]
     fn logs_round_trip() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         let log = make_test_log(100, 0, BLOCK_HASH_A);
         store.insert_logs(&FH, std::slice::from_ref(&log)).unwrap();
         let retrieved = store.get_logs_in_range(&FH, 100, 100).unwrap();
@@ -916,7 +540,7 @@ mod tests {
 
     #[test]
     fn logs_skip_pending_without_block_hash() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         let mut pending = make_test_log(100, 0, BLOCK_HASH_A);
         pending.block_hash = None;
         store.insert_logs(&FH, &[pending]).unwrap();
@@ -925,7 +549,7 @@ mod tests {
 
     #[test]
     fn logs_same_block_number_different_hash_coexist() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .insert_logs(
                 &FH,
@@ -941,7 +565,7 @@ mod tests {
 
     #[test]
     fn logs_reorged_blocks_filtered_out() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .insert_logs(
                 &FH,
@@ -961,7 +585,7 @@ mod tests {
 
     #[test]
     fn range_records_without_merging() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A)
             .unwrap();
@@ -974,7 +598,7 @@ mod tests {
 
     #[test]
     fn range_reorged_end_block_excluded() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A)
             .unwrap();
@@ -984,7 +608,7 @@ mod tests {
 
     #[test]
     fn invalidate_reorged_ranges_deletes() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .record_scanned_range(&FH, 100, 200, &BLOCK_HASH_A)
             .unwrap();
@@ -1001,7 +625,7 @@ mod tests {
 
     #[test]
     fn compact_merges_finalized_ranges() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A)
             .unwrap();
@@ -1017,7 +641,7 @@ mod tests {
 
     #[test]
     fn compact_preserves_end_block_hash_of_highest() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A)
             .unwrap();
@@ -1032,7 +656,7 @@ mod tests {
 
     #[test]
     fn compact_skips_reorged_ranges() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .record_scanned_range(&FH, 100, 199, &BLOCK_HASH_A)
             .unwrap();
@@ -1073,7 +697,7 @@ mod tests {
 
     #[test]
     fn block_header_round_trip() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .insert_block_header(100, &BLOCK_HASH_A, &BLOCK_HASH_B, 1_700_000_000)
             .unwrap();
@@ -1084,155 +708,11 @@ mod tests {
         assert_eq!(h.timestamp, 1_700_000_000);
     }
 
-    // -- erc20 metadata --
-
-    #[test]
-    fn erc20_metadata_round_trip() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        store
-            .insert_erc20_metadata(&addr, 1, "Wrapped Ether", "WETH", 18)
-            .unwrap();
-        let m = store.get_erc20_metadata(&addr, 1).unwrap().unwrap();
-        assert_eq!(m.name, "Wrapped Ether");
-        assert_eq!(m.symbol, "WETH");
-        assert_eq!(m.decimals, 18);
-    }
-
-    #[test]
-    fn erc20_metadata_different_chains() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        store.insert_erc20_metadata(&addr, 1, "A", "A", 18).unwrap();
-        store.insert_erc20_metadata(&addr, 10, "B", "B", 6).unwrap();
-        assert_eq!(
-            store.get_erc20_metadata(&addr, 1).unwrap().unwrap().name,
-            "A"
-        );
-        assert_eq!(
-            store.get_erc20_metadata(&addr, 10).unwrap().unwrap().name,
-            "B"
-        );
-    }
-
-    #[test]
-    fn erc20_metadata_upsert() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        store
-            .insert_erc20_metadata(&addr, 1, "Old", "OLD", 18)
-            .unwrap();
-        store
-            .insert_erc20_metadata(&addr, 1, "New", "NEW", 6)
-            .unwrap();
-        let m = store.get_erc20_metadata(&addr, 1).unwrap().unwrap();
-        assert_eq!(m.name, "New");
-        assert_eq!(m.symbol, "NEW");
-        assert_eq!(m.decimals, 6);
-    }
-
-    // -- erc20 balances --
-
-    #[test]
-    fn erc20_balance_round_trip() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        let owner = [0x55u8; 20];
-        store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1_000_000_u64))
-            .unwrap();
-        let b = store
-            .get_erc20_balance(1, &addr, &owner, 100)
-            .unwrap()
-            .unwrap();
-        assert_eq!(b, U256::from(1_000_000_u64));
-    }
-
-    #[test]
-    fn erc20_balance_different_blocks() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        let owner = [0x55u8; 20];
-        store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1u64))
-            .unwrap();
-        store
-            .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
-            .unwrap();
-        assert_eq!(
-            store
-                .get_erc20_balance(1, &addr, &owner, 100)
-                .unwrap()
-                .unwrap(),
-            U256::from(1u64)
-        );
-        assert_eq!(
-            store
-                .get_erc20_balance(1, &addr, &owner, 200)
-                .unwrap()
-                .unwrap(),
-            U256::from(2u64)
-        );
-    }
-
-    #[test]
-    fn erc20_balance_upsert() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        let owner = [0x55u8; 20];
-        store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1u64))
-            .unwrap();
-        store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(2u64))
-            .unwrap();
-        assert_eq!(
-            store
-                .get_erc20_balance(1, &addr, &owner, 100)
-                .unwrap()
-                .unwrap(),
-            U256::from(2u64)
-        );
-    }
-
-    #[test]
-    fn erc20_balance_floor_lookup() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        let owner = [0x55u8; 20];
-        store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1u64))
-            .unwrap();
-        store
-            .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
-            .unwrap();
-        let (block, balance) = store
-            .get_erc20_balance_floor(1, &addr, &owner, 150)
-            .unwrap()
-            .unwrap();
-        assert_eq!(block, 100);
-        assert_eq!(balance, U256::from(1u64));
-    }
-
-    #[test]
-    fn erc20_balance_floor_none() {
-        let store = LogStore::open_in_memory().unwrap();
-        let addr = [0x42u8; 20];
-        let owner = [0x55u8; 20];
-        store
-            .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
-            .unwrap();
-        assert!(
-            store
-                .get_erc20_balance_floor(1, &addr, &owner, 100)
-                .unwrap()
-                .is_none()
-        );
-    }
+    // -- reorg cleanup --
 
     #[test]
     fn cleanup_reorged_before() {
-        let store = LogStore::open_in_memory().unwrap();
+        let store = LogCache::open_in_memory().unwrap();
         store
             .mark_reorged(&[
                 (BLOCK_HASH_A, 100),

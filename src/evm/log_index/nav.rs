@@ -164,7 +164,7 @@ impl LogIndex {
         }
     }
 
-    /// Resolve a [`LogRef`] to a full [`Log`] via `LogStore`. Returns an
+    /// Resolve a [`LogRef`] to a full [`Log`] via `LogCache`. Returns an
     /// internal error if the cached block has since been marked reorged —
     /// consumers detect that condition by comparing `EvmEvent::block_hash`
     /// against what the store currently reports (see module docs on

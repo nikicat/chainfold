@@ -31,7 +31,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
+    EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
@@ -78,7 +78,7 @@ struct Args {
     #[arg(long, default_value = "./bridge_matcher.db")]
     db: String,
 
-    /// Anchor cache file (separate from `LogStore` DBs).
+    /// Anchor cache file (separate from `LogCache` DBs).
     #[arg(long, default_value = "./bridge_matcher.db/anchors.sqlite")]
     anchor_db: String,
 
@@ -188,7 +188,7 @@ async fn open_history(
     let provider = ProviderBuilder::new().connect_client(client);
     std::fs::create_dir_all(db_subdir).ok();
     let db_path = versioned_path(&format!("{db_subdir}/log_store.db"));
-    let store = Arc::new(LogStore::open(&db_path)?);
+    let store = Arc::new(LogCache::open(&db_path)?);
     let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
     Ok(EvmLogHistory::with_options(provider, store, address, topics, chunk_size, 12).await?)
 }

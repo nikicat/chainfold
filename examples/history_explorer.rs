@@ -22,7 +22,7 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Hist, HistBackend, HistStore, HistoryError, Positioned, watch_hist};
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, LogStore, SubscribeTransport, rpc_retry_layer,
+    EvmEvent, EvmLogHistory, EvmPosition, LogCache, SubscribeTransport, rpc_retry_layer,
     versioned_path,
 };
 use chrono::NaiveDate;
@@ -176,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);
     let db_path = versioned_path(&args.db);
-    let store = Arc::new(LogStore::open(&db_path)?);
+    let store = Arc::new(LogCache::open(&db_path)?);
 
     println!("Building EvmLogHistory...");
     println!("  Address:  0x{}", hex::encode(address));
@@ -223,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Warm: drop + reopen against the same DB. Same provider client —
         // should never reach RPC since every gap is already in scanned_ranges.
         drop(backend);
-        let store2 = Arc::new(LogStore::open(&db_path)?);
+        let store2 = Arc::new(LogCache::open(&db_path)?);
         let url2: Url = args.rpc_url.parse()?;
         let client2 = ClientBuilder::default().layer(rpc_retry_layer()).http(url2);
         let provider2 = ProviderBuilder::new().connect_client(client2);

@@ -7,7 +7,7 @@
 //! - `live_event_latency_ws` — WS push transport delivers a mined block
 //!   to the tip store within a tight latency budget.
 //! - `poll_drain_populates_scanned_ranges` — Poll transport observes new
-//!   blocks, fires `on_page`, drains to `LogStore`, and the resulting
+//!   blocks, fires `on_page`, drains to `LogCache`, and the resulting
 //!   `scanned_ranges` cover the post-subscribe window.
 //! - `resume_seeds_from_current_tip` — a fresh `subscribe()` after blocks
 //!   were mined while disconnected seeds `latest_store` to the current
@@ -23,7 +23,7 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
 
-use chainfold::evm::{EvmLogHistory, LogStore, SubscribeTransport};
+use chainfold::evm::{EvmLogHistory, LogCache, SubscribeTransport};
 
 use common::anvil::{local, skip_no_anvil};
 
@@ -63,7 +63,7 @@ async fn live_event_latency_ws() {
         .expect("ws connect");
 
     let (_tmp, db_path) = temp_db();
-    let store = Arc::new(LogStore::open(&db_path).expect("LogStore::open"));
+    let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
 
     let history = EvmLogHistory::new(
         provider.clone(),
@@ -126,7 +126,7 @@ async fn poll_drain_populates_scanned_ranges() {
 
     let provider = ProviderBuilder::new().connect_http(anvil.endpoint_url());
     let (_tmp, db_path) = temp_db();
-    let store = Arc::new(LogStore::open(&db_path).expect("LogStore::open"));
+    let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
 
     let history = EvmLogHistory::new(
         provider.clone(),
@@ -183,7 +183,7 @@ async fn resume_seeds_from_current_tip() {
 
     let provider = ProviderBuilder::new().connect_http(anvil.endpoint_url());
     let (_tmp, db_path) = temp_db();
-    let store = Arc::new(LogStore::open(&db_path).expect("LogStore::open"));
+    let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
 
     let history = EvmLogHistory::new(
         provider.clone(),

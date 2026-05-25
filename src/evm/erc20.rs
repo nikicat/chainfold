@@ -18,7 +18,7 @@ use alloy::sol_types::{SolCall, SolEvent};
 
 use crate::arch::HistoryError;
 
-use super::log_store::LogStore;
+use super::cache::Erc20Cache;
 use super::types::EvmEvent;
 
 sol! {
@@ -52,7 +52,7 @@ pub async fn fetch_erc20_metadata<P: Provider<Ethereum>>(
     provider: &P,
     address: [u8; 20],
     chain_id: u64,
-    cache: &LogStore,
+    cache: &Erc20Cache,
 ) -> Result<Erc20Metadata, HistoryError> {
     if let Some(cached) = cache
         .get_erc20_metadata(&address, chain_id)
@@ -269,7 +269,7 @@ pub fn apply_transfer(owner: [u8; 20], balance: U256, event: &EvmEvent) -> U256 
 /// `erc20_balances`.
 pub async fn fetch_balance_at<P: Provider<Ethereum>>(
     provider: &P,
-    cache: &LogStore,
+    cache: &Erc20Cache,
     chain_id: u64,
     token: [u8; 20],
     owner: [u8; 20],
@@ -312,7 +312,7 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
 
 /// Look up the closest cached balance at or before `block`. No RPC.
 pub fn cached_balance_floor(
-    cache: &LogStore,
+    cache: &Erc20Cache,
     chain_id: u64,
     token: [u8; 20],
     owner: [u8; 20],
@@ -422,7 +422,7 @@ mod tests {
     fn cached_balance_floor_walks_back() {
         let owner = [0x01u8; 20];
         let token = [0x42u8; 20];
-        let cache = Arc::new(LogStore::open_in_memory().unwrap());
+        let cache = Arc::new(Erc20Cache::open_in_memory().unwrap());
 
         cache
             .insert_erc20_balance(1, &token, &owner, 100, U256::from(500))

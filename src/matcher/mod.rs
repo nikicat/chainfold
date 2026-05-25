@@ -401,7 +401,7 @@ where
 
 /// Tiny KV interface for persisting matcher anchors. Source-agnostic —
 /// implementations live alongside this trait so consumers can pick a
-/// backing they like without dragging in `LogStore` / EVM.
+/// backing they like without dragging in the EVM cache / EVM.
 #[async_trait::async_trait]
 pub trait AnchorStore: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, HistoryError>;

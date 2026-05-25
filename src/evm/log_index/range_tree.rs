@@ -1,6 +1,6 @@
 //! The [`Range`] tree-entry type and the operations that mutate the tree:
 //! page insertion (with the four late-item cases), the lazy per-window load
-//! of scanned ranges from `LogStore`, and the gap placeholder helper.
+//! of scanned ranges from `LogCache`, and the gap placeholder helper.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -126,7 +126,7 @@ impl LogIndex {
         }
         drop(tree);
 
-        // Async drain to LogStore — see attach_drain. Cloning the page is
+        // Async drain to LogCache — see attach_drain. Cloning the page is
         // necessary because `page: &LogPage` is borrowed; the drain task
         // owns its copy. In-memory tree update above is the source of truth
         // for navigation; persistence is best-effort.
@@ -205,7 +205,7 @@ impl LogIndex {
     // Lazy per-window load
     // --------------------------------------------------------
 
-    /// Materialize any `scanned_ranges` rows from `LogStore` that overlap
+    /// Materialize any `scanned_ranges` rows from `LogCache` that overlap
     /// the requested block window into the in-memory tree, if not already
     /// pulled. Idempotent.
     ///

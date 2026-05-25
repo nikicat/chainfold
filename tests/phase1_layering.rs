@@ -1,4 +1,4 @@
-//! Phase 1 integration tests: durable `LogStore` + in-memory `LogIndex`.
+//! Phase 1 integration tests: durable `LogCache` + in-memory `LogIndex`.
 //!
 //! These hit a real RPC (mainnet via the anvil fork harness) so the cold
 //! cache populates via actual `eth_getLogs` calls. After that we drop the
@@ -16,7 +16,7 @@ use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Hist, HistBackend};
-use chainfold::evm::{EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC};
+use chainfold::evm::{EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC};
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
@@ -30,7 +30,7 @@ async fn build_history(
     endpoint: Url,
     chunk_size: u64,
 ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static + use<>>> {
-    let store = Arc::new(LogStore::open(db_path.to_str().unwrap()).expect("open store"));
+    let store = Arc::new(LogCache::open(db_path.to_str().unwrap()).expect("open store"));
     let provider = ProviderBuilder::new().connect_http(endpoint);
     EvmLogHistory::with_options(
         provider,

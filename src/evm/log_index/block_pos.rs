@@ -66,7 +66,7 @@ impl BlockPos {
 // LogRef — what the tree stores in lieu of full Logs
 // ============================================================
 
-/// Pointer into `LogStore` identifying a single cached log.
+/// Pointer into `LogCache` identifying a single cached log.
 ///
 /// Includes `block_hash` so reorg-aware resolution can reject references
 /// into blocks that have since been canonicalized away.
@@ -94,7 +94,7 @@ impl LogRef {
 /// `eth_getLogs` call (or a subscription delivery).
 ///
 /// `end_block_hash` lets the consumer record the matching scanned-range
-/// entry in `LogStore::record_scanned_range`.
+/// entry in `LogCache::record_scanned_range`.
 #[derive(Clone)]
 pub struct LogPage {
     pub from_block: u64,

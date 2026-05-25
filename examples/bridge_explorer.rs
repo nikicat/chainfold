@@ -25,7 +25,7 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{HistStore, Position};
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
+    EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 use clap::Parser;
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db_dir = format!("{}/{}", args.db.trim_end_matches('/'), key);
         std::fs::create_dir_all(&db_dir).ok();
         let db_path = versioned_path(&format!("{db_dir}/log_store.db"));
-        let store = Arc::new(LogStore::open(&db_path)?);
+        let store = Arc::new(LogCache::open(&db_path)?);
 
         let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
         let history = EvmLogHistory::with_options(
