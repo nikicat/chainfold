@@ -258,19 +258,24 @@ struct AbiParam {
     components: Vec<AbiParam>,
 }
 
-fn event_from_abi(
-    abi_json: &str,
-    event_name: &str,
-) -> Result<(String, [u8; 32], String), SignatureError> {
+/// Locate the `event`-typed ABI item named `event_name`, returning its raw JSON.
+fn find_event_item(abi_json: &str, event_name: &str) -> Result<serde_json::Value, SignatureError> {
     let items: Vec<serde_json::Value> = serde_json::from_str(abi_json)
         .map_err(|e| SignatureError::Decode(format!("ABI JSON: {e}")))?;
-    let raw = items
+    items
         .into_iter()
         .find(|v| {
             v.get("type").and_then(|t| t.as_str()) == Some("event")
                 && v.get("name").and_then(|n| n.as_str()) == Some(event_name)
         })
-        .ok_or_else(|| SignatureError::EventNotFound(event_name.into()))?;
+        .ok_or_else(|| SignatureError::EventNotFound(event_name.into()))
+}
+
+fn event_from_abi(
+    abi_json: &str,
+    event_name: &str,
+) -> Result<(String, [u8; 32], String), SignatureError> {
+    let raw = find_event_item(abi_json, event_name)?;
     let parsed: AbiItem = serde_json::from_value(raw.clone())
         .map_err(|e| SignatureError::Decode(format!("event item: {e}")))?;
     let signature = canonical_signature(&parsed.name, &parsed.inputs);
