@@ -17,6 +17,7 @@ Snapshot of structural debt in the tree. Items marked ✅ landed in commits on `
 | 10 | `2d3bd93` | Split `cached_navigate` into `cached_navigate_forward` / `cached_navigate_backward`; drop `NavDir` enum. Doc comments now call out the asymmetry between forward (requires contiguity) and backward (yields nearest preceding). |
 | 11 | `3426648` | Decompose `merge_step` into `fill_heads` / `take_first_error` / `pick_winner`; `merge_step` becomes a 20-line orchestrator. |
 | 12 | `c51be9a` | Collapse `latest_pos` / `best_pos` / `safe_pos` (and the subscribe trio) in `ErasedSource` to `tip_pos(TipKind)` / `subscribe_tip(TipKind)`; `build_tip_store` no longer needs closures. |
+| B | `8e4432b` | Move `arch::evm` (`EvmPosition`, `EvmEvent`, `EvmBlock`, `EvmTransaction`, `Amount`, `Asset`, `Erc20`, `Erc20Transfer`/`Mint`/`Burn`, `Erc20Balance`) out of `arch.rs` into `src/evm/types.rs`. Source-agnostic core no longer references EVM. |
 
 Also: `4a6f35e` added this file.
 
@@ -51,12 +52,6 @@ Suggested split:
 - `SignatureCache` — event_signatures (this is what `signatures::SignatureCache` trait wants).
 
 Open design question: do they share a `Arc<Mutex<Connection>>` (one SQLite file) or each own their own (one file per concern)? Migrations would localize per cache either way. Big diff but each consumer (`LogIndex`, `EvmLogHistory`, `erc20::*`, `LogStoreSignatureCache`) only needs one narrow surface today.
-
-### B. Move `arch::evm` out of `arch.rs`
-
-`src/arch.rs:502` defines a ~210-line `pub mod evm { … }` with `EvmPosition`, `EvmEvent`, `EvmBlock`, `EvmTransaction`, `Amount`, `Asset`, `Erc20`, `Erc20Transfer`, `Erc20Mint`, `Erc20Burn`, `Erc20Balance`. Yet the module doc at line 11 says: "Generic core (this module) knows nothing about EVM." Move to `src/evm/types.rs` and re-export under `crate::evm::types` (or keep the `crate::arch::evm` path via re-export). Project's locked-in design rule #1 calls source-agnostic core out explicitly.
-
-Mostly a file move + import-path follow-ups in `src/evm/*.rs` and tests. Smallest of the architectural items.
 
 ### C. Move `SqliteAnchorStore` out of `matcher.rs`
 
