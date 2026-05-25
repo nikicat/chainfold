@@ -74,16 +74,13 @@ pub struct EvmLogHistory<P> {
     chunk_size: u64,
     chain_id: u64,
 
-    // Reactive tip stores. `best`/`safe` are stubs that mirror `latest`
-    // until Phase 7 wires confirmation depth + finality polling.
+    // Reactive tip stores. `best`/`safe` are stubs whose watch channels
+    // are closed at construction — they emit the initial `earliest`
+    // position once and stay frozen there until finality wiring lands.
     latest_store: Store<EvmPosition>,
     best_store: Store<EvmPosition>,
     safe_store: Store<EvmPosition>,
     latest_tx: watch::Sender<EvmPosition>,
-    #[allow(dead_code)]
-    best_tx: watch::Sender<EvmPosition>,
-    #[allow(dead_code)]
-    safe_tx: watch::Sender<EvmPosition>,
 
     // Wall-clock → block-number estimation. Anchored at a recent block
     // rather than genesis because some chains use timestamp 0 at genesis.
@@ -137,8 +134,17 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
 
         let earliest = EvmPosition::earliest();
         let (latest_tx, latest_rx) = watch::channel(earliest);
-        let (best_tx, best_rx) = watch::channel(earliest);
-        let (safe_tx, safe_rx) = watch::channel(earliest);
+        // Stubs: the sender drops at end of this inner scope, closing the
+        // channel. Receivers still answer `get()` with `earliest`; their
+        // subscribe() yields the initial value once and then ends.
+        let best_rx = {
+            let (_, rx) = watch::channel(earliest);
+            rx
+        };
+        let safe_rx = {
+            let (_, rx) = watch::channel(earliest);
+            rx
+        };
 
         let fetcher = build_fetcher(provider.clone(), store.clone(), address, topics);
         let index = Arc::new(LogIndex::with_chunk_size(
@@ -161,8 +167,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             best_store: Store::new(best_rx),
             safe_store: Store::new(safe_rx),
             latest_tx,
-            best_tx,
-            safe_tx,
             anchor_block,
             anchor_timestamp,
             block_time,
