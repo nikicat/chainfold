@@ -23,7 +23,7 @@
 //!
 //! Without an active subscription, [`HistStore::snapshots`] still yields the
 //! current snapshot but will not advance until a tip update arrives —
-//! callers can also drive the tip manually via [`Self::poll_tip`].
+//! callers can also drive the tip manually via [`Self::update_tip`].
 
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, Weak};
@@ -234,7 +234,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
 
     /// Fetch the latest block from RPC and bump `latest_store`. Returns
     /// the new tip block number.
-    pub async fn poll_tip(&self) -> Result<u64, HistoryError> {
+    pub async fn update_tip(&self) -> Result<u64, HistoryError> {
         let block_number = self.latest_block_number().await?;
         self.update_tip_to(block_number).await?;
         Ok(block_number)
@@ -265,7 +265,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     ) -> Result<EvmLogSubscriber, HistoryError> {
         self.index.attach_drain();
 
-        let start_block = self.poll_tip().await?;
+        let start_block = self.update_tip().await?;
 
         let filter = self.build_filter(None, None);
 

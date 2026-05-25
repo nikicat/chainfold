@@ -288,13 +288,6 @@ impl<T: Send + Sync + 'static, P: Position> Hist<T, P> {
         };
         (head, tail)
     }
-
-    /// Position just after the last item in `items`, or `None` if empty.
-    ///
-    /// Convenience for the "save resume anchor after a batch" pattern.
-    pub fn pos_after(items: &[Positioned<T, P>]) -> Option<P> {
-        items.last().map(|p| p.pos.clone())
-    }
 }
 
 // ============================================================

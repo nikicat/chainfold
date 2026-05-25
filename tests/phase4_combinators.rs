@@ -181,12 +181,12 @@ async fn map_composes_with_filter() {
     let src = MockSource::new(evens(vec![1, 2, 3, 4, 5]));
     let filtered = filter_hist_store(src.hist_store(), |e: &MockEvent| e.0.is_multiple_of(2));
     let mapped: HistStore<MappedItem<FilteredItem<MockEvent>, u64>, MockPos> =
-        map_hist_store(filtered, |f: &FilteredItem<MockEvent>| f.item.0 * 10);
+        map_hist_store(filtered, |f: &FilteredItem<MockEvent>| f.value.0 * 10);
 
     let items = collect(mapped.next().await).await;
     assert_eq!(items.len(), 2);
-    assert_eq!(items[0].item.item, 20);
-    assert_eq!(items[0].item.source.item.0, 2);
+    assert_eq!(items[0].item.value, 20);
+    assert_eq!(items[0].item.source.value.0, 2);
     assert_eq!(
         items[0]
             .item
@@ -197,8 +197,8 @@ async fn map_composes_with_filter() {
             .collect::<Vec<_>>(),
         vec![1]
     );
-    assert_eq!(items[1].item.item, 40);
-    assert_eq!(items[1].item.source.item.0, 4);
+    assert_eq!(items[1].item.value, 40);
+    assert_eq!(items[1].item.source.value.0, 4);
     assert_eq!(items[1].pos, MockPos(4));
 }
 
@@ -220,7 +220,7 @@ async fn filter_pos_after_round_trips_via_marshal() {
     let (_, tail) = h1.split(restored);
     let items2 = collect(tail).await;
     assert_eq!(items2.len(), 1);
-    assert_eq!(items2[0].item.item.0, 6);
+    assert_eq!(items2[0].item.value.0, 6);
 }
 
 #[tokio::test]
@@ -235,7 +235,7 @@ async fn since_skips_mapper_on_pre_cut_items_full_pipeline() {
     let cut = MockPos(3);
     let since = since_hist_store(mapped, cut);
     let items = collect(since.next().await).await;
-    let kept: Vec<u64> = items.iter().map(|p| p.item.item).collect();
+    let kept: Vec<u64> = items.iter().map(|p| p.item.value).collect();
     assert_eq!(kept, vec![8, 10, 12]); // x*2 for x in [4,5,6]
                                        // Mapper only saw the post-cut items.
     assert_eq!(counter.load(Ordering::SeqCst), 3);
@@ -251,18 +251,18 @@ async fn filter_advances_with_tip() {
 
     // First yield is "2".
     let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.item.item.0, 2);
+    assert_eq!(first.item.value.0, 2);
     assert_eq!(first.pos, MockPos(2));
 
     // Append more — watch_hist should re-snapshot and yield 4, then 6.
     src.append(MockEvent(4));
     let second = stream.next().await.unwrap().unwrap();
-    assert_eq!(second.item.item.0, 4);
+    assert_eq!(second.item.value.0, 4);
 
     src.append(MockEvent(5));
     src.append(MockEvent(6));
     let third = stream.next().await.unwrap().unwrap();
-    assert_eq!(third.item.item.0, 6);
+    assert_eq!(third.item.value.0, 6);
     assert_eq!(third.pos, MockPos(6));
 }
 
@@ -273,7 +273,7 @@ async fn since_then_filter_composes() {
     let since = since_hist_store(src.hist_store(), MockPos(3));
     let filtered = filter_hist_store(since, |e: &MockEvent| e.0.is_multiple_of(2));
     let items = collect(filtered.next().await).await;
-    let kept: Vec<u64> = items.iter().map(|p| p.item.item.0).collect();
+    let kept: Vec<u64> = items.iter().map(|p| p.item.value.0).collect();
     // Items strictly after pos=3 are [4,5,6,7]; evens are [4, 6].
     assert_eq!(kept, vec![4, 6]);
 }
@@ -286,7 +286,7 @@ async fn map_then_since_composes() {
     let mapped = map_hist_store(src.hist_store(), |e: &MockEvent| e.0 + 100);
     let since = since_hist_store(mapped, MockPos(2));
     let items = collect(since.next().await).await;
-    let kept: Vec<u64> = items.iter().map(|p| p.item.item).collect();
+    let kept: Vec<u64> = items.iter().map(|p| p.item.value).collect();
     // Post-cut items at positions 3, 4 → mapped to 103, 104.
     assert_eq!(kept, vec![103, 104]);
 }

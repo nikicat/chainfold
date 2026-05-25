@@ -218,7 +218,7 @@ async fn resume_seeds_from_current_tip() {
         .await
         .expect("subscribe sub2");
 
-    // subscribe() already called poll_tip before returning, so the seed
+    // subscribe() already called update_tip before returning, so the seed
     // has already happened. Read the store directly.
     let seeded_tip = history.latest_store().get().block;
     assert!(

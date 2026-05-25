@@ -115,7 +115,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let owned = OwnedErc20::with_options(provider, store, owner, USDC.0 .0, 10, 12)
         .await
         .expect("OwnedErc20");
-    owned.poll_tips().await.expect("poll_tips");
+    owned.update_tips().await.expect("update_tips");
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
     let (_, after_start) = hist.split(merged_pos_for(start));
@@ -129,8 +129,8 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
 
     // Each yield must involve the owner and have a consistent source_key.
     for y in &yields {
-        let topic1 = y.item.topics.get(1).copied();
-        let topic2 = y.item.topics.get(2).copied();
+        let topic1 = y.value.topics.get(1).copied();
+        let topic2 = y.value.topics.get(2).copied();
         let is_from = topic1 == Some(owner_padded);
         let is_to = topic2 == Some(owner_padded);
         assert!(is_from || is_to, "yielded event must involve the owner");
@@ -149,7 +149,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let mut seen: HashSet<EvmPosition> = HashSet::new();
     let mut unique = Vec::new();
     for y in &yields {
-        if seen.insert(y.item.position()) {
+        if seen.insert(y.value.position()) {
             unique.push(y);
         }
     }
@@ -162,8 +162,8 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
         "OwnedErc20 + dedupe should match client-side filter count"
     );
     for (u, e) in unique.iter().zip(expected.iter()) {
-        assert_eq!(u.item.block_number, e.block_number);
-        assert_eq!(u.item.log_index, e.log_index);
+        assert_eq!(u.value.block_number, e.block_number);
+        assert_eq!(u.value.log_index, e.log_index);
     }
 }
 
@@ -186,7 +186,7 @@ async fn owned_erc20_empty_for_inactive_address() {
     let owned = OwnedErc20::with_options(provider, store, owner, USDC.0 .0, 10, 12)
         .await
         .expect("OwnedErc20");
-    owned.poll_tips().await.expect("poll_tips");
+    owned.update_tips().await.expect("update_tips");
     let from_block = FORK_BLOCK - 2;
     let to_block = FORK_BLOCK;
     let start = EvmPosition::new(from_block - 1, u32::MAX);
@@ -200,8 +200,8 @@ async fn owned_erc20_empty_for_inactive_address() {
         let item = item.expect("iter");
         // Zero address may be receive-side of burns; we don't expect
         // outgoing. Verify direction is consistent if any event surfaces.
-        let topic1 = item.item.item.topics.get(1).copied();
-        let topic2 = item.item.item.topics.get(2).copied();
+        let topic1 = item.item.value.topics.get(1).copied();
+        let topic2 = item.item.value.topics.get(2).copied();
         let owner_padded = padded_topic(&owner);
         match item.item.source_key.as_str() {
             "out" => assert_eq!(topic1, Some(owner_padded)),

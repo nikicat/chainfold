@@ -86,7 +86,7 @@ fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
 }
 
 fn cmp_by_time(a: &MergedItem<EvmEvent>, b: &MergedItem<EvmEvent>) -> Ordering {
-    a.item.timestamp.cmp(&b.item.timestamp)
+    a.value.timestamp.cmp(&b.value.timestamp)
 }
 
 #[tokio::main]
@@ -182,11 +182,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(item) = stream.next().await {
         let item = item?;
         let m = &item.item;
-        let topic0_hex = m.item.topics.first().map_or_else(
+        let topic0_hex = m.value.topics.first().map_or_else(
             || "(none)".into(),
             |t| format!("0x{}", hex::encode(&t[..4])),
         );
-        let ts = chrono::DateTime::from_timestamp(m.item.timestamp as i64, 0).map_or_else(
+        let ts = chrono::DateTime::from_timestamp(m.value.timestamp as i64, 0).map_or_else(
             || "----------T--:--:--Z".into(),
             |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         );
@@ -195,10 +195,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             count,
             ts,
             m.source_key,
-            m.item.block_number,
-            m.item.log_index,
+            m.value.block_number,
+            m.value.log_index,
             topic0_hex,
-            &hex::encode(&m.item.tx_hash[..8]),
+            &hex::encode(&m.value.tx_hash[..8]),
         );
         count += 1;
         if count >= args.limit {

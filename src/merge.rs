@@ -98,7 +98,7 @@ impl Position for MergedPos {
 /// source produced it; `source_pos` is the marshalled per-source position.
 #[derive(Clone, Debug)]
 pub struct MergedItem<T> {
-    pub item: T,
+    pub value: T,
     pub source_key: String,
     pub source_pos: Vec<u8>,
 }
@@ -622,7 +622,7 @@ where
         .insert(source_key.clone(), source_pos.clone());
     let merged_pos = MergedPos::new(state.vector_clock.clone());
     let merged_item = MergedItem {
-        item,
+        value: item,
         source_key,
         source_pos,
     };
@@ -692,12 +692,12 @@ where
                     .and_then(|r| r.as_ref().ok())
                     .expect("head Ok above");
                 let mi_a = MergedItem {
-                    item: ai.clone(),
+                    value: ai.clone(),
                     source_key: state.streams[i].key.clone(),
                     source_pos: ap.clone(),
                 };
                 let mi_b = MergedItem {
-                    item: bi.clone(),
+                    value: bi.clone(),
                     source_key: state.streams[j].key.clone(),
                     source_pos: bp.clone(),
                 };
@@ -870,7 +870,7 @@ mod tests {
     }
 
     fn cmp_by_time(a: &MergedItem<MockEvent>, b: &MergedItem<MockEvent>) -> Ordering {
-        a.item.time.cmp(&b.item.time)
+        a.value.time.cmp(&b.value.time)
     }
 
     async fn collect_merged(
@@ -902,7 +902,7 @@ mod tests {
         let merged = merge_hist_stores(sources, cmp_by_time);
 
         let items = collect_merged(merged.next().await).await;
-        let labels: Vec<&str> = items.iter().map(|p| p.item.item.label.as_str()).collect();
+        let labels: Vec<&str> = items.iter().map(|p| p.item.value.label.as_str()).collect();
         assert_eq!(labels, vec!["a1", "b1", "a2"]);
         // Check source_keys.
         let keys: Vec<&str> = items.iter().map(|p| p.item.source_key.as_str()).collect();
@@ -955,7 +955,7 @@ mod tests {
         let items_tail = collect_merged(tail).await;
         let labels: Vec<&str> = items_tail
             .iter()
-            .map(|p| p.item.item.label.as_str())
+            .map(|p| p.item.value.label.as_str())
             .collect();
         assert_eq!(labels, vec!["a2", "b2", "a3"]);
     }
@@ -992,7 +992,7 @@ mod tests {
         // from "b" everything (it wasn't in the old anchor → default = pos 0).
         let labels: Vec<&str> = items_tail
             .iter()
-            .map(|p| p.item.item.label.as_str())
+            .map(|p| p.item.value.label.as_str())
             .collect();
         // By time: b1(20), a2(30), b2(40).
         assert_eq!(labels, vec!["b1", "a2", "b2"]);
@@ -1007,7 +1007,7 @@ mod tests {
         sources.insert("b".into(), ErasedHistStore::new(b.hist_store()));
         let merged = merge_hist_stores(sources, cmp_by_time);
         let items = collect_merged(merged.next().await).await;
-        let labels: Vec<&str> = items.iter().map(|p| p.item.item.label.as_str()).collect();
+        let labels: Vec<&str> = items.iter().map(|p| p.item.value.label.as_str()).collect();
         assert_eq!(labels, vec!["a1", "a2"]);
     }
 
@@ -1021,7 +1021,7 @@ mod tests {
         sources.insert("a".into(), ErasedHistStore::new(a.hist_store()));
         let merged = merge_hist_stores(sources, cmp_by_time);
         let items = collect_merged(merged.next().await).await;
-        let labels: Vec<&str> = items.iter().map(|p| p.item.item.label.as_str()).collect();
+        let labels: Vec<&str> = items.iter().map(|p| p.item.value.label.as_str()).collect();
         assert_eq!(labels, vec!["a1", "z1"]);
     }
 
@@ -1039,7 +1039,7 @@ mod tests {
         let labels1: Vec<String> = collect_merged(h1)
             .await
             .iter()
-            .map(|p| p.item.item.label.clone())
+            .map(|p| p.item.value.label.clone())
             .collect();
         assert_eq!(labels1, vec!["a1"]);
 
@@ -1053,7 +1053,7 @@ mod tests {
         let labels2: Vec<String> = collect_merged(h2)
             .await
             .iter()
-            .map(|p| p.item.item.label.clone())
+            .map(|p| p.item.value.label.clone())
             .collect();
         assert_eq!(labels2, vec!["a1", "b1"]);
     }

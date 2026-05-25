@@ -24,7 +24,7 @@ type Predicate<Item> = Arc<dyn Fn(&Item) -> bool + Send + Sync>;
 /// yield (or since the start of the window for the first yield).
 #[derive(Clone, Debug)]
 pub struct FilteredItem<Item> {
-    pub item: Item,
+    pub value: Item,
     pub skipped: Vec<Item>,
 }
 
@@ -126,7 +126,7 @@ where
                     let drained = std::mem::take(&mut skipped);
                     Some(Ok(Positioned::new(
                         FilteredItem {
-                            item: p.item,
+                            value: p.item,
                             skipped: drained,
                         },
                         p.pos,
@@ -179,7 +179,7 @@ mod tests {
         let src = MockSource::new(vec![mk(1), mk(2), mk(3), mk(4), mk(5)]);
         let filtered = filter_hist_store(src.hist_store(), even);
         let items = collect(filtered.next().await).await;
-        let kept: Vec<&str> = items.iter().map(|p| p.item.item.0.as_str()).collect();
+        let kept: Vec<&str> = items.iter().map(|p| p.item.value.0.as_str()).collect();
         assert_eq!(kept, vec!["2", "4"]);
     }
 
@@ -190,7 +190,7 @@ mod tests {
         let items = collect(filtered.next().await).await;
         assert_eq!(items.len(), 3);
         // First kept item is "2" — only "1" was skipped before it.
-        assert_eq!(items[0].item.item.0, "2");
+        assert_eq!(items[0].item.value.0, "2");
         assert_eq!(
             items[0]
                 .item
@@ -201,7 +201,7 @@ mod tests {
             vec!["1"]
         );
         // Second kept is "4" — "3" skipped in between.
-        assert_eq!(items[1].item.item.0, "4");
+        assert_eq!(items[1].item.value.0, "4");
         assert_eq!(
             items[1]
                 .item
@@ -212,7 +212,7 @@ mod tests {
             vec!["3"]
         );
         // Third kept is "6" — "5" skipped.
-        assert_eq!(items[2].item.item.0, "6");
+        assert_eq!(items[2].item.value.0, "6");
         assert_eq!(
             items[2]
                 .item
@@ -241,7 +241,7 @@ mod tests {
         let (_, tail) = hist.split(MockPos(2));
         let items = collect(tail).await;
         // Items kept after pos=2: "4" and "6"
-        let kept: Vec<&str> = items.iter().map(|p| p.item.item.0.as_str()).collect();
+        let kept: Vec<&str> = items.iter().map(|p| p.item.value.0.as_str()).collect();
         assert_eq!(kept, vec!["4", "6"]);
     }
 

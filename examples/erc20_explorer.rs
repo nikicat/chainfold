@@ -323,7 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Update both inner histories' tips so the merged HistStore knows
         // the current end-of-chain. Required before iterating without an
         // active `subscribe()`.
-        owned.poll_tips().await?;
+        owned.update_tips().await?;
         let meta = metadata.get(address).expect("metadata fetched above");
 
         // Use the outgoing inner history as the reference for time-pos /
@@ -359,15 +359,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Some(item) = stream.next().await {
                 let item = item?;
                 let mi: &MergedItem<EvmEvent> = &item.item;
-                let event_pos = mi.item.position();
+                let event_pos = mi.value.position();
                 if Some(event_pos) == last_pos {
                     // Self-transfer duplicate yield: already applied.
                     continue;
                 }
                 last_pos = Some(event_pos);
-                balance = apply_transfer(owner, balance, &mi.item);
+                balance = apply_transfer(owner, balance, &mi.value);
                 print_transfer(
-                    &mi.item,
+                    &mi.value,
                     &mi.source_key,
                     balance,
                     count,
@@ -390,18 +390,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Some(item) = stream.next().await {
                 let item = item?;
                 let mi: &MergedItem<EvmEvent> = &item.item;
-                let event_pos = mi.item.position();
+                let event_pos = mi.value.position();
                 if Some(event_pos) == last_pos {
                     continue;
                 }
                 last_pos = Some(event_pos);
-                balance = apply_transfer(owner, balance, &mi.item);
+                balance = apply_transfer(owner, balance, &mi.value);
                 if count >= args.limit {
                     println!("... (limit reached, use --limit to show more)");
                     break;
                 }
                 print_transfer(
-                    &mi.item,
+                    &mi.value,
                     &mi.source_key,
                     balance,
                     count,

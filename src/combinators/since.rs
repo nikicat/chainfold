@@ -143,7 +143,7 @@ mod tests {
         let since = since_hist_store(mapped, cut);
 
         let items = collect(since.next().await).await;
-        let kept: Vec<&str> = items.iter().map(|p| p.item.item.as_str()).collect();
+        let kept: Vec<&str> = items.iter().map(|p| p.item.value.as_str()).collect();
         assert_eq!(kept, vec!["C", "D"]);
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     }

@@ -89,7 +89,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             12,
         )
         .await?;
-        owned.poll_tips().await?;
+        owned.update_tips().await?;
 
         let out_hs = owned.out_history().hist_store();
         let (start, end) = resolve_range(evm_args, &out_hs).await?;
@@ -176,15 +176,15 @@ fn render_transfer(
     owner: [u8; 20],
 ) -> bool {
     let mi = &item.item;
-    let event_pos = mi.item.position();
+    let event_pos = mi.value.position();
     if Some(event_pos) == *last_pos {
         return false;
     }
     *last_pos = Some(event_pos);
     if show_balance {
-        *balance = apply_transfer(owner, *balance, &mi.item);
+        *balance = apply_transfer(owner, *balance, &mi.value);
     }
-    let positioned = Positioned::new(mi.item.clone(), event_pos);
+    let positioned = Positioned::new(mi.value.clone(), event_pos);
     if show_balance {
         fmt::print_balance(&positioned, *balance, count, ctx);
     } else {

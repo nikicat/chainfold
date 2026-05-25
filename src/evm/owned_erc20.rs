@@ -125,14 +125,14 @@ where
     /// before iterating [`transfers`](Self::transfers) without an active
     /// subscription: the merged store's `end` is built from the inner
     /// stores' tips, which start at [`EvmPosition::earliest`] and only
-    /// advance via [`EvmLogHistory::poll_tip`] or
+    /// advance via [`EvmLogHistory::update_tip`] or
     /// [`EvmLogHistory::subscribe`].
     ///
     /// Returns the new tip block number (same on both sides for a single
     /// chain). Cheap — one `eth_blockNumber` round-trip per inner history.
-    pub async fn poll_tips(&self) -> Result<u64, HistoryError> {
+    pub async fn update_tips(&self) -> Result<u64, HistoryError> {
         let (out_tip, in_tip) =
-            tokio::try_join!(self.out_history.poll_tip(), self.in_history.poll_tip())?;
+            tokio::try_join!(self.out_history.update_tip(), self.in_history.update_tip())?;
         // Both sides hit the same chain and should agree, but return the
         // outgoing-side number for callers that just want a single u64.
         let _ = in_tip;
@@ -167,7 +167,8 @@ where
             ErasedHistStore::new(self.in_history.hist_store()),
         );
         merge_hist_stores(sources, |a, b| {
-            (a.item.block_number, a.item.log_index).cmp(&(b.item.block_number, b.item.log_index))
+            (a.value.block_number, a.value.log_index)
+                .cmp(&(b.value.block_number, b.value.log_index))
         })
     }
 }

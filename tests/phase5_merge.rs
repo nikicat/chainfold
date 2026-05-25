@@ -80,7 +80,7 @@ fn ev(time: u64, label: &str) -> CommonEvent {
 }
 
 fn cmp_by_time(a: &MergedItem<CommonEvent>, b: &MergedItem<CommonEvent>) -> Ordering {
-    a.item.time.cmp(&b.item.time)
+    a.value.time.cmp(&b.value.time)
 }
 
 // ============================================================
@@ -251,7 +251,7 @@ async fn merge_interleaves_heterogeneous_sources_by_time() {
     let merged = merge_hist_stores(sources, cmp_by_time);
 
     let items = collect_merged(merged.next().await).await;
-    let labels: Vec<&str> = items.iter().map(|p| p.item.item.label.as_str()).collect();
+    let labels: Vec<&str> = items.iter().map(|p| p.item.value.label.as_str()).collect();
     assert_eq!(labels, vec!["a1", "b1", "b2", "a2"]);
 
     // source_key alternates correctly.
@@ -288,7 +288,7 @@ async fn merge_resumes_from_marshalled_anchor() {
     let items_tail = collect_merged(tail).await;
     let labels: Vec<&str> = items_tail
         .iter()
-        .map(|p| p.item.item.label.as_str())
+        .map(|p| p.item.value.label.as_str())
         .collect();
     assert_eq!(labels, vec!["a2", "b2", "a3"]);
 }
@@ -329,7 +329,7 @@ async fn merged_pos_handles_added_source() {
     let items_tail = collect_merged(tail).await;
     let labels: Vec<&str> = items_tail
         .iter()
-        .map(|p| p.item.item.label.as_str())
+        .map(|p| p.item.value.label.as_str())
         .collect();
     // Items after anchor: alpha past pos 1 → a2 (time 40); named all → b1 (20), b2 (50).
     // Time-merged: b1 (20), a2 (40), b2 (50).
@@ -352,12 +352,12 @@ async fn merge_composes_with_filter() {
     sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
     let merged = merge_hist_stores(sources, cmp_by_time);
     let filtered = filter_hist_store(merged, |mi: &MergedItem<CommonEvent>| {
-        mi.item.time.is_multiple_of(2)
+        mi.value.time.is_multiple_of(2)
     });
     let items = collect_merged_filtered(filtered.next().await).await;
     let labels: Vec<&str> = items
         .iter()
-        .map(|p| p.item.item.item.label.as_str())
+        .map(|p| p.item.value.value.label.as_str())
         .collect();
     // Even-time items: a1 (10), b1 (20). a2 (35) and b2 (45) are odd.
     assert_eq!(labels, vec!["a1", "b1"]);
@@ -395,7 +395,7 @@ async fn merge_composes_with_since() {
 
     let since = since_hist_store(merged, cut);
     let items = collect_merged(since.next().await).await;
-    let labels: Vec<&str> = items.iter().map(|p| p.item.item.label.as_str()).collect();
+    let labels: Vec<&str> = items.iter().map(|p| p.item.value.label.as_str()).collect();
     // Skipped: a1 (alpha=1 cut). Yielded: b1, a2, b2.
     assert_eq!(labels, vec!["b1", "a2", "b2"]);
 }
@@ -416,7 +416,7 @@ async fn merge_advances_with_tip_via_watch_hist() {
         .expect("first item within timeout")
         .unwrap()
         .unwrap();
-    assert_eq!(first.item.item.label, "a1");
+    assert_eq!(first.item.value.label, "a1");
 
     // Append to b; the merged store should re-snapshot and yield it.
     b.append(MockPosNamed("n01".into()), ev(20, "b1"));
@@ -425,7 +425,7 @@ async fn merge_advances_with_tip_via_watch_hist() {
         .expect("second item within timeout")
         .unwrap()
         .unwrap();
-    assert_eq!(second.item.item.label, "b1");
+    assert_eq!(second.item.value.label, "b1");
 }
 
 #[tokio::test]

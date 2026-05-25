@@ -19,7 +19,7 @@ use crate::arch::{
 /// reach it without re-fetching.
 #[derive(Clone, Debug)]
 pub struct MappedItem<Src, Dst> {
-    pub item: Dst,
+    pub value: Dst,
     pub source: Src,
 }
 
@@ -120,7 +120,7 @@ where
                 let mapped = f(&p.item);
                 Positioned::new(
                     MappedItem {
-                        item: mapped,
+                        value: mapped,
                         source: p.item,
                     },
                     p.pos,
@@ -166,10 +166,10 @@ mod tests {
         let hist = mapped.next().await;
         let items = collect(hist).await;
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0].item.item, 1);
+        assert_eq!(items[0].item.value, 1);
         assert_eq!(items[0].item.source.0, "a");
         assert_eq!(items[0].pos, MockPos(1));
-        assert_eq!(items[2].item.item, 3);
+        assert_eq!(items[2].item.value, 3);
         assert_eq!(items[2].pos, MockPos(3));
     }
 
@@ -185,8 +185,8 @@ mod tests {
         let (_, tail) = hist.split(MockPos(1));
         let items = collect(tail).await;
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].item.item, "B");
-        assert_eq!(items[1].item.item, "C");
+        assert_eq!(items[0].item.value, "B");
+        assert_eq!(items[1].item.value, "C");
     }
 
     #[tokio::test]
