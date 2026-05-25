@@ -604,38 +604,74 @@ async fn merge_step<T>(
 where
     T: Clone + Send + Sync + 'static,
 {
-    // Fill heads.
-    for s in &mut state.streams {
-        if s.head.is_none() && !s.exhausted {
-            if let Some(item) = s.stream.next().await {
-                s.head = Some(item);
-            } else {
-                s.exhausted = true;
-                // Source exhausted within (start, end] — advance the
-                // vector clock to end[k] so resumes know we've consumed
-                // through.
-                state.vector_clock.insert(s.key.clone(), s.end_pos.clone());
-            }
-        }
-    }
-
-    // Surface errors first so they aren't masked by later items.
-    if let Some(i) = state
-        .streams
-        .iter()
-        .position(|s| matches!(&s.head, Some(Err(_))))
-    {
-        let err = state.streams[i]
-            .head
-            .take()
-            .expect("head set above")
-            .err()
-            .unwrap();
-        state.streams[i].exhausted = true;
+    fill_heads(&mut state).await;
+    if let Some(err) = take_first_error(&mut state) {
         return Some((Err(err), state));
     }
+    let idx = pick_winner(&state)?;
+    let (item, source_pos) = state
+        .streams[idx]
+        .head
+        .take()
+        .expect("winner head set")
+        .expect("error case handled");
+    let source_key = state.streams[idx].key.clone();
+    state
+        .vector_clock
+        .insert(source_key.clone(), source_pos.clone());
+    let merged_pos = MergedPos::new(state.vector_clock.clone());
+    let merged_item = MergedItem {
+        item,
+        source_key,
+        source_pos,
+    };
+    Some((Ok(Positioned::new(merged_item, merged_pos)), state))
+}
 
-    // Find the smallest available head.
+/// Pull a head from any stream that doesn't have one yet. Streams that
+/// finish within `(start, end]` advance the vector clock to their
+/// `end_pos` so resumes know we consumed through.
+async fn fill_heads<T>(state: &mut MergeState<T>)
+where
+    T: Send + Sync + 'static,
+{
+    for s in &mut state.streams {
+        if s.head.is_some() || s.exhausted {
+            continue;
+        }
+        if let Some(item) = s.stream.next().await {
+            s.head = Some(item);
+        } else {
+            s.exhausted = true;
+            state.vector_clock.insert(s.key.clone(), s.end_pos.clone());
+        }
+    }
+}
+
+/// Take the first head that is an error and mark that stream exhausted
+/// so the caller doesn't keep polling it.
+fn take_first_error<T>(state: &mut MergeState<T>) -> Option<HistoryError> {
+    let i = state
+        .streams
+        .iter()
+        .position(|s| matches!(&s.head, Some(Err(_))))?;
+    let err = state.streams[i]
+        .head
+        .take()
+        .expect("position checked head is Some")
+        .err()
+        .expect("position checked head is Err");
+    state.streams[i].exhausted = true;
+    Some(err)
+}
+
+/// Index of the stream whose head is smallest by `state.cmp`. Skips
+/// streams without an `Ok` head. Returns `None` when no stream is
+/// currently yieldable.
+fn pick_winner<T>(state: &MergeState<T>) -> Option<usize>
+where
+    T: Clone + Send + Sync + 'static,
+{
     let mut winner: Option<usize> = None;
     for i in 0..state.streams.len() {
         if !matches!(&state.streams[i].head, Some(Ok(_))) {
@@ -672,21 +708,7 @@ where
             }
         });
     }
-
-    let idx = winner?;
-    let head = state.streams[idx].head.take().expect("winner head set");
-    let (item, source_pos) = head.expect("error case handled");
-    let source_key = state.streams[idx].key.clone();
-    state
-        .vector_clock
-        .insert(source_key.clone(), source_pos.clone());
-    let merged_pos = MergedPos::new(state.vector_clock.clone());
-    let merged_item = MergedItem {
-        item,
-        source_key,
-        source_pos,
-    };
-    Some((Ok(Positioned::new(merged_item, merged_pos)), state))
+    winner
 }
 
 // ============================================================
