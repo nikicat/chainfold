@@ -17,6 +17,6 @@ mod since;
 #[cfg(test)]
 mod tests_common;
 
-pub use filtered::{filter_hist_store, FilteredItem};
-pub use mapped::{map_hist_store, MapFn, MappedItem};
+pub use filtered::{FilteredItem, filter_hist_store};
+pub use mapped::{MapFn, MappedItem, map_hist_store};
 pub use since::since_hist_store;

@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use alloy::primitives::{Address, Bytes, Log as LogInner, LogData, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U256};
 use alloy::rpc::types::Log;
 use rusqlite::Connection;
 
@@ -469,14 +469,14 @@ impl LogStore {
         let mut ids_to_delete: Vec<i64> = Vec::new();
         for (id, start, end, end_hash) in &ranges {
             ids_to_delete.push(*id);
-            if let Some(last) = merged.last_mut() {
-                if last.1 + 1 >= *start {
-                    if *end > last.1 {
-                        last.1 = *end;
-                        last.2.clone_from(end_hash);
-                    }
-                    continue;
+            if let Some(last) = merged.last_mut()
+                && last.1 + 1 >= *start
+            {
+                if *end > last.1 {
+                    last.1 = *end;
+                    last.2.clone_from(end_hash);
                 }
+                continue;
             }
             merged.push((*start, *end, end_hash.clone()));
         }
@@ -1222,10 +1222,12 @@ mod tests {
         store
             .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
             .unwrap();
-        assert!(store
-            .get_erc20_balance_floor(1, &addr, &owner, 100)
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .get_erc20_balance_floor(1, &addr, &owner, 100)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

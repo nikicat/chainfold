@@ -5,14 +5,14 @@ use std::time::Duration;
 use alloy::network::Ethereum;
 use alloy::primitives::U256;
 use alloy::providers::Provider;
-use chainfold::arch::{watch_hist, Position, Positioned};
+use chainfold::arch::{Position, Positioned, watch_hist};
 use chainfold::evm::{
-    apply_transfer, fetch_erc20_metadata, Erc20Metadata, EvmEvent, EvmPosition, LogStore,
-    OwnedErc20, SubscribeTransport, IN_KEY, OUT_KEY,
+    Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, LogStore, OUT_KEY, OwnedErc20,
+    SubscribeTransport, apply_transfer, fetch_erc20_metadata,
 };
 use chainfold::merge::{MergedItem, MergedPos};
-use futures_util::future::join_all;
 use futures_util::StreamExt;
+use futures_util::future::join_all;
 
 use crate::cli::{Erc20Args, Erc20Command, EvmArgs};
 use crate::fmt::{self, FmtContext};
@@ -203,4 +203,3 @@ fn merged_pos_for(p: EvmPosition) -> MergedPos {
     m.insert(OUT_KEY.into(), bytes);
     MergedPos::new(m)
 }
-

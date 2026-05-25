@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use alloy::primitives::U256;
 use chainfold::arch::Positioned;
-use chainfold::evm::{decode_transfer, Erc20Metadata, EvmEvent, EvmPosition};
+use chainfold::evm::{Erc20Metadata, EvmEvent, EvmPosition, decode_transfer};
 
 pub fn explorer_base_url(chain_id: u64) -> &'static str {
     match chain_id {

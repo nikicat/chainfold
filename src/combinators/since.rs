@@ -102,7 +102,7 @@ where
 mod tests {
     use super::*;
     use crate::combinators::mapped::map_hist_store;
-    use crate::combinators::tests_common::{collect, MockEvent, MockPos, MockSource};
+    use crate::combinators::tests_common::{MockEvent, MockPos, MockSource, collect};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]

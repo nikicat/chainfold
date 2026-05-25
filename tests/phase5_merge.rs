@@ -11,14 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chainfold::arch::{
-    watch_hist, AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
-    HistoryError, ItemStream, Position, Positioned, Store, Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
+    ItemStream, Position, Positioned, Store, Timestamp, watch_hist,
 };
-use chainfold::combinators::{filter_hist_store, since_hist_store, FilteredItem};
-use chainfold::merge::{merge_hist_stores, ErasedHistStore, MergedItem, MergedPos};
+use chainfold::combinators::{FilteredItem, filter_hist_store, since_hist_store};
+use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 use futures_core::Stream;
-use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;

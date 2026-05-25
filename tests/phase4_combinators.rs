@@ -11,15 +11,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chainfold::arch::{
-    watch_hist, AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream,
-    HistoryError, ItemStream, Position, Positioned, Store, Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
+    ItemStream, Position, Positioned, Store, Timestamp, watch_hist,
 };
 use chainfold::combinators::{
-    filter_hist_store, map_hist_store, since_hist_store, FilteredItem, MappedItem,
+    FilteredItem, MappedItem, filter_hist_store, map_hist_store, since_hist_store,
 };
 use futures_core::Stream;
-use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -237,7 +237,7 @@ async fn since_skips_mapper_on_pre_cut_items_full_pipeline() {
     let items = collect(since.next().await).await;
     let kept: Vec<u64> = items.iter().map(|p| p.item.value).collect();
     assert_eq!(kept, vec![8, 10, 12]); // x*2 for x in [4,5,6]
-                                       // Mapper only saw the post-cut items.
+    // Mapper only saw the post-cut items.
     assert_eq!(counter.load(Ordering::SeqCst), 3);
 }
 

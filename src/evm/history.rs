@@ -33,8 +33,8 @@ use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
-use futures_util::stream::{empty, once, poll_fn};
 use futures_util::StreamExt;
+use futures_util::stream::{empty, once, poll_fn};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -43,7 +43,7 @@ use crate::arch::{
     ItemStream, Positioned, Store, Timestamp,
 };
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
-use crate::evm::log_store::{compute_filter_hash, BlockHeader, LogStore};
+use crate::evm::log_store::{BlockHeader, LogStore, compute_filter_hash};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
 use crate::evm::types::{EvmEvent, EvmPosition};
 
@@ -506,7 +506,7 @@ fn apply_topics(mut filter: Filter, topics: &[Option<[u8; 32]>; 4]) -> Filter {
 }
 
 fn log_to_evm_event(log: &Log) -> EvmEvent {
-    let addr: [u8; 20] = log.address().0 .0;
+    let addr: [u8; 20] = log.address().0.0;
     let block_hash: [u8; 32] = log.block_hash.map_or([0; 32], |h| h.0);
     let tx_hash: [u8; 32] = log.transaction_hash.map_or([0; 32], |h| h.0);
 
@@ -613,7 +613,7 @@ where
 mod tests {
     use super::*;
     use crate::arch::Position;
-    use alloy::primitives::{Address, Bytes, Log as LogInner, LogData, B256, U64};
+    use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U64};
     use alloy::providers::ProviderBuilder;
     use alloy::transports::mock::Asserter;
     use futures_util::TryStreamExt;

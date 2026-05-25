@@ -42,8 +42,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_core::Stream;
-use futures_util::stream::{poll_fn, unfold};
 use futures_util::StreamExt;
+use futures_util::stream::{poll_fn, unfold};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -610,8 +610,7 @@ where
         return Some((Err(err), state));
     }
     let idx = pick_winner(&state)?;
-    let (item, source_pos) = state
-        .streams[idx]
+    let (item, source_pos) = state.streams[idx]
         .head
         .take()
         .expect("winner head set")

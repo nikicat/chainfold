@@ -33,7 +33,7 @@ use alloy::providers::Provider;
 
 use crate::arch::{HistStore, HistoryError};
 use crate::evm::{EvmEvent, EvmLogHistory, LogStore, TRANSFER_TOPIC};
-use crate::merge::{merge_hist_stores, ErasedHistStore, MergedItem, MergedPos};
+use crate::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 
 /// Source key for outgoing transfers (`owner == from`).
 pub const OUT_KEY: &str = "out";

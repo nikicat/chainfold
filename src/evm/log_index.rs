@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 
 use alloy::rpc::types::Log;
 use futures_core::Stream;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::Notify;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::log_store::LogStore;
 use crate::arch::HistoryError;
@@ -281,10 +281,10 @@ impl LogIndex {
         let filter_hash = self.filter_hash;
         tokio::spawn(async move {
             while let Some(page) = rx.recv().await {
-                if !page.items.is_empty() {
-                    if let Err(e) = store.insert_logs(&filter_hash, &page.items) {
-                        tracing::warn!(error = %e, "drain insert_logs");
-                    }
+                if !page.items.is_empty()
+                    && let Err(e) = store.insert_logs(&filter_hash, &page.items)
+                {
+                    tracing::warn!(error = %e, "drain insert_logs");
                 }
                 if let Err(e) = store.record_scanned_range(
                     &filter_hash,
@@ -382,11 +382,7 @@ impl LogIndex {
             let beyond_tail = tail_end.is_none_or(|t| page_end > t);
             if beyond_tail {
                 let start = if let Some(t) = tail_end {
-                    if range_start <= t {
-                        t
-                    } else {
-                        range_start
-                    }
+                    if range_start <= t { t } else { range_start }
                 } else {
                     range_start
                 };
@@ -678,10 +674,10 @@ impl LogIndex {
                     last_start = Some(r.start);
                     continue;
                 }
-                if let Some(prev_start) = last_start {
-                    if r.end < prev_start {
-                        break;
-                    }
+                if let Some(prev_start) = last_start
+                    && r.end < prev_start
+                {
+                    break;
                 }
                 found = Some(r.item.expect("filled"));
                 break;
@@ -1061,7 +1057,7 @@ fn assert_increasing(logs: &[Log]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, Bytes, Log as LogInner, LogData, B256};
+    use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
     use std::time::Duration;
     use tokio::task::yield_now;
     use tokio::time::sleep;

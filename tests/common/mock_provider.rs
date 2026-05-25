@@ -37,6 +37,6 @@ pub fn remaining(asserter: &Asserter) -> usize {
 /// resulting [`Provider`]. Tests should hold the Arc<Asserter> separately
 /// so they can introspect [`remaining`] after exercising the code under
 /// test.
-pub fn mock_provider(asserter: &Arc<Asserter>) -> impl Provider + Clone + 'static {
+pub fn mock_provider(asserter: &Arc<Asserter>) -> impl Provider + Clone + 'static + use<> {
     ProviderBuilder::new().connect_mocked_client((**asserter).clone())
 }

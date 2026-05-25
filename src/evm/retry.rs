@@ -1,6 +1,6 @@
 use alloy::transports::{
-    layers::{OrRetryPolicyFn, RateLimitRetryPolicy, RetryBackoffLayer},
     RpcError, TransportError,
+    layers::{OrRetryPolicyFn, RateLimitRetryPolicy, RetryBackoffLayer},
 };
 
 /// Returns a `RetryBackoffLayer` that retries transient RPC errors.

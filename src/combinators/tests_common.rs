@@ -10,8 +10,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use futures_core::Stream;
-use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 

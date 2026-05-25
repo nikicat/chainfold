@@ -87,8 +87,17 @@ impl Config {
     /// The merge is a uniform deep-merge over `toml::Value`s; this module
     /// has no field-specific knowledge of what's in the schema.
     pub fn load_optional(explicit_path: Option<&Path>) -> Result<Self, ConfigError> {
-        let mut merged = parse_default_toml()?;
-        match load_user_toml(explicit_path) {
+        Self::load_optional_with(explicit_path, &real_env)
+    }
+
+    /// [`Self::load_optional`] with an injectable environment lookup. Tests
+    /// pass a fixed map; production passes [`real_env`].
+    fn load_optional_with(
+        explicit_path: Option<&Path>,
+        env: EnvLookup,
+    ) -> Result<Self, ConfigError> {
+        let mut merged = parse_default_toml(env)?;
+        match load_user_toml(explicit_path, env) {
             Ok(Some(user)) => merge_toml(&mut merged, user),
             Ok(None) | Err(ConfigError::NotFound { .. }) => {}
             Err(e) => return Err(e),
@@ -104,7 +113,7 @@ impl Config {
             path: path.to_owned(),
             source: e,
         })?;
-        let interpolated = interpolate_env(&raw)?;
+        let interpolated = interpolate_env(&raw, &real_env)?;
         let config: Config = toml::from_str(&interpolated).map_err(|e| ConfigError::Parse {
             path: path.to_owned(),
             source: e,
@@ -175,8 +184,19 @@ fn mask(key: &str) -> String {
     }
 }
 
-/// Replace `${VAR}` patterns with environment variable values.
-fn interpolate_env(input: &str) -> Result<String, ConfigError> {
+/// Looks up an environment variable for `${VAR}` interpolation. Production
+/// uses [`real_env`]; tests inject a fixed map so config loading never
+/// mutates the global process environment (which is racy under parallel
+/// tests, and `unsafe` to mutate as of Rust 2024).
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The production [`EnvLookup`]: reads the real process environment.
+fn real_env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+/// Replace `${VAR}` patterns with values from `env`.
+fn interpolate_env(input: &str, env: EnvLookup) -> Result<String, ConfigError> {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 
@@ -197,10 +217,10 @@ fn interpolate_env(input: &str) -> Result<String, ConfigError> {
                 Some((name, fb)) => (name, Some(fb)),
                 None => (content.as_str(), None),
             };
-            let value = match (std::env::var(var_name), fallback) {
-                (Ok(v), _) => v,
-                (Err(_), Some(fb)) => fb.to_owned(),
-                (Err(_), None) => {
+            let value = match (env(var_name), fallback) {
+                (Some(v), _) => v,
+                (None, Some(fb)) => fb.to_owned(),
+                (None, None) => {
                     return Err(ConfigError::MissingEnvVar {
                         var: var_name.to_owned(),
                     });
@@ -216,8 +236,8 @@ fn interpolate_env(input: &str) -> Result<String, ConfigError> {
 }
 
 /// Parse the built-in default TOML into a `toml::Value` (env-interpolated).
-fn parse_default_toml() -> Result<toml::Value, ConfigError> {
-    let interpolated = interpolate_env(DEFAULT_CONFIG_TOML)?;
+fn parse_default_toml(env: EnvLookup) -> Result<toml::Value, ConfigError> {
+    let interpolated = interpolate_env(DEFAULT_CONFIG_TOML, env)?;
     toml::from_str(&interpolated).map_err(|source| ConfigError::Parse {
         path: PathBuf::from("<built-in default>"),
         source,
@@ -228,7 +248,10 @@ fn parse_default_toml() -> Result<toml::Value, ConfigError> {
 /// `Ok(None)` only when no file was found at the default search locations
 /// and no explicit path was given; an explicit path that doesn't exist is
 /// still surfaced as `NotFound` by `Config::load`.
-fn load_user_toml(explicit_path: Option<&Path>) -> Result<Option<toml::Value>, ConfigError> {
+fn load_user_toml(
+    explicit_path: Option<&Path>,
+    env: EnvLookup,
+) -> Result<Option<toml::Value>, ConfigError> {
     let Some(path) = find_config_path(explicit_path)? else {
         return Ok(None);
     };
@@ -236,7 +259,7 @@ fn load_user_toml(explicit_path: Option<&Path>) -> Result<Option<toml::Value>, C
         path: path.clone(),
         source: e,
     })?;
-    let interpolated = interpolate_env(&raw)?;
+    let interpolated = interpolate_env(&raw, env)?;
     let value: toml::Value =
         toml::from_str(&interpolated).map_err(|source| ConfigError::Parse {
             path: path.clone(),
@@ -287,7 +310,21 @@ fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+
+    /// Build a fixed [`EnvLookup`] from `key=value` pairs. Config loading
+    /// reads only from this map, so these tests never touch the global
+    /// process environment and are inherently parallel-safe — no mutation,
+    /// no shared-var lock, no `unsafe`.
+    fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |k| map.get(k).cloned()
+    }
 
     fn alchemy_config(key: &str) -> Config {
         Config {
@@ -347,46 +384,36 @@ mod tests {
 
     #[test]
     fn interpolate_strict_var_still_errors_when_unset() {
-        // Unique name to avoid env collisions across parallel tests.
-        std::env::remove_var("CHAINFOLD_TEST_STRICT_UNSET");
-        let err = interpolate_env("x=${CHAINFOLD_TEST_STRICT_UNSET}").expect_err("should error");
-        assert!(
-            matches!(err, ConfigError::MissingEnvVar { ref var } if var == "CHAINFOLD_TEST_STRICT_UNSET")
-        );
+        let err = interpolate_env("x=${MISSING}", &env_map(&[])).expect_err("should error");
+        assert!(matches!(err, ConfigError::MissingEnvVar { ref var } if var == "MISSING"));
     }
 
     #[test]
     fn interpolate_default_syntax_empty_when_unset() {
-        std::env::remove_var("CHAINFOLD_TEST_EMPTY_DEFAULT");
-        let out = interpolate_env("x=${CHAINFOLD_TEST_EMPTY_DEFAULT:-}").expect("should not error");
+        let out = interpolate_env("x=${MISSING:-}", &env_map(&[])).expect("should not error");
         assert_eq!(out, "x=");
     }
 
     #[test]
     fn interpolate_default_syntax_fallback_when_unset() {
-        std::env::remove_var("CHAINFOLD_TEST_FALLBACK");
         let out =
-            interpolate_env("x=${CHAINFOLD_TEST_FALLBACK:-hello world}").expect("should not error");
+            interpolate_env("x=${MISSING:-hello world}", &env_map(&[])).expect("should not error");
         assert_eq!(out, "x=hello world");
     }
 
     #[test]
     fn interpolate_default_syntax_env_wins_when_set() {
-        std::env::set_var("CHAINFOLD_TEST_ENV_WINS", "from-env");
-        let out =
-            interpolate_env("x=${CHAINFOLD_TEST_ENV_WINS:-fallback}").expect("should not error");
+        let out = interpolate_env("x=${VAR:-fallback}", &env_map(&[("VAR", "from-env")]))
+            .expect("should not error");
         assert_eq!(out, "x=from-env");
-        std::env::remove_var("CHAINFOLD_TEST_ENV_WINS");
     }
 
-    // Tests below mutate `ALCHEMY_KEY` (a shared env var) — serialize them
-    // via a `Mutex` to avoid races when cargo runs tests in parallel.
-    static ALCHEMY_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // Helper: parameterized default-provider TOML so each test can use a
-    // unique env-var name and avoid race conditions with parallel tests.
-    fn default_provider_from_toml(toml: &str) -> Result<ProviderConfig, ConfigError> {
-        let interpolated = interpolate_env(toml)?;
+    // Helper: parse a provider TOML after env-interpolation against `env`.
+    fn default_provider_from_toml(
+        toml: &str,
+        env: EnvLookup,
+    ) -> Result<ProviderConfig, ConfigError> {
+        let interpolated = interpolate_env(toml, env)?;
         toml::from_str(&interpolated).map_err(|source| ConfigError::Parse {
             path: PathBuf::from("<synthetic default>"),
             source,
@@ -395,65 +422,55 @@ mod tests {
 
     #[test]
     fn default_provider_with_env_set() {
-        std::env::set_var("CHAINFOLD_TEST_DEFAULT_PROVIDER_SET", "from-env-123");
         let provider = default_provider_from_toml(
-            r#"alchemy = { api_key = "${CHAINFOLD_TEST_DEFAULT_PROVIDER_SET:-}" }"#,
+            r#"alchemy = { api_key = "${VAR:-}" }"#,
+            &env_map(&[("VAR", "from-env-123")]),
         )
         .expect("synthesizes");
         assert_eq!(
             provider.alchemy.as_ref().expect("alchemy").api_key,
             "from-env-123"
         );
-        std::env::remove_var("CHAINFOLD_TEST_DEFAULT_PROVIDER_SET");
     }
 
     #[test]
     fn default_provider_with_env_unset_yields_empty_key() {
-        std::env::remove_var("CHAINFOLD_TEST_DEFAULT_PROVIDER_UNSET");
-        let provider = default_provider_from_toml(
-            r#"alchemy = { api_key = "${CHAINFOLD_TEST_DEFAULT_PROVIDER_UNSET:-}" }"#,
-        )
-        .expect("synthesizes");
+        let provider =
+            default_provider_from_toml(r#"alchemy = { api_key = "${VAR:-}" }"#, &env_map(&[]))
+                .expect("synthesizes");
         assert_eq!(provider.alchemy.as_ref().expect("alchemy").api_key, "");
     }
 
     #[test]
     fn load_optional_no_file_synthesizes_default_provider() {
-        // Point at a nonexistent path under a tempdir to exercise the
-        // "no config file" branch deterministically.
-        std::env::set_var("CHAINFOLD_TEST_LOAD_NO_FILE", "env-key-789");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let nonexistent = dir.path().join("missing-config.toml");
-
         // We can't easily exercise the default-search-path branch from a
         // test (HOME isolation is fiddly), so we test the conceptual path
         // through the helper: when no file exists, default_provider_from_toml
         // with the same template as production produces the expected value.
         let provider = default_provider_from_toml(
-            r#"alchemy = { api_key = "${CHAINFOLD_TEST_LOAD_NO_FILE:-}" }"#,
+            r#"alchemy = { api_key = "${ALCHEMY_KEY:-}" }"#,
+            &env_map(&[("ALCHEMY_KEY", "env-key-789")]),
         )
         .expect("synthesizes");
         assert_eq!(
             provider.alchemy.as_ref().expect("alchemy").api_key,
             "env-key-789"
         );
-        std::env::remove_var("CHAINFOLD_TEST_LOAD_NO_FILE");
-        let _ = nonexistent; // referenced for future use
     }
 
     #[test]
     fn load_optional_partial_file_fills_default_alchemy() {
-        let _guard = ALCHEMY_KEY_LOCK.lock().expect("env lock");
         // User config has only [etherscan]; alchemy block must be filled
-        // from the default (env-interpolated).
-        std::env::set_var("CHAINFOLD_TEST_PARTIAL_FILL", "from-default-abc");
-        // Set ALCHEMY_KEY too, since real load_optional uses that hardcoded name.
-        std::env::set_var("ALCHEMY_KEY", "from-default-abc");
+        // from the default (env-interpolated from ALCHEMY_KEY).
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[etherscan]\napi_key = \"es-key\"\n").expect("write");
 
-        let config = Config::load_optional(Some(&path)).expect("load");
+        let config = Config::load_optional_with(
+            Some(&path),
+            &env_map(&[("ALCHEMY_KEY", "from-default-abc")]),
+        )
+        .expect("load");
         assert_eq!(
             config
                 .provider
@@ -468,8 +485,6 @@ mod tests {
             Some("es-key"),
             "user's etherscan must be preserved"
         );
-        std::env::remove_var("CHAINFOLD_TEST_PARTIAL_FILL");
-        std::env::remove_var("ALCHEMY_KEY");
     }
 
     #[test]
@@ -490,13 +505,15 @@ mod tests {
 
     #[test]
     fn load_optional_explicit_alchemy_wins_over_default() {
-        let _guard = ALCHEMY_KEY_LOCK.lock().expect("env lock");
-        std::env::set_var("ALCHEMY_KEY", "should-not-be-used");
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[provider.alchemy]\napi_key = \"user-explicit\"\n").expect("write");
 
-        let config = Config::load_optional(Some(&path)).expect("load");
+        let config = Config::load_optional_with(
+            Some(&path),
+            &env_map(&[("ALCHEMY_KEY", "should-not-be-used")]),
+        )
+        .expect("load");
         assert_eq!(
             config
                 .provider
@@ -506,6 +523,5 @@ mod tests {
             Some("user-explicit"),
             "user's explicit api_key must override env-derived default"
         );
-        std::env::remove_var("ALCHEMY_KEY");
     }
 }

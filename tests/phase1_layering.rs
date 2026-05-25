@@ -29,13 +29,13 @@ async fn build_history(
     db_path: &std::path::Path,
     endpoint: Url,
     chunk_size: u64,
-) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>> {
+) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static + use<>>> {
     let store = Arc::new(LogStore::open(db_path.to_str().unwrap()).expect("open store"));
     let provider = ProviderBuilder::new().connect_http(endpoint);
     EvmLogHistory::with_options(
         provider,
         store,
-        USDC.0 .0,
+        USDC.0.0,
         [Some(TRANSFER_TOPIC), None, None, None],
         chunk_size,
         12,

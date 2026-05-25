@@ -31,17 +31,17 @@ use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::{watch_hist, Position};
+use chainfold::arch::{Position, watch_hist};
 use chainfold::evm::{
-    apply_transfer, decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
-    Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, LogStore, OwnedErc20, SubscribeTransport,
-    IN_KEY, OUT_KEY,
+    Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, LogStore, OUT_KEY, OwnedErc20,
+    SubscribeTransport, apply_transfer, decode_transfer, fetch_erc20_metadata, rpc_retry_layer,
+    versioned_path,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use chrono::NaiveDate;
 use clap::Parser;
-use futures_util::future::join_all;
 use futures_util::StreamExt;
+use futures_util::future::join_all;
 
 #[derive(Parser)]
 #[command(

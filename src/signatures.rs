@@ -86,10 +86,10 @@ pub async fn resolve_event(
     event_name: &str,
     etherscan_api_key: Option<&str>,
 ) -> Result<ResolvedEvent, SignatureError> {
-    if let Some(hit) = cache.get(chain_id, address, event_name).await? {
-        if hit.abi_json.is_some() {
-            return Ok(hit);
-        }
+    if let Some(hit) = cache.get(chain_id, address, event_name).await?
+        && hit.abi_json.is_some()
+    {
+        return Ok(hit);
     }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))

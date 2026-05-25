@@ -47,8 +47,8 @@ use std::sync::Arc;
 use futures_core::Stream;
 use futures_util::stream::unfold;
 use futures_util::{StreamExt, TryStreamExt};
-use tokio::sync::{watch, Mutex};
-use tokio::task::{spawn_blocking, JoinHandle};
+use tokio::sync::{Mutex, watch};
+use tokio::task::{JoinHandle, spawn_blocking};
 
 use crate::arch::{
     Hist, HistStore, HistoryError, Position, Positioned, Store, Subscription, Timestamp,
@@ -790,15 +790,15 @@ mod tests {
             let mut matched = Vec::new();
             let mut pending = Vec::new();
             for s in &input.src_items {
-                if let Some(bucket) = dst_by_id.get_mut(&s.item.bridge_id) {
-                    if !bucket.is_empty() {
-                        let d = bucket.remove(0);
-                        matched.push(Match {
-                            src: s.item.clone(),
-                            dst: d,
-                        });
-                        continue;
-                    }
+                if let Some(bucket) = dst_by_id.get_mut(&s.item.bridge_id)
+                    && !bucket.is_empty()
+                {
+                    let d = bucket.remove(0);
+                    matched.push(Match {
+                        src: s.item.clone(),
+                        dst: d,
+                    });
+                    continue;
                 }
                 pending.push(s.item.clone());
             }

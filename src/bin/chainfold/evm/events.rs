@@ -6,7 +6,7 @@ use alloy::json_abi::Event;
 use alloy::network::Ethereum;
 use alloy::primitives::B256;
 use alloy::providers::Provider;
-use chainfold::arch::{watch_hist, Hist, HistBackend, Positioned};
+use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
 use chainfold::evm::{EvmEvent, EvmLogHistory, EvmPosition, LogStore, SubscribeTransport};
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
@@ -142,8 +142,14 @@ async fn resolve_lookup(
     }
     if let Some(name) = &args.event {
         let sig_cache = LogStoreSignatureCache::new(cache.clone());
-        let resolved =
-            resolve_event(&sig_cache, chain_id, address, name, config.etherscan_api_key()).await?;
+        let resolved = resolve_event(
+            &sig_cache,
+            chain_id,
+            address,
+            name,
+            config.etherscan_api_key(),
+        )
+        .await?;
         return Ok(Lookup {
             signature: Some(resolved.signature),
             topic0: resolved.topic0,
@@ -284,9 +290,7 @@ fn format_value(v: &DynSolValue, full: bool) -> String {
         DynSolValue::FixedBytes(b, n) => format!("0x{}", hex::encode(&b.as_slice()[..*n])),
         DynSolValue::Bytes(b) => format_bytes(b, full),
         DynSolValue::String(s) => format_string(s, full),
-        DynSolValue::Array(items)
-        | DynSolValue::FixedArray(items)
-        | DynSolValue::Tuple(items) => {
+        DynSolValue::Array(items) | DynSolValue::FixedArray(items) | DynSolValue::Tuple(items) => {
             let parts: Vec<String> = items.iter().map(|i| format_value(i, full)).collect();
             format!("[{}]", parts.join(", "))
         }
@@ -372,7 +376,10 @@ mod tests {
     #[test]
     fn format_bytes_below_preview_threshold_is_not_truncated() {
         let b = vec![0u8; PREVIEW_BYTES];
-        assert_eq!(format_bytes(&b, false), format!("0x{}", "00".repeat(PREVIEW_BYTES)));
+        assert_eq!(
+            format_bytes(&b, false),
+            format!("0x{}", "00".repeat(PREVIEW_BYTES))
+        );
     }
 
     #[test]
@@ -393,7 +400,10 @@ mod tests {
     fn format_string_truncates_with_char_count() {
         let s = "x".repeat(120);
         let out = format_string(&s, false);
-        assert_eq!(out, format!("\"{}…\" (120 chars)", "x".repeat(PREVIEW_STRING_CHARS)));
+        assert_eq!(
+            out,
+            format!("\"{}…\" (120 chars)", "x".repeat(PREVIEW_STRING_CHARS))
+        );
     }
 
     #[test]
@@ -410,13 +420,19 @@ mod tests {
             DynSolValue::Bytes(vec![0xee; 50]),
         ]);
         let s = format_value(&value, false);
-        assert_eq!(s, format!("[42, 0x{}… (50 bytes)]", "ee".repeat(PREVIEW_BYTES)));
+        assert_eq!(
+            s,
+            format!("[42, 0x{}… (50 bytes)]", "ee".repeat(PREVIEW_BYTES))
+        );
     }
 
     #[test]
     fn format_value_address_and_fixed_bytes() {
         let addr = Address::from([0x12u8; 20]);
-        assert_eq!(format_value(&DynSolValue::Address(addr), false), "0x1212121212121212121212121212121212121212");
+        assert_eq!(
+            format_value(&DynSolValue::Address(addr), false),
+            "0x1212121212121212121212121212121212121212"
+        );
 
         let v = DynSolValue::FixedBytes(B256::from([0x34u8; 32]), 4);
         // bytes4 should show only first 4 bytes.

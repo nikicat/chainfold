@@ -25,9 +25,9 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{HistStore, Position};
 use chainfold::evm::{
-    rpc_retry_layer, versioned_path, EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC,
+    EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
 };
-use chainfold::merge::{merge_hist_stores, ErasedHistStore, MergedItem, MergedPos};
+use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 use clap::Parser;
 use futures_util::StreamExt;
 

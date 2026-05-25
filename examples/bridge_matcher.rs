@@ -31,11 +31,11 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::evm::{
-    rpc_retry_layer, versioned_path, EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC,
+    EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
 };
 use chainfold::matcher::{
-    match_fn, AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
-    SqliteAnchorStore,
+    AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
+    SqliteAnchorStore, match_fn,
 };
 use clap::{Parser, ValueEnum};
 use futures_util::StreamExt;
@@ -151,15 +151,15 @@ fn make_match_fn(
                     pending.push(s.item.clone());
                     continue;
                 };
-                if let Some(bucket) = dst_by_key.get_mut(&key) {
-                    if !bucket.is_empty() {
-                        let d = bucket.remove(0);
-                        matched.push(Match {
-                            src: s.item.clone(),
-                            dst: d,
-                        });
-                        continue;
-                    }
+                if let Some(bucket) = dst_by_key.get_mut(&key)
+                    && !bucket.is_empty()
+                {
+                    let d = bucket.remove(0);
+                    matched.push(Match {
+                        src: s.item.clone(),
+                        dst: d,
+                    });
+                    continue;
                 }
                 pending.push(s.item.clone());
             }
@@ -179,8 +179,10 @@ async fn open_history(
     topic0: [u8; 32],
     db_subdir: &str,
     chunk_size: u64,
-) -> Result<Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>>, Box<dyn std::error::Error>>
-{
+) -> Result<
+    Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static + use<>>>,
+    Box<dyn std::error::Error>,
+> {
     let url: Url = rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     let provider = ProviderBuilder::new().connect_client(client);

@@ -28,8 +28,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_core::Stream;
-use futures_util::stream::unfold;
 use futures_util::StreamExt;
+use futures_util::stream::unfold;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

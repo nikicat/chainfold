@@ -10,12 +10,12 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use chainfold::arch::{
-    act_and_wait, watch_hist, AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend,
-    HistStream, HistoryError, ItemStream, Position, Positioned, Store, Timestamp,
+    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
+    ItemStream, Position, Positioned, Store, Timestamp, act_and_wait, watch_hist,
 };
 use futures_core::Stream;
-use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 

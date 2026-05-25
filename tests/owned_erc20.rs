@@ -17,7 +17,7 @@ use std::sync::Arc;
 use alloy::providers::ProviderBuilder;
 use chainfold::arch::{Hist, HistBackend, Position};
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, LogStore, OwnedErc20, IN_KEY, OUT_KEY, TRANSFER_TOPIC,
+    EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, LogStore, OUT_KEY, OwnedErc20, TRANSFER_TOPIC,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -60,7 +60,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let broad = EvmLogHistory::with_options(
         provider.clone(),
         store.clone(),
-        USDC.0 .0,
+        USDC.0.0,
         [Some(TRANSFER_TOPIC), None, None, None],
         10,
         12,
@@ -112,7 +112,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     );
 
     // Phase B — same range via OwnedErc20.
-    let owned = OwnedErc20::with_options(provider, store, owner, USDC.0 .0, 10, 12)
+    let owned = OwnedErc20::with_options(provider, store, owner, USDC.0.0, 10, 12)
         .await
         .expect("OwnedErc20");
     owned.update_tips().await.expect("update_tips");
@@ -183,7 +183,7 @@ async fn owned_erc20_empty_for_inactive_address() {
     // An address with no real-world USDC activity (literally the zero
     // address — receivers of burns, but no transfers FROM it).
     let owner = [0u8; 20];
-    let owned = OwnedErc20::with_options(provider, store, owner, USDC.0 .0, 10, 12)
+    let owned = OwnedErc20::with_options(provider, store, owner, USDC.0.0, 10, 12)
         .await
         .expect("OwnedErc20");
     owned.update_tips().await.expect("update_tips");

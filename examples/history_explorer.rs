@@ -20,10 +20,10 @@ use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::{watch_hist, Hist, HistBackend, HistStore, HistoryError, Positioned};
+use chainfold::arch::{Hist, HistBackend, HistStore, HistoryError, Positioned, watch_hist};
 use chainfold::evm::{
-    rpc_retry_layer, versioned_path, EvmEvent, EvmLogHistory, EvmPosition, LogStore,
-    SubscribeTransport,
+    EvmEvent, EvmLogHistory, EvmPosition, LogStore, SubscribeTransport, rpc_retry_layer,
+    versioned_path,
 };
 use chrono::NaiveDate;
 use clap::Parser;

@@ -153,7 +153,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combinators::tests_common::{collect, MockEvent, MockPos, MockSource};
+    use crate::combinators::tests_common::{MockEvent, MockPos, MockSource, collect};
 
     #[tokio::test]
     async fn map_yields_mapped_item_with_source_and_position() {

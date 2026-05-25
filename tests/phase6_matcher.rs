@@ -16,12 +16,12 @@ use chainfold::arch::{
     ItemStream, Position, Positioned, Store, Timestamp,
 };
 use chainfold::matcher::{
-    match_fn, AnchorStore, AnchoredMatcher, BaseMatcher, InMemoryAnchorStore, Match, MatchFn,
-    MatchInput, MatchOutput, Matcher, MatcherAnchors, SqliteAnchorStore,
+    AnchorStore, AnchoredMatcher, BaseMatcher, InMemoryAnchorStore, Match, MatchFn, MatchInput,
+    MatchOutput, Matcher, MatcherAnchors, SqliteAnchorStore, match_fn,
 };
 use futures_core::Stream;
-use futures_util::stream::{iter, poll_fn};
 use futures_util::StreamExt;
+use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -188,15 +188,15 @@ fn bridge_match_fn() -> Arc<dyn MatchFn<Ev, Ev, MatchOutput<Ev, Ev>, MockPos, Mo
         let mut matched = Vec::new();
         let mut pending = Vec::new();
         for s in &input.src_items {
-            if let Some(bucket) = dst_by_id.get_mut(&s.item.bridge_id) {
-                if !bucket.is_empty() {
-                    let d = bucket.remove(0);
-                    matched.push(Match {
-                        src: s.item.clone(),
-                        dst: d,
-                    });
-                    continue;
-                }
+            if let Some(bucket) = dst_by_id.get_mut(&s.item.bridge_id)
+                && !bucket.is_empty()
+            {
+                let d = bucket.remove(0);
+                matched.push(Match {
+                    src: s.item.clone(),
+                    dst: d,
+                });
+                continue;
             }
             pending.push(s.item.clone());
         }

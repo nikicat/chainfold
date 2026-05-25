@@ -7,7 +7,7 @@ use std::sync::Arc;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::evm::{rpc_retry_layer, versioned_path, LogStore};
+use chainfold::evm::{LogStore, rpc_retry_layer, versioned_path};
 
 use crate::chains::ChainResolver;
 use crate::cli::{EvmArgs, EvmCommand};
@@ -74,10 +74,10 @@ pub async fn run(
     let provider = ProviderBuilder::new().connect_client(client);
 
     let db_path_buf = args.db.clone().unwrap_or_else(default_db_path);
-    if let Some(parent) = db_path_buf.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = db_path_buf.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = Arc::new(LogStore::open(&db_path)?);

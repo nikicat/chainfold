@@ -164,7 +164,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combinators::tests_common::{collect, MockEvent, MockPos, MockSource};
+    use crate::combinators::tests_common::{MockEvent, MockPos, MockSource, collect};
 
     fn even(e: &MockEvent) -> bool {
         e.0.parse::<u64>().is_ok_and(|n| n.is_multiple_of(2))
