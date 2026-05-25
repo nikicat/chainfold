@@ -51,21 +51,24 @@ Suggested split:
 
 Open design question: do they share a `Arc<Mutex<Connection>>` (one SQLite file) or each own their own (one file per concern)? Migrations would localize per cache either way. Big diff but each consumer (`LogIndex`, `EvmLogHistory`, `erc20::*`, `LogStoreSignatureCache`) only needs one narrow surface today.
 
-### C. Move `SqliteAnchorStore` out of `matcher.rs`
+### ✅ D. Split `src/evm/log_index.rs` (1669 lines) — _done_
 
-`src/matcher.rs:434` drags `rusqlite` into the source-agnostic matcher module. Move to `src/matcher/anchor_store_sqlite.rs` (gated behind a feature flag) or under `src/evm/` alongside other SQLite-aware code. Module doc claims source-agnosticism; implementation contradicts it.
+Converted `src/evm/log_index.rs` → `src/evm/log_index/mod.rs` plus four
+submodules:
+- `block_pos.rs` — `BlockPos`, `LogRef`, `LogPage` data types + `log_ref_from`.
+- `range_tree.rs` — `Range` (now `pub(super)` so siblings can read it),
+  `insert_page`, `insert_late_item`, `ensure_window_loaded`,
+  `install_gap_placeholder`, `align_window`.
+- `nav.rs` — the four `first_*`/`last_*` entry points,
+  `cached_navigate_forward`/`backward`, and `LogRef`→`Log` resolution.
+- `gap_fill.rs` — `Fetcher`, `ensure_cached`, `items()`, `next_yield`,
+  `walk_step`/`WalkStep`, `finalize_gap_fill`, `gap_block_range`.
 
-Smaller scope than (A) but same flavor.
-
-### D. Split `src/evm/log_index.rs` (1669 lines)
-
-Owns: `BlockPos`, `LogRef`, `LogPage`, `Range`, `Fetcher` type alias, `LogIndex`, three step enums, free helpers, ~500 lines of tests. Suggested layout:
-- `block_pos.rs` — `BlockPos`, `LogRef`, `LogPage` (data types).
-- `range_tree.rs` — `Range`, the `BTreeMap` operations (insert_page, insert_late_item, install_gap_placeholder).
-- `nav.rs` — `cached_navigate_forward` / `cached_navigate_backward` and their wrappers.
-- `gap_fill.rs` — `ensure_cached`, `items()`, fetcher singleflight, `finalize_gap_fill`.
-
-Mostly a file move; minor visibility plumbing (the helpers stay `pub(super)` inside the module tree).
+`mod.rs` keeps the `LogIndex` struct, its constructors/accessors, the async
+drain, and the cross-cutting test module (shared `mk_log`/`mk_index` helpers).
+Cross-module helpers are `pub(super)`; the external paths
+(`log_index::{BlockPos, LogIndex, LogPage, LogRef, Fetcher}`) are preserved via
+re-exports from `mod.rs`. No behavior change — all 17 log_index tests pass.
 
 ## Things I checked and left alone
 
