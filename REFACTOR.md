@@ -18,16 +18,15 @@ Snapshot of structural debt in the tree. Items marked ✅ landed in commits on `
 | 11 | `3426648` | Decompose `merge_step` into `fill_heads` / `take_first_error` / `pick_winner`; `merge_step` becomes a 20-line orchestrator. |
 | 12 | `c51be9a` | Collapse `latest_pos` / `best_pos` / `safe_pos` (and the subscribe trio) in `ErasedSource` to `tip_pos(TipKind)` / `subscribe_tip(TipKind)`; `build_tip_store` no longer needs closures. |
 | B | `8e4432b` | Move `arch::evm` (`EvmPosition`, `EvmEvent`, `EvmBlock`, `EvmTransaction`, `Amount`, `Asset`, `Erc20`, `Erc20Transfer`/`Mint`/`Burn`, `Erc20Balance`) out of `arch.rs` into `src/evm/types.rs`. Source-agnostic core no longer references EVM. |
-| 13 | _pending_ | Extract `find_event_item` in `signatures.rs` — `event_from_abi` now locates the ABI event item, then canonicalizes/hashes/serializes; parse+find separated from signature derivation. |
+| 13 | `db72d1f` | Extract `find_event_item` in `signatures.rs` — `event_from_abi` now locates the ABI event item, then canonicalizes/hashes/serializes; parse+find separated from signature derivation. |
+| 9 (rest) | _pending_ | Unify `find_next_gap_or_wait` + `snapshot_walk` into one single-step `walk_step` returning `Done`/`Cached{end,item}`/`FillGap`/`Wait`; `ensure_cached` ignores the `Cached` item and advances, `next_yield` yields it. Drops the `NextStep` enum; net −56 lines. |
 | 7 | `6c8cb47` | Rename `EvmLogHistory::poll_tip` → `update_tip` (and `OwnedErc20::poll_tips` → `update_tips`); delete dead `Hist::pos_after` (zero callers); rename inner `item` field of `MergedItem` / `MappedItem` / `FilteredItem` to `value` — collapses `.item.item.label` to `.item.value.label`. |
 
 Also: `4a6f35e` added this file.
 
 ## ⏳ Open — function-level
 
-### 9 (remaining). Deeper unification of the tree-walk primitives
-
-`evm/log_index.rs` — `find_next_gap_or_wait` (~70 lines) and `snapshot_walk` (~75 lines) still share their entire structure: both walk the BTreeMap from a cursor, classify each visited range as gap / in-flight / cached, and either install a placeholder, return a wait, or advance. The only difference is `snapshot_walk` additionally yields filled items. Could unify behind one walk primitive returning a `Step` enum; callers ignore the `Yield` arm if they only care about gap-filling. Lower priority now that the placeholder dupes are gone.
+_None. (Item 9 fully landed; see Done table.)_
 
 ## ⏳ Open — architectural (need agreement first)
 

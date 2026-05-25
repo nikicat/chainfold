@@ -614,7 +614,11 @@ impl LogIndex {
                     last_end = Some(r.end);
                     continue;
                 }
-                let satisfies = if inclusive { r.end >= pivot } else { r.end > pivot };
+                let satisfies = if inclusive {
+                    r.end >= pivot
+                } else {
+                    r.end > pivot
+                };
                 if !satisfies {
                     last_end = Some(r.end);
                     continue;
@@ -665,7 +669,11 @@ impl LogIndex {
                     last_start = Some(r.start);
                     continue;
                 }
-                let satisfies = if inclusive { r.end <= pivot } else { r.end < pivot };
+                let satisfies = if inclusive {
+                    r.end <= pivot
+                } else {
+                    r.end < pivot
+                };
                 if !satisfies {
                     last_start = Some(r.start);
                     continue;
@@ -723,14 +731,18 @@ impl LogIndex {
 
         let from_pos = BlockPos::before_block(from_block);
         let to_pos = BlockPos::end_of_block(to_block);
+        let mut cursor = from_pos;
         loop {
-            let action = self.find_next_gap_or_wait(from_pos, to_pos);
-            match action {
-                NextStep::Done => return Ok(()),
-                NextStep::Wait(notify) => {
+            match self.walk_step(cursor, to_pos) {
+                WalkStep::Done => return Ok(()),
+                // Gap-fill path ignores the boundary item; just advance past
+                // the cached range. `walk_step`'s top guard turns the final
+                // `cursor >= to` into `Done` on the next iteration.
+                WalkStep::Cached { end, .. } => cursor = end,
+                WalkStep::Wait(notify) => {
                     notify.notified().await;
                 }
-                NextStep::FillGap {
+                WalkStep::FillGap {
                     start_pos,
                     end_pos,
                     notify,
@@ -742,67 +754,6 @@ impl LogIndex {
                     self.finalize_gap_fill(start_pos, end_pos, fetch_result.as_ref().ok())?;
                     notify.notify_waiters();
                     fetch_result?;
-                }
-            }
-        }
-    }
-
-    /// Walk the tree (under lock) from `from` toward `to` looking for the
-    /// next gap, in-flight fetch, or completion. Returns an action without
-    /// holding any locks across an await.
-    fn find_next_gap_or_wait(&self, from: BlockPos, to: BlockPos) -> NextStep {
-        if from >= to {
-            return NextStep::Done;
-        }
-        let mut tree = self.tree.lock().unwrap();
-        let mut cursor = from;
-        loop {
-            let next = tree
-                .range((Bound::Excluded(cursor), Bound::Unbounded))
-                .next()
-                .map(|(_, r)| (r.start, r.end, r.fetch.clone()));
-            match next {
-                None => {
-                    // No range past cursor — trailing gap (cursor, to].
-                    let notify = install_gap_placeholder(&mut tree, cursor, to);
-                    return NextStep::FillGap {
-                        start_pos: cursor,
-                        end_pos: to,
-                        notify,
-                    };
-                }
-                Some((start, _end, Some(notify))) => {
-                    if start > cursor {
-                        // Gap before the in-flight range — fill it (we win the race).
-                        let gap_end = start.min(to);
-                        let our_notify = install_gap_placeholder(&mut tree, cursor, gap_end);
-                        return NextStep::FillGap {
-                            start_pos: cursor,
-                            end_pos: gap_end,
-                            notify: our_notify,
-                        };
-                    }
-                    // We're inside an in-flight range — wait for it. After
-                    // waking we'll re-walk from `cursor`, so the range's end
-                    // doesn't need to be threaded out of the closure.
-                    return NextStep::Wait(notify);
-                }
-                Some((start, end, None)) => {
-                    if start > cursor {
-                        // Gap before this range.
-                        let gap_end = start.min(to);
-                        let our_notify = install_gap_placeholder(&mut tree, cursor, gap_end);
-                        return NextStep::FillGap {
-                            start_pos: cursor,
-                            end_pos: gap_end,
-                            notify: our_notify,
-                        };
-                    }
-                    // No gap; range is fully cached. Advance and continue.
-                    if end >= to {
-                        return NextStep::Done;
-                    }
-                    cursor = end;
                 }
             }
         }
@@ -898,25 +849,30 @@ impl LogIndex {
 
     /// Internal helper for [`Self::items`] — walks the tree until it can
     /// yield exactly one item or determines there's nothing left in
-    /// `(from, to]`. Same dispatch as [`Self::find_next_gap_or_wait`] but
-    /// also yields filled items.
+    /// `(from, to]`. Shares [`Self::walk_step`] with `ensure_cached`; the
+    /// difference is this path acts on the `Cached` boundary item.
     async fn next_yield(
         self: Arc<Self>,
         mut from: BlockPos,
         to: BlockPos,
     ) -> Result<Option<(Log, BlockPos)>, HistoryError> {
         loop {
-            if from >= to {
-                return Ok(None);
-            }
-            let snap = self.snapshot_walk(from, to);
-            match snap {
-                WalkStep::Yield(item, next_from) => {
-                    let log = self.resolve(&item)?;
-                    return Ok(Some((log, next_from)));
-                }
-                WalkStep::Skip(next_from) => {
-                    from = next_from;
+            match self.walk_step(from, to) {
+                WalkStep::Done => return Ok(None),
+                WalkStep::Cached { end, item } => {
+                    // A range extending past `to` carries a boundary item
+                    // outside our window — nothing left to yield.
+                    if end > to {
+                        return Ok(None);
+                    }
+                    match item {
+                        Some(item) => {
+                            let log = self.resolve(&item)?;
+                            return Ok(Some((log, end)));
+                        }
+                        // Empty (no-log) range — advance and keep walking.
+                        None => from = end,
+                    }
                 }
                 WalkStep::FillGap {
                     start_pos,
@@ -933,64 +889,53 @@ impl LogIndex {
                 WalkStep::Wait(notify) => {
                     notify.notified().await;
                 }
-                WalkStep::Done => return Ok(None),
             }
         }
     }
 
-    /// One step of the `items()` walk performed entirely under the tree
-    /// mutex. Side effect: installs a fetch placeholder + notify when
-    /// returning [`WalkStep::FillGap`].
-    fn snapshot_walk(&self, from: BlockPos, to: BlockPos) -> WalkStep {
+    /// One step of walking the range tree from `cursor` toward `to`,
+    /// performed entirely under the tree mutex — no locks are held across an
+    /// await. Classifies the position just past `cursor` as completion, a
+    /// cached range, an in-flight fetch to wait on, or a gap to fill. On
+    /// [`WalkStep::FillGap`] it installs a placeholder + notify as a side
+    /// effect. Callers loop, advancing `cursor` until they reach `to`.
+    fn walk_step(&self, cursor: BlockPos, to: BlockPos) -> WalkStep {
+        if cursor >= to {
+            return WalkStep::Done;
+        }
         let mut tree = self.tree.lock().unwrap();
         let next = tree
-            .range((Bound::Excluded(from), Bound::Unbounded))
+            .range((Bound::Excluded(cursor), Bound::Unbounded))
             .next()
             .map(|(_, r)| (r.start, r.end, r.fetch.clone(), r.item));
         let Some((start, end, fetch_opt, item_opt)) = next else {
-            // No range past cursor — trailing gap.
-            if to <= from {
-                return WalkStep::Done;
-            }
-            let notify = install_gap_placeholder(&mut tree, from, to);
+            // No range past cursor — trailing gap (cursor, to].
+            let notify = install_gap_placeholder(&mut tree, cursor, to);
             return WalkStep::FillGap {
-                start_pos: from,
+                start_pos: cursor,
                 end_pos: to,
                 notify,
             };
         };
-        if let Some(notify) = fetch_opt {
-            if start > from {
-                // Gap to fill before the in-flight range.
-                let gap_end = start.min(to);
-                let our_notify = install_gap_placeholder(&mut tree, from, gap_end);
-                return WalkStep::FillGap {
-                    start_pos: from,
-                    end_pos: gap_end,
-                    notify: our_notify,
-                };
-            }
-            return WalkStep::Wait(notify);
-        }
-        if start > from {
-            // Gap.
+        if start > cursor {
+            // Gap before the next range (cached or in-flight) — fill it. If
+            // we beat an in-flight neighbour here, we own the gap placeholder.
             let gap_end = start.min(to);
-            let our_notify = install_gap_placeholder(&mut tree, from, gap_end);
+            let notify = install_gap_placeholder(&mut tree, cursor, gap_end);
             return WalkStep::FillGap {
-                start_pos: from,
+                start_pos: cursor,
                 end_pos: gap_end,
-                notify: our_notify,
+                notify,
             };
         }
-        // start <= from. Use this range.
-        if end > to {
-            // Range extends past our cap. If item lies past `to`, done.
-            // Filled at end > to means item is outside our window.
-            return WalkStep::Done;
+        // start <= cursor: cursor sits inside this range.
+        if let Some(notify) = fetch_opt {
+            // In-flight fetch covers us — wait, then re-walk from `cursor`.
+            return WalkStep::Wait(notify);
         }
-        match item_opt {
-            Some(item) => WalkStep::Yield(item, end),
-            None => WalkStep::Skip(end),
+        WalkStep::Cached {
+            end,
+            item: item_opt,
         }
     }
 }
@@ -1020,26 +965,25 @@ fn install_gap_placeholder(
 // Private supporting types
 // ============================================================
 
-enum NextStep {
-    Done,
-    FillGap {
-        start_pos: BlockPos,
-        end_pos: BlockPos,
-        notify: Arc<Notify>,
-    },
-    Wait(Arc<Notify>),
-}
-
+/// One step of [`LogIndex::walk_step`]. Both `ensure_cached` (gap-fill only)
+/// and `next_yield` (streaming) drive the same walk; they diverge only in how
+/// they treat the `Cached` arm — the former advances past it, the latter
+/// yields its boundary `item`.
 enum WalkStep {
-    Yield(LogRef, BlockPos),
-    Skip(BlockPos),
+    /// Coverage reached `to`; nothing left in range.
+    Done,
+    /// A cached range covers `(cursor, end]`. `item` is its boundary log
+    /// (`None` for an empty range).
+    Cached { end: BlockPos, item: Option<LogRef> },
+    /// A gap `(start_pos, end_pos]` to fill via the fetcher; a placeholder
+    /// guarded by `notify` is already installed in the tree.
     FillGap {
         start_pos: BlockPos,
         end_pos: BlockPos,
         notify: Arc<Notify>,
     },
+    /// An in-flight fetch covers the cursor; wait on `notify`, then re-walk.
     Wait(Arc<Notify>),
-    Done,
 }
 
 struct ItemsState {
