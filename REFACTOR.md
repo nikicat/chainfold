@@ -18,18 +18,11 @@ Snapshot of structural debt in the tree. Items marked ✅ landed in commits on `
 | 11 | `3426648` | Decompose `merge_step` into `fill_heads` / `take_first_error` / `pick_winner`; `merge_step` becomes a 20-line orchestrator. |
 | 12 | `c51be9a` | Collapse `latest_pos` / `best_pos` / `safe_pos` (and the subscribe trio) in `ErasedSource` to `tip_pos(TipKind)` / `subscribe_tip(TipKind)`; `build_tip_store` no longer needs closures. |
 | B | `8e4432b` | Move `arch::evm` (`EvmPosition`, `EvmEvent`, `EvmBlock`, `EvmTransaction`, `Amount`, `Asset`, `Erc20`, `Erc20Transfer`/`Mint`/`Burn`, `Erc20Balance`) out of `arch.rs` into `src/evm/types.rs`. Source-agnostic core no longer references EVM. |
+| 7 | `6c8cb47` | Rename `EvmLogHistory::poll_tip` → `update_tip` (and `OwnedErc20::poll_tips` → `update_tips`); delete dead `Hist::pos_after` (zero callers); rename inner `item` field of `MergedItem` / `MappedItem` / `FilteredItem` to `value` — collapses `.item.item.label` to `.item.value.label`. |
 
 Also: `4a6f35e` added this file.
 
 ## ⏳ Open — function-level
-
-### 7. Misleading single-purpose names
-
-- `EvmLogHistory::poll_tip` (`history.rs:233`) does an RPC fetch and updates the watch channel. "Poll" reads as a pull-loop. Rename `fetch_and_update_tip` (or `update_tip`).
-- `Hist::pos_after(items: &[Positioned<T,P>])` (`arch.rs:295`) is literally `items.last().map(|p| p.pos.clone())`. The name suggests "position after these items"; inline at the few call sites or rename to `last_pos`.
-- `MergedItem::item` / `MappedItem::item` / `FilteredItem::item` produce `items[0].item.item.label` patterns in tests. Rename the inner generic field to `value` (or `inner`) — touches all combinator consumers.
-
-Public API + test ripple. Worth a dedicated PR.
 
 ### 9 (remaining). Deeper unification of the tree-walk primitives
 
