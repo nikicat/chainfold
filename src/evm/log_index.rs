@@ -559,12 +559,12 @@ impl LogIndex {
         block: u64,
         log_index: u32,
     ) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate(NavDir::ForwardInclusive, block, log_index)
+        self.cached_navigate_forward(BlockPos::At { block, log_index }, true)
     }
 
     /// First cached log strictly after `(block, log_index)`.
     pub fn first_after(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate(NavDir::ForwardExclusive, block, log_index)
+        self.cached_navigate_forward(BlockPos::At { block, log_index }, false)
     }
 
     /// Last cached log at or before `(block, log_index)`.
@@ -573,124 +573,118 @@ impl LogIndex {
         block: u64,
         log_index: u32,
     ) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate(NavDir::BackwardInclusive, block, log_index)
+        self.cached_navigate_backward(BlockPos::At { block, log_index }, true)
     }
 
     /// Last cached log strictly before `(block, log_index)`.
     pub fn last_before(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate(NavDir::BackwardExclusive, block, log_index)
+        self.cached_navigate_backward(BlockPos::At { block, log_index }, false)
     }
 
-    fn cached_navigate(
+    /// Forward variant of cached navigation. `inclusive` controls whether
+    /// the pivot itself is a candidate.
+    ///
+    /// Tombstone ranges are skipped but participate in contiguity tracking
+    /// — if the first range we inspect doesn't sit at-or-before `pivot`,
+    /// the pivot is in an uncached gap and we return `None`. The same
+    /// guard is reapplied before a filled range is yielded.
+    fn cached_navigate_forward(
         &self,
-        dir: NavDir,
-        block: u64,
-        log_index: u32,
+        pivot: BlockPos,
+        inclusive: bool,
     ) -> Result<Option<Log>, HistoryError> {
-        let pivot = BlockPos::At { block, log_index };
+        let lower = if inclusive {
+            Bound::Included(pivot)
+        } else {
+            Bound::Excluded(pivot)
+        };
         let log_ref_opt = {
             let tree = self.tree.lock().unwrap();
-            match dir {
-                NavDir::ForwardInclusive | NavDir::ForwardExclusive => {
-                    let from = match dir {
-                        NavDir::ForwardInclusive => Bound::Included(pivot),
-                        NavDir::ForwardExclusive => Bound::Excluded(pivot),
-                        _ => unreachable!(),
-                    };
-                    let mut last_end: Option<BlockPos> = None;
-                    let mut found = None;
-                    for (&_key, r) in tree.range((from, Bound::Unbounded)) {
-                        // Tombstone range — skip but track contiguity.
-                        if r.item.is_none() {
-                            // Detect a gap between the previous range's end
-                            // and this range's start.
-                            if let Some(prev_end) = last_end {
-                                if r.start > prev_end {
-                                    // Gap — cached region ends here.
-                                    break;
-                                }
-                            } else {
-                                // First range we examined. Its `start` should
-                                // sit below our pivot for the scan to be
-                                // contiguous from the pivot onward.
-                                if r.start > pivot {
-                                    break;
-                                }
-                            }
-                            last_end = Some(r.end);
-                            continue;
-                        }
-                        // Filled range. Item sits at r.end.
-                        // The first filled range whose end satisfies our
-                        // direction is the answer.
-                        let satisfies = match dir {
-                            NavDir::ForwardInclusive => r.end >= pivot,
-                            NavDir::ForwardExclusive => r.end > pivot,
-                            _ => unreachable!(),
-                        };
-                        if !satisfies {
-                            last_end = Some(r.end);
-                            continue;
-                        }
-                        // Contiguity check: the range we're about to yield
-                        // must abut the previous cached region or contain
-                        // our pivot.
-                        if let Some(prev_end) = last_end {
-                            if r.start > prev_end {
-                                break;
-                            }
-                        } else if r.start > pivot {
+            let mut last_end: Option<BlockPos> = None;
+            let mut found = None;
+            for (_, r) in tree.range((lower, Bound::Unbounded)) {
+                if r.item.is_none() {
+                    if let Some(prev_end) = last_end {
+                        if r.start > prev_end {
                             break;
                         }
-                        found = Some(r.item.expect("filled"));
+                    } else if r.start > pivot {
                         break;
                     }
-                    let _ = last_end;
-                    found
+                    last_end = Some(r.end);
+                    continue;
                 }
-                NavDir::BackwardInclusive | NavDir::BackwardExclusive => {
-                    let upper = match dir {
-                        NavDir::BackwardInclusive => Bound::Included(pivot),
-                        NavDir::BackwardExclusive => Bound::Excluded(pivot),
-                        _ => unreachable!(),
-                    };
-                    let mut last_start: Option<BlockPos> = None;
-                    let mut found = None;
-                    for (&_key, r) in tree.range((Bound::Unbounded, upper)).rev() {
-                        if r.item.is_none() {
-                            if let Some(prev_start) = last_start {
-                                if r.end < prev_start {
-                                    break;
-                                }
-                            } else if r.end < pivot {
-                                // Cached region doesn't reach our pivot.
-                                break;
-                            }
-                            last_start = Some(r.start);
-                            continue;
-                        }
-                        let satisfies = match dir {
-                            NavDir::BackwardInclusive => r.end <= pivot,
-                            NavDir::BackwardExclusive => r.end < pivot,
-                            _ => unreachable!(),
-                        };
-                        if !satisfies {
-                            last_start = Some(r.start);
-                            continue;
-                        }
-                        if let Some(prev_start) = last_start {
-                            if r.end < prev_start {
-                                break;
-                            }
-                        }
-                        found = Some(r.item.expect("filled"));
+                let satisfies = if inclusive { r.end >= pivot } else { r.end > pivot };
+                if !satisfies {
+                    last_end = Some(r.end);
+                    continue;
+                }
+                if let Some(prev_end) = last_end {
+                    if r.start > prev_end {
                         break;
                     }
-                    found
+                } else if r.start > pivot {
+                    break;
                 }
+                found = Some(r.item.expect("filled"));
+                break;
             }
+            found
         };
-        match log_ref_opt {
+        self.resolve_opt(log_ref_opt)
+    }
+
+    /// Backward variant. Asymmetric vs. forward: the first filled range
+    /// with `r.end <= pivot` is always yielded — we don't require it to
+    /// abut the pivot. (The tombstone "first-range reaches pivot" check
+    /// only fires when the closest cached region is empty and ends before
+    /// pivot, i.e. pivot is in a gap that isn't even tombstoned.)
+    fn cached_navigate_backward(
+        &self,
+        pivot: BlockPos,
+        inclusive: bool,
+    ) -> Result<Option<Log>, HistoryError> {
+        let upper = if inclusive {
+            Bound::Included(pivot)
+        } else {
+            Bound::Excluded(pivot)
+        };
+        let log_ref_opt = {
+            let tree = self.tree.lock().unwrap();
+            let mut last_start: Option<BlockPos> = None;
+            let mut found = None;
+            for (_, r) in tree.range((Bound::Unbounded, upper)).rev() {
+                if r.item.is_none() {
+                    if let Some(prev_start) = last_start {
+                        if r.end < prev_start {
+                            break;
+                        }
+                    } else if r.end < pivot {
+                        break;
+                    }
+                    last_start = Some(r.start);
+                    continue;
+                }
+                let satisfies = if inclusive { r.end <= pivot } else { r.end < pivot };
+                if !satisfies {
+                    last_start = Some(r.start);
+                    continue;
+                }
+                if let Some(prev_start) = last_start {
+                    if r.end < prev_start {
+                        break;
+                    }
+                }
+                found = Some(r.item.expect("filled"));
+                break;
+            }
+            found
+        };
+        self.resolve_opt(log_ref_opt)
+    }
+
+    fn resolve_opt(&self, lr: Option<LogRef>) -> Result<Option<Log>, HistoryError> {
+        match lr {
             Some(lr) => self.resolve(&lr).map(Some),
             None => Ok(None),
         }
@@ -1025,14 +1019,6 @@ fn install_gap_placeholder(
 // ============================================================
 // Private supporting types
 // ============================================================
-
-#[derive(Copy, Clone)]
-enum NavDir {
-    ForwardInclusive,
-    ForwardExclusive,
-    BackwardInclusive,
-    BackwardExclusive,
-}
 
 enum NextStep {
     Done,
