@@ -132,6 +132,14 @@ impl<T: Send + Sync + Clone + 'static> ErasedHistStore<T> {
     }
 }
 
+/// Which of a [`HistStore`]'s three tip stores to read or subscribe to.
+#[derive(Copy, Clone, Debug)]
+enum TipKind {
+    Latest,
+    Best,
+    Safe,
+}
+
 #[async_trait::async_trait]
 trait ErasedSource<T: Send + Sync + 'static>: Send + Sync {
     /// Marshalled bytes of the source's [`Position::default`].
@@ -145,14 +153,10 @@ trait ErasedSource<T: Send + Sync + 'static>: Send + Sync {
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> Subscription<Result<(T, Vec<u8>), HistoryError>>;
-    /// Current marshalled tip.
-    fn latest_pos(&self) -> Vec<u8>;
-    fn best_pos(&self) -> Vec<u8>;
-    fn safe_pos(&self) -> Vec<u8>;
-    /// Subscribe to tip changes.
-    fn subscribe_latest(&self) -> Subscription<Vec<u8>>;
-    fn subscribe_best(&self) -> Subscription<Vec<u8>>;
-    fn subscribe_safe(&self) -> Subscription<Vec<u8>>;
+    /// Current marshalled tip for `kind`.
+    fn tip_pos(&self, kind: TipKind) -> Vec<u8>;
+    /// Subscribe to changes on the `kind` tip.
+    fn subscribe_tip(&self, kind: TipKind) -> Subscription<Vec<u8>>;
     /// Translate a wall-clock time into a marshalled position.
     async fn time_pos(&self, time: Timestamp) -> Result<Vec<u8>, HistoryError>;
 }
@@ -160,6 +164,20 @@ trait ErasedSource<T: Send + Sync + 'static>: Send + Sync {
 struct ErasedSourceImpl<T, P: Position> {
     store: HistStore<T, P>,
     _p: std::marker::PhantomData<P>,
+}
+
+impl<T, P> ErasedSourceImpl<T, P>
+where
+    T: Clone + Send + Sync + 'static,
+    P: Position,
+{
+    fn tip_store(&self, kind: TipKind) -> &Store<P> {
+        match kind {
+            TipKind::Latest => self.store.latest(),
+            TipKind::Best => self.store.best(),
+            TipKind::Safe => self.store.safe(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -193,24 +211,12 @@ where
         ))
     }
 
-    fn latest_pos(&self) -> Vec<u8> {
-        self.store.latest().get().marshal()
-    }
-    fn best_pos(&self) -> Vec<u8> {
-        self.store.best().get().marshal()
-    }
-    fn safe_pos(&self) -> Vec<u8> {
-        self.store.safe().get().marshal()
+    fn tip_pos(&self, kind: TipKind) -> Vec<u8> {
+        self.tip_store(kind).get().marshal()
     }
 
-    fn subscribe_latest(&self) -> Subscription<Vec<u8>> {
-        Box::pin(self.store.latest().subscribe().map(|p| p.marshal()))
-    }
-    fn subscribe_best(&self) -> Subscription<Vec<u8>> {
-        Box::pin(self.store.best().subscribe().map(|p| p.marshal()))
-    }
-    fn subscribe_safe(&self) -> Subscription<Vec<u8>> {
-        Box::pin(self.store.safe().subscribe().map(|p| p.marshal()))
+    fn subscribe_tip(&self, kind: TipKind) -> Subscription<Vec<u8>> {
+        Box::pin(self.tip_store(kind).subscribe().map(|p| p.marshal()))
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<Vec<u8>, HistoryError> {
@@ -299,21 +305,19 @@ impl Drop for AbortAll {
 // Tip aggregation
 // ============================================================
 
-/// Build a [`Store<MergedPos>`] that aggregates per-source tip bytes via
-/// background tasks. Tasks abort when the returned [`AbortAll`] drops.
-fn build_tip_store<T, GetPos, Subscribe>(
+/// Build a [`Store<MergedPos>`] that aggregates per-source tip bytes
+/// (for the given [`TipKind`]) via background tasks. Tasks abort when
+/// the returned [`AbortAll`] drops.
+fn build_tip_store<T>(
     sources: &BTreeMap<String, Arc<dyn ErasedSource<T>>>,
-    get_pos: GetPos,
-    subscribe: Subscribe,
+    kind: TipKind,
 ) -> (Store<MergedPos>, AbortAll)
 where
     T: Send + Sync + 'static,
-    GetPos: Fn(&Arc<dyn ErasedSource<T>>) -> Vec<u8>,
-    Subscribe: Fn(&Arc<dyn ErasedSource<T>>) -> Subscription<Vec<u8>>,
 {
     let initial_positions: BTreeMap<String, Vec<u8>> = sources
         .iter()
-        .map(|(k, s)| (k.clone(), get_pos(s)))
+        .map(|(k, s)| (k.clone(), s.tip_pos(kind)))
         .collect();
     let (tx, rx) = watch::channel(MergedPos::new(initial_positions.clone()));
 
@@ -322,7 +326,7 @@ where
     let mut handles = Vec::with_capacity(sources.len());
     for (key, source) in sources {
         let key = key.clone();
-        let mut sub = subscribe(source);
+        let mut sub = source.subscribe_tip(kind);
         let state = state.clone();
         let tx = tx.clone();
         // Don't skip the first emission. Watch channels coalesce, so if a
@@ -384,12 +388,9 @@ impl<T: Clone + Send + Sync + 'static> MergedHistStoreBackend<T> {
         let sources: BTreeMap<String, Arc<dyn ErasedSource<T>>> =
             stores.into_iter().map(|(k, s)| (k, s.inner)).collect();
 
-        let (latest_store, latest_task) =
-            build_tip_store(&sources, |s| s.latest_pos(), |s| s.subscribe_latest());
-        let (best_store, best_task) =
-            build_tip_store(&sources, |s| s.best_pos(), |s| s.subscribe_best());
-        let (safe_store, safe_task) =
-            build_tip_store(&sources, |s| s.safe_pos(), |s| s.subscribe_safe());
+        let (latest_store, latest_task) = build_tip_store(&sources, TipKind::Latest);
+        let (best_store, best_task) = build_tip_store(&sources, TipKind::Best);
+        let (safe_store, safe_task) = build_tip_store(&sources, TipKind::Safe);
 
         Self {
             sources,
