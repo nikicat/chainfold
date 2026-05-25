@@ -30,6 +30,15 @@ _None. (Item 9 fully landed; see Done table.)_
 
 ## ⏳ Open — architectural (need agreement first)
 
+### ✅ C. Move `SqliteAnchorStore` out of `matcher.rs` — _done_
+
+Converted `src/matcher.rs` → `src/matcher/mod.rs` and extracted `SqliteAnchorStore`
+into `src/matcher/anchor_store_sqlite.rs`, re-exported from `mod.rs` so
+`matcher::SqliteAnchorStore` stays a valid path. Not feature-gated and not moved
+under `src/evm/`: SQLite is a generic persistence backend (not source-specific),
+and `rusqlite` is an unconditional dep — so it sits as the durable sibling of
+`InMemoryAnchorStore`. `mod.rs` no longer names `rusqlite` at its surface.
+
 ### A. Split `LogStore` into per-table caches
 
 `src/evm/log_store.rs:266` — a single `LogStore` owns seven unrelated tables: `cached_logs` + `scanned_ranges` + `reorged_blocks` + `cached_block_headers` + `erc20_metadata` + `erc20_balances` + `event_signatures`. Module doc admits it: "log + range + header + erc20 store." Name is misleading.
