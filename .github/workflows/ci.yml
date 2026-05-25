@@ -19,7 +19,8 @@ jobs:
       - name: Install system dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            base-devel git pkgconf pacman rustup taplo-cli
+            base-devel git pkgconf pacman rustup taplo-cli \
+            actionlint yamllint shellcheck just
           rustup default stable
           rustup component add rustfmt clippy
 
@@ -43,6 +44,15 @@ jobs:
 
       - name: taplo lint
         run: taplo lint
+
+      - name: actionlint
+        run: actionlint
+
+      - name: yamllint
+        run: yamllint .
+
+      - name: just fmt
+        run: just --unstable --fmt --check
 
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings

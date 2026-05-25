@@ -24,20 +24,20 @@ test-all:
 
 # Coverage summary in the terminal.
 coverage:
-    cargo llvm-cov --all-features --ignore-filename-regex '{{ignore_regex}}'
+    cargo llvm-cov --all-features --ignore-filename-regex '{{ ignore_regex }}'
 
 # HTML report at target/llvm-cov/html/index.html.
 coverage-html:
-    cargo llvm-cov --all-features --html --ignore-filename-regex '{{ignore_regex}}'
+    cargo llvm-cov --all-features --html --ignore-filename-regex '{{ ignore_regex }}'
 
 # HTML report + open in browser.
 coverage-open:
-    cargo llvm-cov --all-features --html --open --ignore-filename-regex '{{ignore_regex}}'
+    cargo llvm-cov --all-features --html --open --ignore-filename-regex '{{ ignore_regex }}'
 
 # lcov.info for Codecov upload or external tools.
 coverage-lcov:
     cargo llvm-cov --all-features --lcov --output-path lcov.info \
-        --ignore-filename-regex '{{ignore_regex}}'
+        --ignore-filename-regex '{{ ignore_regex }}'
 
 # Drop cached .profraw / .profdata / HTML report.
 coverage-clean:

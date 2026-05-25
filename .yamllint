@@ -1,0 +1,12 @@
+# yamllint config tuned for GitHub Actions + pre-commit YAML.
+extends: default
+rules:
+  # GitHub Actions requires the top-level `on:` key, which YAML 1.1 reads as
+  # the boolean `true`; don't flag workflow keys as "truthy".
+  truthy:
+    check-keys: false
+  # `---` document-start markers are optional in this repo.
+  document-start: disable
+  # 80 is too tight for CI `run:` one-liners; keep a sane upper bound.
+  line-length:
+    max: 120
