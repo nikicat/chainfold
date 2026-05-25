@@ -15,9 +15,8 @@ use std::time::Instant;
 use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{Hist, HistBackend};
-use chainfold::evm::{EvmLogHistory, LogStore, TRANSFER_TOPIC};
+use chainfold::evm::{EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC};
 use futures_util::StreamExt;
 use tempfile::TempDir;
 

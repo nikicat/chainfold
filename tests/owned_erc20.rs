@@ -15,9 +15,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use alloy::providers::ProviderBuilder;
-use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{Hist, HistBackend, Position};
-use chainfold::evm::{EvmLogHistory, LogStore, OwnedErc20, IN_KEY, OUT_KEY, TRANSFER_TOPIC};
+use chainfold::evm::{
+    EvmEvent, EvmLogHistory, EvmPosition, LogStore, OwnedErc20, IN_KEY, OUT_KEY, TRANSFER_TOPIC,
+};
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
 use tempfile::TempDir;

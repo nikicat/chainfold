@@ -31,9 +31,8 @@ use std::sync::Arc;
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
 
-use crate::arch::evm::EvmEvent;
 use crate::arch::{HistStore, HistoryError};
-use crate::evm::{EvmLogHistory, LogStore, TRANSFER_TOPIC};
+use crate::evm::{EvmEvent, EvmLogHistory, LogStore, TRANSFER_TOPIC};
 use crate::merge::{merge_hist_stores, ErasedHistStore, MergedItem, MergedPos};
 
 /// Source key for outgoing transfers (`owner == from`).

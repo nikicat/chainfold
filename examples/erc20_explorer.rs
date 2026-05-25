@@ -31,11 +31,11 @@ use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Position};
 use chainfold::evm::{
     apply_transfer, decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
-    Erc20Metadata, EvmLogHistory, LogStore, OwnedErc20, SubscribeTransport, IN_KEY, OUT_KEY,
+    Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, LogStore, OwnedErc20, SubscribeTransport,
+    IN_KEY, OUT_KEY,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use chrono::NaiveDate;

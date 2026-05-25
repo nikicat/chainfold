@@ -38,7 +38,6 @@ use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::arch::evm::{EvmEvent, EvmPosition};
 use crate::arch::{
     AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
     ItemStream, Positioned, Store, Timestamp,
@@ -46,6 +45,7 @@ use crate::arch::{
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::log_store::{compute_filter_hash, BlockHeader, LogStore};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
+use crate::evm::types::{EvmEvent, EvmPosition};
 
 fn fmt_topic(t: Option<&[u8; 32]>) -> String {
     match t {

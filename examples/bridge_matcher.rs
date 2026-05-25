@@ -30,8 +30,9 @@ use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::evm::{EvmEvent, EvmPosition};
-use chainfold::evm::{rpc_retry_layer, versioned_path, EvmLogHistory, LogStore, TRANSFER_TOPIC};
+use chainfold::evm::{
+    rpc_retry_layer, versioned_path, EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC,
+};
 use chainfold::matcher::{
     match_fn, AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
     SqliteAnchorStore,

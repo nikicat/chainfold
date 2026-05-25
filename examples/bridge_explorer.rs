@@ -23,9 +23,10 @@ use std::sync::Arc;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{HistStore, Position};
-use chainfold::evm::{rpc_retry_layer, versioned_path, EvmLogHistory, LogStore, TRANSFER_TOPIC};
+use chainfold::evm::{
+    rpc_retry_layer, versioned_path, EvmEvent, EvmLogHistory, EvmPosition, LogStore, TRANSFER_TOPIC,
+};
 use chainfold::merge::{merge_hist_stores, ErasedHistStore, MergedItem, MergedPos};
 use clap::Parser;
 use futures_util::StreamExt;

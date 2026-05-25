@@ -1,5 +1,5 @@
-use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::HistStore;
+use chainfold::evm::{EvmEvent, EvmPosition};
 use chrono::NaiveDate;
 
 use crate::cli::EvmArgs;

@@ -16,10 +16,10 @@ use alloy::providers::Provider;
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolEvent};
 
-use crate::arch::evm::EvmEvent;
 use crate::arch::HistoryError;
 
 use super::log_store::LogStore;
+use super::types::EvmEvent;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);

@@ -17,8 +17,13 @@ mod log_store;
 mod owned_erc20;
 mod retry;
 mod subscriber;
+mod types;
 
 pub use aligned_ranges::{aligned_block_ranges, AlignedRange};
+pub use types::{
+    Amount, Asset, Erc20, Erc20Balance, Erc20Burn, Erc20Mint, Erc20Transfer, EvmBlock, EvmEvent,
+    EvmPosition, EvmTransaction,
+};
 
 pub use erc20::{
     apply_transfer, decode_transfer, fetch_erc20_metadata, Erc20Metadata, TransferData,

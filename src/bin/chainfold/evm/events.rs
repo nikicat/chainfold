@@ -6,9 +6,8 @@ use alloy::json_abi::Event;
 use alloy::network::Ethereum;
 use alloy::primitives::B256;
 use alloy::providers::Provider;
-use chainfold::arch::evm::{EvmEvent, EvmPosition};
 use chainfold::arch::{watch_hist, Hist, HistBackend, Positioned};
-use chainfold::evm::{EvmLogHistory, LogStore, SubscribeTransport};
+use chainfold::evm::{EvmEvent, EvmLogHistory, EvmPosition, LogStore, SubscribeTransport};
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 
