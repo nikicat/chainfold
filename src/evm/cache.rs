@@ -262,6 +262,7 @@ pub(crate) fn configure_connection(conn: &Connection) -> Result<(), rusqlite::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evm::ChainId;
 
     #[test]
     fn versioned_path_inserts_version_before_extension() {
@@ -277,8 +278,15 @@ mod tests {
         let db = CacheDb::open_in_memory().unwrap();
         let erc20 = db.erc20();
         let addr = [0x42u8; 20];
-        erc20.insert_erc20_metadata(&addr, 1, "X", "X", 18).unwrap();
-        assert!(db.erc20().get_erc20_metadata(&addr, 1).unwrap().is_some());
+        erc20
+            .insert_erc20_metadata(&addr, ChainId::new(1), "X", "X", 18)
+            .unwrap();
+        assert!(
+            db.erc20()
+                .get_erc20_metadata(&addr, ChainId::new(1))
+                .unwrap()
+                .is_some()
+        );
         // Distinct concern on the same file.
         let logs = db.logs();
         assert!(logs.get_scanned_ranges(&[0u8; 32]).unwrap().is_empty());

@@ -8,6 +8,7 @@
 //! [`SignatureCache`](crate::signatures::SignatureCache) resolver trait.
 
 use super::{CacheError, SharedConn};
+use crate::evm::types::ChainId;
 
 /// A single row from `event_signatures`: canonical signature, topic0,
 /// and (when populated) the matched ABI event item JSON.
@@ -37,7 +38,7 @@ impl EventSignatureCache {
 
     pub fn get_event_signature(
         &self,
-        chain_id: u64,
+        chain_id: ChainId,
         address: &[u8; 20],
         event_name: &str,
     ) -> Result<Option<EventSignatureRow>, CacheError> {
@@ -47,7 +48,7 @@ impl EventSignatureCache {
              WHERE chain_id = ?1 AND address = ?2 AND event_name = ?3",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![chain_id as i64, &address[..], event_name],
+            rusqlite::params![chain_id.get() as i64, &address[..], event_name],
             |row| {
                 let sig: String = row.get(0)?;
                 let topic: Vec<u8> = row.get(1)?;
@@ -68,7 +69,7 @@ impl EventSignatureCache {
 
     pub fn insert_event_signature(
         &self,
-        chain_id: u64,
+        chain_id: ChainId,
         address: &[u8; 20],
         event_name: &str,
         signature: &str,
@@ -81,7 +82,7 @@ impl EventSignatureCache {
              (chain_id, address, event_name, signature, topic0, abi_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
-                chain_id as i64,
+                chain_id.get() as i64,
                 &address[..],
                 event_name,
                 signature,
@@ -109,7 +110,7 @@ mod tests {
         let cache = EventSignatureCache::open_in_memory().unwrap();
         cache
             .insert_event_signature(
-                1,
+                ChainId::new(1),
                 &ADDR,
                 "Transfer",
                 "Transfer(address,address,uint256)",
@@ -118,7 +119,7 @@ mod tests {
             )
             .unwrap();
         let (sig, topic, abi) = cache
-            .get_event_signature(1, &ADDR, "Transfer")
+            .get_event_signature(ChainId::new(1), &ADDR, "Transfer")
             .unwrap()
             .unwrap();
         assert_eq!(sig, "Transfer(address,address,uint256)");
@@ -131,7 +132,7 @@ mod tests {
         let cache = EventSignatureCache::open_in_memory().unwrap();
         assert!(
             cache
-                .get_event_signature(1, &ADDR, "Nope")
+                .get_event_signature(ChainId::new(1), &ADDR, "Nope")
                 .unwrap()
                 .is_none()
         );
@@ -141,10 +142,17 @@ mod tests {
     fn signature_nullable_abi() {
         let cache = EventSignatureCache::open_in_memory().unwrap();
         cache
-            .insert_event_signature(1, &ADDR, "Approval", "Approval()", &TOPIC0, None)
+            .insert_event_signature(
+                ChainId::new(1),
+                &ADDR,
+                "Approval",
+                "Approval()",
+                &TOPIC0,
+                None,
+            )
             .unwrap();
         let (_, _, abi) = cache
-            .get_event_signature(1, &ADDR, "Approval")
+            .get_event_signature(ChainId::new(1), &ADDR, "Approval")
             .unwrap()
             .unwrap();
         assert!(abi.is_none());

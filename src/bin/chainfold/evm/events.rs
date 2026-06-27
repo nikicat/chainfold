@@ -8,7 +8,7 @@ use alloy::primitives::B256;
 use alloy::providers::Provider;
 use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
 use chainfold::evm::{
-    CacheDb, ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, SubscribeTransport,
+    CacheDb, ChainId, ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, SubscribeTransport,
 };
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
@@ -31,7 +31,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     config: &Config,
     evm_args: &EvmArgs,
     events_args: &EventsArgs,
-    chain_id: u64,
+    chain_id: ChainId,
     _reverse: bool,
     follow: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -124,7 +124,7 @@ struct Lookup {
 async fn resolve_lookup(
     cache: &CacheDb,
     config: &Config,
-    chain_id: u64,
+    chain_id: ChainId,
     address: [u8; 20],
     args: &EventsArgs,
 ) -> Result<Lookup, Box<dyn std::error::Error>> {
@@ -146,7 +146,7 @@ async fn resolve_lookup(
         let sig_cache = SqliteSignatureCache::new(cache.signatures());
         let resolved = resolve_event(
             &sig_cache,
-            chain_id,
+            chain_id.get(),
             address,
             name,
             config.etherscan_api_key(),

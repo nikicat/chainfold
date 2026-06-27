@@ -7,8 +7,8 @@ use alloy::primitives::U256;
 use alloy::providers::Provider;
 use chainfold::arch::{Position, Positioned, watch_hist};
 use chainfold::evm::{
-    CacheDb, ChainProvider, Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, OUT_KEY, OwnedErc20,
-    SubscribeTransport, apply_transfer, fetch_erc20_metadata,
+    CacheDb, ChainId, ChainProvider, Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, OUT_KEY,
+    OwnedErc20, SubscribeTransport, apply_transfer, fetch_erc20_metadata,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -24,7 +24,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     db_path: &str,
     evm_args: &EvmArgs,
     erc20_args: &Erc20Args,
-    chain_id: u64,
+    chain_id: ChainId,
     _reverse: bool,
     follow: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,7 +62,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         .unwrap_or(0);
     println!();
 
-    let base_url = fmt::explorer_base_url(chain_id);
+    let base_url = fmt::explorer_base_url(chain_id.get());
     let ctx = FmtContext {
         owner: &owner,
         metadata: &metadata,

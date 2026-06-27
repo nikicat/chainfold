@@ -8,6 +8,7 @@
 use alloy::primitives::U256;
 
 use super::{CacheError, SharedConn};
+use crate::evm::types::ChainId;
 
 /// Cached ERC20 token metadata (name, symbol, decimals).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,20 +46,23 @@ impl Erc20Cache {
     pub fn get_erc20_metadata(
         &self,
         address: &[u8; 20],
-        chain_id: u64,
+        chain_id: ChainId,
     ) -> Result<Option<CachedErc20Metadata>, CacheError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT name, symbol, decimals FROM erc20_metadata
              WHERE address = ?1 AND chain_id = ?2",
         )?;
-        let mut rows = stmt.query_map(rusqlite::params![&address[..], chain_id as i64], |row| {
-            Ok(CachedErc20Metadata {
-                name: row.get(0)?,
-                symbol: row.get(1)?,
-                decimals: row.get::<_, i64>(2)? as u8,
-            })
-        })?;
+        let mut rows = stmt.query_map(
+            rusqlite::params![&address[..], chain_id.get() as i64],
+            |row| {
+                Ok(CachedErc20Metadata {
+                    name: row.get(0)?,
+                    symbol: row.get(1)?,
+                    decimals: row.get::<_, i64>(2)? as u8,
+                })
+            },
+        )?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
@@ -68,7 +72,7 @@ impl Erc20Cache {
     pub fn insert_erc20_metadata(
         &self,
         address: &[u8; 20],
-        chain_id: u64,
+        chain_id: ChainId,
         name: &str,
         symbol: &str,
         decimals: u8,
@@ -77,7 +81,13 @@ impl Erc20Cache {
         conn.execute(
             "INSERT OR REPLACE INTO erc20_metadata (address, chain_id, name, symbol, decimals)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![&address[..], chain_id as i64, name, symbol, decimals as i64],
+            rusqlite::params![
+                &address[..],
+                chain_id.get() as i64,
+                name,
+                symbol,
+                decimals as i64
+            ],
         )?;
         Ok(())
     }
@@ -88,7 +98,7 @@ impl Erc20Cache {
 
     pub fn get_erc20_balance(
         &self,
-        chain_id: u64,
+        chain_id: ChainId,
         address: &[u8; 20],
         owner: &[u8; 20],
         block_number: u64,
@@ -100,7 +110,7 @@ impl Erc20Cache {
         )?;
         let mut rows = stmt.query_map(
             rusqlite::params![
-                chain_id as i64,
+                chain_id.get() as i64,
                 &address[..],
                 &owner[..],
                 block_number as i64
@@ -123,7 +133,7 @@ impl Erc20Cache {
 
     pub fn get_erc20_balance_floor(
         &self,
-        chain_id: u64,
+        chain_id: ChainId,
         address: &[u8; 20],
         owner: &[u8; 20],
         max_block: u64,
@@ -135,7 +145,12 @@ impl Erc20Cache {
              ORDER BY block_number DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![chain_id as i64, &address[..], &owner[..], max_block as i64],
+            rusqlite::params![
+                chain_id.get() as i64,
+                &address[..],
+                &owner[..],
+                max_block as i64
+            ],
             |row| {
                 let block: i64 = row.get(0)?;
                 let balance: Vec<u8> = row.get(1)?;
@@ -155,7 +170,7 @@ impl Erc20Cache {
 
     pub fn insert_erc20_balance(
         &self,
-        chain_id: u64,
+        chain_id: ChainId,
         address: &[u8; 20],
         owner: &[u8; 20],
         block_number: u64,
@@ -167,7 +182,7 @@ impl Erc20Cache {
             "INSERT OR REPLACE INTO erc20_balances (chain_id, address, owner, block_number, balance)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
-                chain_id as i64,
+                chain_id.get() as i64,
                 &address[..],
                 &owner[..],
                 block_number as i64,
@@ -193,9 +208,12 @@ mod tests {
         let store = Erc20Cache::open_in_memory().unwrap();
         let addr = [0x42u8; 20];
         store
-            .insert_erc20_metadata(&addr, 1, "Wrapped Ether", "WETH", 18)
+            .insert_erc20_metadata(&addr, ChainId::new(1), "Wrapped Ether", "WETH", 18)
             .unwrap();
-        let m = store.get_erc20_metadata(&addr, 1).unwrap().unwrap();
+        let m = store
+            .get_erc20_metadata(&addr, ChainId::new(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(m.name, "Wrapped Ether");
         assert_eq!(m.symbol, "WETH");
         assert_eq!(m.decimals, 18);
@@ -205,14 +223,26 @@ mod tests {
     fn erc20_metadata_different_chains() {
         let store = Erc20Cache::open_in_memory().unwrap();
         let addr = [0x42u8; 20];
-        store.insert_erc20_metadata(&addr, 1, "A", "A", 18).unwrap();
-        store.insert_erc20_metadata(&addr, 10, "B", "B", 6).unwrap();
+        store
+            .insert_erc20_metadata(&addr, ChainId::new(1), "A", "A", 18)
+            .unwrap();
+        store
+            .insert_erc20_metadata(&addr, ChainId::new(10), "B", "B", 6)
+            .unwrap();
         assert_eq!(
-            store.get_erc20_metadata(&addr, 1).unwrap().unwrap().name,
+            store
+                .get_erc20_metadata(&addr, ChainId::new(1))
+                .unwrap()
+                .unwrap()
+                .name,
             "A"
         );
         assert_eq!(
-            store.get_erc20_metadata(&addr, 10).unwrap().unwrap().name,
+            store
+                .get_erc20_metadata(&addr, ChainId::new(10))
+                .unwrap()
+                .unwrap()
+                .name,
             "B"
         );
     }
@@ -222,12 +252,15 @@ mod tests {
         let store = Erc20Cache::open_in_memory().unwrap();
         let addr = [0x42u8; 20];
         store
-            .insert_erc20_metadata(&addr, 1, "Old", "OLD", 18)
+            .insert_erc20_metadata(&addr, ChainId::new(1), "Old", "OLD", 18)
             .unwrap();
         store
-            .insert_erc20_metadata(&addr, 1, "New", "NEW", 6)
+            .insert_erc20_metadata(&addr, ChainId::new(1), "New", "NEW", 6)
             .unwrap();
-        let m = store.get_erc20_metadata(&addr, 1).unwrap().unwrap();
+        let m = store
+            .get_erc20_metadata(&addr, ChainId::new(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(m.name, "New");
         assert_eq!(m.symbol, "NEW");
         assert_eq!(m.decimals, 6);
@@ -241,10 +274,16 @@ mod tests {
         let addr = [0x42u8; 20];
         let owner = [0x55u8; 20];
         store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1_000_000_u64))
+            .insert_erc20_balance(
+                ChainId::new(1),
+                &addr,
+                &owner,
+                100,
+                U256::from(1_000_000_u64),
+            )
             .unwrap();
         let b = store
-            .get_erc20_balance(1, &addr, &owner, 100)
+            .get_erc20_balance(ChainId::new(1), &addr, &owner, 100)
             .unwrap()
             .unwrap();
         assert_eq!(b, U256::from(1_000_000_u64));
@@ -256,21 +295,21 @@ mod tests {
         let addr = [0x42u8; 20];
         let owner = [0x55u8; 20];
         store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1u64))
+            .insert_erc20_balance(ChainId::new(1), &addr, &owner, 100, U256::from(1u64))
             .unwrap();
         store
-            .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
+            .insert_erc20_balance(ChainId::new(1), &addr, &owner, 200, U256::from(2u64))
             .unwrap();
         assert_eq!(
             store
-                .get_erc20_balance(1, &addr, &owner, 100)
+                .get_erc20_balance(ChainId::new(1), &addr, &owner, 100)
                 .unwrap()
                 .unwrap(),
             U256::from(1u64)
         );
         assert_eq!(
             store
-                .get_erc20_balance(1, &addr, &owner, 200)
+                .get_erc20_balance(ChainId::new(1), &addr, &owner, 200)
                 .unwrap()
                 .unwrap(),
             U256::from(2u64)
@@ -283,14 +322,14 @@ mod tests {
         let addr = [0x42u8; 20];
         let owner = [0x55u8; 20];
         store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1u64))
+            .insert_erc20_balance(ChainId::new(1), &addr, &owner, 100, U256::from(1u64))
             .unwrap();
         store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(2u64))
+            .insert_erc20_balance(ChainId::new(1), &addr, &owner, 100, U256::from(2u64))
             .unwrap();
         assert_eq!(
             store
-                .get_erc20_balance(1, &addr, &owner, 100)
+                .get_erc20_balance(ChainId::new(1), &addr, &owner, 100)
                 .unwrap()
                 .unwrap(),
             U256::from(2u64)
@@ -303,13 +342,13 @@ mod tests {
         let addr = [0x42u8; 20];
         let owner = [0x55u8; 20];
         store
-            .insert_erc20_balance(1, &addr, &owner, 100, U256::from(1u64))
+            .insert_erc20_balance(ChainId::new(1), &addr, &owner, 100, U256::from(1u64))
             .unwrap();
         store
-            .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
+            .insert_erc20_balance(ChainId::new(1), &addr, &owner, 200, U256::from(2u64))
             .unwrap();
         let (block, balance) = store
-            .get_erc20_balance_floor(1, &addr, &owner, 150)
+            .get_erc20_balance_floor(ChainId::new(1), &addr, &owner, 150)
             .unwrap()
             .unwrap();
         assert_eq!(block, 100);
@@ -322,11 +361,11 @@ mod tests {
         let addr = [0x42u8; 20];
         let owner = [0x55u8; 20];
         store
-            .insert_erc20_balance(1, &addr, &owner, 200, U256::from(2u64))
+            .insert_erc20_balance(ChainId::new(1), &addr, &owner, 200, U256::from(2u64))
             .unwrap();
         assert!(
             store
-                .get_erc20_balance_floor(1, &addr, &owner, 100)
+                .get_erc20_balance_floor(ChainId::new(1), &addr, &owner, 100)
                 .unwrap()
                 .is_none()
         );

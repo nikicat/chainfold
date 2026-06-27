@@ -7,7 +7,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::evm::{
-    CacheDb, ChainProvider, RpcMethod, rpc_retry_layer, rpc_span, versioned_path,
+    CacheDb, ChainId, ChainProvider, RpcMethod, rpc_retry_layer, rpc_span, versioned_path,
 };
 use tracing::Instrument;
 
@@ -75,6 +75,7 @@ pub async fn run(
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     // The chain id is already resolved from args — bundle it into the provider
     // so the EVM layer reads it for free instead of re-fetching eth_chainId.
+    let chain_id = ChainId::new(chain_id);
     let provider = ChainProvider::new(ProviderBuilder::new().connect_client(client), chain_id);
 
     let db_path_buf = args.db.clone().unwrap_or_else(default_db_path);
@@ -92,7 +93,7 @@ pub async fn run(
                 .get_chain_id()
                 .instrument(rpc_span(RpcMethod::ChainId))
                 .await?;
-            if rpc_chain_id != chain_id {
+            if rpc_chain_id != chain_id.get() {
                 eprintln!(
                     "warning: requested chain {chain_id} but RPC reports chain {rpc_chain_id}"
                 );

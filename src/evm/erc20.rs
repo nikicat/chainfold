@@ -23,7 +23,7 @@ use crate::arch::HistoryError;
 
 use super::cache::Erc20Cache;
 use super::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
-use super::types::EvmEvent;
+use super::types::{ChainId, EvmEvent};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -55,7 +55,7 @@ pub struct Erc20Metadata {
 pub async fn fetch_erc20_metadata<P: Provider<Ethereum>>(
     provider: &P,
     address: [u8; 20],
-    chain_id: u64,
+    chain_id: ChainId,
     cache: &Erc20Cache,
 ) -> Result<Erc20Metadata, HistoryError> {
     if let Some(cached) = cache
@@ -277,7 +277,7 @@ pub fn apply_transfer(owner: [u8; 20], balance: U256, event: &EvmEvent) -> U256 
 pub async fn fetch_balance_at<P: Provider<Ethereum>>(
     provider: &P,
     cache: &Erc20Cache,
-    chain_id: u64,
+    chain_id: ChainId,
     token: [u8; 20],
     owner: [u8; 20],
     block: u64,
@@ -322,7 +322,7 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
 /// Look up the closest cached balance at or before `block`. No RPC.
 pub fn cached_balance_floor(
     cache: &Erc20Cache,
-    chain_id: u64,
+    chain_id: ChainId,
     token: [u8; 20],
     owner: [u8; 20],
     block: u64,
@@ -434,18 +434,18 @@ mod tests {
         let cache = Arc::new(Erc20Cache::open_in_memory().unwrap());
 
         cache
-            .insert_erc20_balance(1, &token, &owner, 100, U256::from(500))
+            .insert_erc20_balance(ChainId::new(1), &token, &owner, 100, U256::from(500))
             .unwrap();
         cache
-            .insert_erc20_balance(1, &token, &owner, 200, U256::from(1000))
+            .insert_erc20_balance(ChainId::new(1), &token, &owner, 200, U256::from(1000))
             .unwrap();
 
-        let (b, v) = cached_balance_floor(&cache, 1, token, owner, 150).unwrap();
+        let (b, v) = cached_balance_floor(&cache, ChainId::new(1), token, owner, 150).unwrap();
         assert_eq!((b, v), (100, U256::from(500)));
 
-        let (b, v) = cached_balance_floor(&cache, 1, token, owner, 250).unwrap();
+        let (b, v) = cached_balance_floor(&cache, ChainId::new(1), token, owner, 250).unwrap();
         assert_eq!((b, v), (200, U256::from(1000)));
 
-        assert!(cached_balance_floor(&cache, 1, token, owner, 50).is_none());
+        assert!(cached_balance_floor(&cache, ChainId::new(1), token, owner, 50).is_none());
     }
 }

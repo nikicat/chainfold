@@ -14,23 +14,24 @@ use tracing::Instrument;
 
 use crate::arch::HistoryError;
 use crate::evm::observe::{RpcMethod, rpc_span};
+use crate::evm::types::ChainId;
 
 /// A provider paired with the chain id it serves.
 #[derive(Clone)]
 pub struct ChainProvider<P> {
     inner: P,
-    chain_id: u64,
+    chain_id: ChainId,
 }
 
 impl<P> ChainProvider<P> {
     /// Wrap a provider whose chain id is already known (e.g. resolved from CLI
     /// args or a config). No RPC.
-    pub fn new(inner: P, chain_id: u64) -> Self {
+    pub fn new(inner: P, chain_id: ChainId) -> Self {
         Self { inner, chain_id }
     }
 
     /// The chain id this provider serves. Free — no `eth_chainId`.
-    pub fn chain_id(&self) -> u64 {
+    pub fn chain_id(&self) -> ChainId {
         self.chain_id
     }
 
@@ -50,7 +51,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
             .instrument(rpc_span(RpcMethod::ChainId))
             .await
             .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
-        Ok(Self { inner, chain_id })
+        Ok(Self {
+            inner,
+            chain_id: ChainId::new(chain_id),
+        })
     }
 }
 

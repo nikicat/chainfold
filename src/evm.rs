@@ -24,8 +24,8 @@ mod types;
 
 pub use aligned_ranges::{AlignedRange, aligned_block_ranges};
 pub use types::{
-    Amount, Asset, Erc20, Erc20Balance, Erc20Burn, Erc20Mint, Erc20Transfer, EvmBlock, EvmEvent,
-    EvmPosition, EvmTransaction,
+    Amount, Asset, ChainId, Erc20, Erc20Balance, Erc20Burn, Erc20Mint, Erc20Transfer, EvmBlock,
+    EvmEvent, EvmPosition, EvmTransaction,
 };
 
 pub use cache::{

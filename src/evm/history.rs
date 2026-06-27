@@ -49,7 +49,7 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
-use crate::evm::types::{EvmEvent, EvmPosition};
+use crate::evm::types::{ChainId, EvmEvent, EvmPosition};
 
 fn fmt_topic(t: Option<&[u8; 32]>) -> String {
     match t {
@@ -178,7 +178,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         let _ = history.self_ref.set(Arc::downgrade(&history));
 
         tracing::debug!(
-            chain_id,
+            chain_id = %chain_id,
             address = %format!("0x{}", hex::encode(address)),
             topic0 = %fmt_topic(topics[0].as_ref()),
             topic1 = %fmt_topic(topics[1].as_ref()),
@@ -197,7 +197,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<_, _>>)
     }
 
-    pub fn chain_id(&self) -> u64 {
+    pub fn chain_id(&self) -> ChainId {
         self.provider.chain_id()
     }
 
@@ -695,7 +695,7 @@ mod tests {
         // lookup hits the cache (warm_cache has block 200).
         asserter.push_success(&U64::from(200u64));
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
-        let provider = ChainProvider::new(provider, TEST_CHAIN);
+        let provider = ChainProvider::new(provider, ChainId::new(TEST_CHAIN));
         EvmLogHistory::with_options(provider, store, ADDR, TOPICS, 100, 12)
             .await
             .unwrap()
@@ -843,7 +843,7 @@ mod tests {
     async fn chain_id_is_on_history_not_position() {
         let (store, _) = warm_cache();
         let history = make_history(store).await;
-        assert_eq!(history.chain_id(), TEST_CHAIN);
+        assert_eq!(history.chain_id(), ChainId::new(TEST_CHAIN));
         // EvmPosition has only block + log_index — no chain field.
         let p = EvmPosition::new(100, 0);
         let s = format!("{p:?}");

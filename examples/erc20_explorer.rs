@@ -33,8 +33,8 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Position, watch_hist};
 use chainfold::evm::{
-    CacheDb, ChainProvider, Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, OUT_KEY,
-    OwnedErc20, SubscribeTransport, apply_transfer, decode_transfer, fetch_erc20_metadata,
+    CacheDb, ChainId, ChainProvider, Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY,
+    OUT_KEY, OwnedErc20, SubscribeTransport, apply_transfer, decode_transfer, fetch_erc20_metadata,
     rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::{MergedItem, MergedPos};
@@ -282,9 +282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let erc20_cache = cache.erc20();
     let log_cache = Arc::new(cache.logs());
 
-    let chain_id = provider.get_chain_id().await?;
+    let chain_id = ChainId::new(provider.get_chain_id().await?);
     let provider = ChainProvider::new(provider, chain_id);
-    let base_url = explorer_base_url(chain_id);
+    let base_url = explorer_base_url(chain_id.get());
     println!("Fetching token metadata...");
     let meta_futures = addresses
         .iter()

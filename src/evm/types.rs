@@ -8,6 +8,44 @@ use std::sync::Arc;
 use crate::arch::{Position, Timestamp};
 
 // ============================================================
+// ChainId
+// ============================================================
+
+/// An EVM chain id — the value `eth_chainId` returns. A newtype over `u64`
+/// so it can't be silently swapped with a block number, log index, or any
+/// other bare integer, and so APIs that key on chain say so in their types.
+///
+/// Convert at the edges: [`ChainId::new`] from a resolved/fetched `u64`,
+/// [`ChainId::get`] back to `u64` for `SQLite` columns and RPC-URL formatting.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct ChainId(u64);
+
+impl ChainId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ChainId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u64> for ChainId {
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+// ============================================================
 // EvmPosition — totally ordered (block, log_index)
 // ============================================================
 

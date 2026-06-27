@@ -3,7 +3,7 @@
 //! file for event-signature caching.
 
 use async_trait::async_trait;
-use chainfold::evm::EventSignatureCache;
+use chainfold::evm::{ChainId, EventSignatureCache};
 use chainfold::signatures::{ResolvedEvent, SignatureCache, SignatureError};
 
 pub struct SqliteSignatureCache {
@@ -25,7 +25,7 @@ impl SignatureCache for SqliteSignatureCache {
         event_name: &str,
     ) -> Result<Option<ResolvedEvent>, SignatureError> {
         self.cache
-            .get_event_signature(chain_id, &address, event_name)
+            .get_event_signature(ChainId::new(chain_id), &address, event_name)
             .map(|opt| {
                 opt.map(|(signature, topic0, abi_json)| ResolvedEvent {
                     signature,
@@ -45,7 +45,7 @@ impl SignatureCache for SqliteSignatureCache {
     ) -> Result<(), SignatureError> {
         self.cache
             .insert_event_signature(
-                chain_id,
+                ChainId::new(chain_id),
                 &address,
                 event_name,
                 &entry.signature,
