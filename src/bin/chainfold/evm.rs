@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::evm::{CacheDb, rpc_retry_layer, versioned_path};
+use chainfold::evm::{CacheDb, RpcMethod, rpc_retry_layer, rpc_span, versioned_path};
+use tracing::Instrument;
 
 use crate::chains::ChainResolver;
 use crate::cli::{EvmArgs, EvmCommand};
@@ -81,7 +82,10 @@ pub async fn run(
     let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = CacheDb::open(&db_path)?;
 
-    let rpc_chain_id = provider.get_chain_id().await?;
+    let rpc_chain_id = provider
+        .get_chain_id()
+        .instrument(rpc_span(RpcMethod::ChainId))
+        .await?;
     if rpc_chain_id != chain_id {
         eprintln!("warning: requested chain {chain_id} but RPC reports chain {rpc_chain_id}");
     }

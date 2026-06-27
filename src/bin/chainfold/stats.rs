@@ -240,6 +240,26 @@ impl Stats {
                 );
             }
         }
+
+        // Everything not inside a tracked span: process/provider setup, chain
+        // resolution (chainlist parse), TLS/DNS, and idle between calls. Spans
+        // are mostly sequential in the CLI, so this reconciles `duration` with
+        // the tracked totals; with concurrent fetches it's an upper bound on
+        // what's truly untracked (overlapping spans get double-counted out).
+        let tracked: Duration = inner
+            .rpc_by_method
+            .values()
+            .map(|t| t.total)
+            .sum::<Duration>()
+            + inner
+                .sqlite_by_op
+                .values()
+                .map(|t| t.total)
+                .sum::<Duration>();
+        eprintln!(
+            "  untracked             {:>12}   (setup, chain resolution, TLS, gaps)",
+            fmt_dur(wall.saturating_sub(tracked))
+        );
         eprintln!();
     }
 }
