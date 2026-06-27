@@ -12,6 +12,7 @@
 
 mod aligned_ranges;
 mod cache;
+mod chain_provider;
 pub mod erc20;
 mod history;
 mod log_index;
@@ -32,6 +33,7 @@ pub use cache::{
     EventSignatureCache, EventSignatureRow, LogCache, compute_filter_hash, compute_gaps,
     versioned_path,
 };
+pub use chain_provider::ChainProvider;
 pub use erc20::{
     Erc20Metadata, TRANSFER_TOPIC, TransferData, apply_transfer, decode_transfer,
     fetch_erc20_metadata,

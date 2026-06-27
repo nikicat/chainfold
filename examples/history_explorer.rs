@@ -22,8 +22,8 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Hist, HistBackend, HistStore, HistoryError, Positioned, watch_hist};
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, LogCache, SubscribeTransport, rpc_retry_layer,
-    versioned_path,
+    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, SubscribeTransport,
+    rpc_retry_layer, versioned_path,
 };
 use chrono::NaiveDate;
 use clap::Parser;
@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    let provider = ProviderBuilder::new().connect_client(client);
+    let provider = ChainProvider::discover(ProviderBuilder::new().connect_client(client)).await?;
     let db_path = versioned_path(&args.db);
     let store = Arc::new(LogCache::open(&db_path)?);
 
@@ -226,7 +226,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store2 = Arc::new(LogCache::open(&db_path)?);
         let url2: Url = args.rpc_url.parse()?;
         let client2 = ClientBuilder::default().layer(rpc_retry_layer()).http(url2);
-        let provider2 = ProviderBuilder::new().connect_client(client2);
+        let provider2 =
+            ChainProvider::discover(ProviderBuilder::new().connect_client(client2)).await?;
         let backend2 =
             EvmLogHistory::with_options(provider2, store2, address, topics, args.chunk_size, 12)
                 .await?;

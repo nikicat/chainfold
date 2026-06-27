@@ -7,7 +7,9 @@ use alloy::network::Ethereum;
 use alloy::primitives::B256;
 use alloy::providers::Provider;
 use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
-use chainfold::evm::{CacheDb, EvmEvent, EvmLogHistory, EvmPosition, SubscribeTransport};
+use chainfold::evm::{
+    CacheDb, ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, SubscribeTransport,
+};
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 
@@ -23,7 +25,7 @@ struct PrintOpts {
 }
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
-    provider: &P,
+    provider: &ChainProvider<P>,
     cache: &CacheDb,
     db_path: &str,
     config: &Config,

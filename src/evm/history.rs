@@ -45,6 +45,7 @@ use crate::arch::{
     ItemStream, Positioned, Store, Timestamp,
 };
 use crate::evm::cache::{BlockHeader, LogCache, compute_filter_hash};
+use crate::evm::chain_provider::ChainProvider;
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
@@ -68,14 +69,13 @@ const DEFAULT_BLOCK_TIME: u64 = 12;
 // ============================================================
 
 pub struct EvmLogHistory<P> {
-    provider: P,
+    provider: ChainProvider<P>,
     store: Arc<LogCache>,
     index: Arc<LogIndex>,
     filter_hash: [u8; 32],
     address: [u8; 20],
     topics: [Option<[u8; 32]>; 4],
     chunk_size: u64,
-    chain_id: u64,
 
     // Reactive tip stores. `best`/`safe` are stubs whose watch channels
     // are closed at construction — they emit the initial `earliest`
@@ -96,8 +96,11 @@ pub struct EvmLogHistory<P> {
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
+    /// Convenience constructor with default chunk size / block time. The
+    /// chain id rides in the [`ChainProvider`]; build one with
+    /// [`ChainProvider::new`] (known) or [`ChainProvider::discover`] (fetch).
     pub async fn new(
-        provider: P,
+        provider: ChainProvider<P>,
         store: Arc<LogCache>,
         address: [u8; 20],
         topics: [Option<[u8; 32]>; 4],
@@ -114,7 +117,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     pub async fn with_options(
-        provider: P,
+        provider: ChainProvider<P>,
         store: Arc<LogCache>,
         address: [u8; 20],
         topics: [Option<[u8; 32]>; 4],
@@ -122,12 +125,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         block_time: u64,
     ) -> Result<Arc<Self>, HistoryError> {
         let filter_hash = compute_filter_hash(&address, &topics);
+        let chain_id = provider.chain_id();
 
-        let chain_id = provider
-            .get_chain_id()
-            .instrument(rpc_span(RpcMethod::ChainId))
-            .await
-            .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
         let anchor_block = provider
             .get_block_number()
             .instrument(rpc_span(RpcMethod::BlockNumber))
@@ -167,7 +166,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             address,
             topics,
             chunk_size,
-            chain_id,
             latest_store: Store::new(latest_rx),
             best_store: Store::new(best_rx),
             safe_store: Store::new(safe_rx),
@@ -200,7 +198,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     pub fn chain_id(&self) -> u64 {
-        self.chain_id
+        self.provider.chain_id()
     }
 
     pub fn filter_hash(&self) -> &[u8; 32] {
@@ -692,11 +690,12 @@ mod tests {
         store: Arc<LogCache>,
     ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>> {
         let asserter = Asserter::new();
-        // get_chain_id, get_block_number for anchor
-        asserter.push_success(&U64::from(TEST_CHAIN));
+        // Only get_block_number for the anchor now — chain id rides in the
+        // ChainProvider, so no get_chain_id round-trip. The anchor block-header
+        // lookup hits the cache (warm_cache has block 200).
         asserter.push_success(&U64::from(200u64));
-        // anchor block-header lookup hits the cache (warm_cache has block 200).
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
+        let provider = ChainProvider::new(provider, TEST_CHAIN);
         EvmLogHistory::with_options(provider, store, ADDR, TOPICS, 100, 12)
             .await
             .unwrap()

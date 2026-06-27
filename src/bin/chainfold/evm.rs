@@ -6,12 +6,14 @@ use std::path::PathBuf;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::evm::{CacheDb, RpcMethod, rpc_retry_layer, rpc_span, versioned_path};
+use chainfold::evm::{
+    CacheDb, ChainProvider, RpcMethod, rpc_retry_layer, rpc_span, versioned_path,
+};
 use tracing::Instrument;
 
 use crate::chains::ChainResolver;
 use crate::cli::{EvmArgs, EvmCommand};
-use crate::config::{Config, ConfigError};
+use crate::config::{ChainIdCheck, Config, ConfigError};
 
 /// Default cache DB location: `$XDG_CACHE_HOME/chainfold/chainfold.db`.
 /// Falls back to `./chainfold.db` if no XDG cache dir is resolvable.
@@ -71,7 +73,9 @@ pub async fn run(
 
     let url: Url = rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    let provider = ProviderBuilder::new().connect_client(client);
+    // The chain id is already resolved from args — bundle it into the provider
+    // so the EVM layer reads it for free instead of re-fetching eth_chainId.
+    let provider = ChainProvider::new(ProviderBuilder::new().connect_client(client), chain_id);
 
     let db_path_buf = args.db.clone().unwrap_or_else(default_db_path);
     if let Some(parent) = db_path_buf.parent()
@@ -82,12 +86,19 @@ pub async fn run(
     let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = CacheDb::open(&db_path)?;
 
-    let rpc_chain_id = provider
-        .get_chain_id()
-        .instrument(rpc_span(RpcMethod::ChainId))
-        .await?;
-    if rpc_chain_id != chain_id {
-        eprintln!("warning: requested chain {chain_id} but RPC reports chain {rpc_chain_id}");
+    match config.chain_id_check() {
+        ChainIdCheck::Verify => {
+            let rpc_chain_id = provider
+                .get_chain_id()
+                .instrument(rpc_span(RpcMethod::ChainId))
+                .await?;
+            if rpc_chain_id != chain_id {
+                eprintln!(
+                    "warning: requested chain {chain_id} but RPC reports chain {rpc_chain_id}"
+                );
+            }
+        }
+        ChainIdCheck::Trust => {}
     }
 
     match &args.command {

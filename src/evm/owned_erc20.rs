@@ -32,7 +32,7 @@ use alloy::network::Ethereum;
 use alloy::providers::Provider;
 
 use crate::arch::{HistStore, HistoryError};
-use crate::evm::{EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC};
+use crate::evm::{ChainProvider, EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC};
 use crate::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 
 /// Source key for outgoing transfers (`owner == from`).
@@ -63,8 +63,11 @@ where
     /// Open both per-topic histories. Each shares `store` but uses its own
     /// filter (different `topics`), so their scanned-range and log
     /// bookkeeping stays separate.
+    /// Open both per-topic histories with default chunk size / block time.
+    /// The chain id rides in the [`ChainProvider`]; `OwnedErc20` just forwards
+    /// it to the inner histories and never talks to the RPC itself.
     pub async fn new(
-        provider: P,
+        provider: ChainProvider<P>,
         store: Arc<LogCache>,
         owner: [u8; 20],
         token_address: [u8; 20],
@@ -73,7 +76,7 @@ where
     }
 
     pub async fn with_options(
-        provider: P,
+        provider: ChainProvider<P>,
         store: Arc<LogCache>,
         owner: [u8; 20],
         token_address: [u8; 20],

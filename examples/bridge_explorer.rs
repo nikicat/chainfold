@@ -25,7 +25,8 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{HistStore, Position};
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
+    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer,
+    versioned_path,
 };
 use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 use clap::Parser;
@@ -121,7 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Setting up '{}' from {}...", key, args.rpc_url[i]);
         let url: Url = args.rpc_url[i].parse()?;
         let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-        let provider = ProviderBuilder::new().connect_client(client);
+        let provider =
+            ChainProvider::discover(ProviderBuilder::new().connect_client(client)).await?;
         let address = parse_hex_address(&args.address[i])?;
 
         let db_dir = format!("{}/{}", args.db.trim_end_matches('/'), key);

@@ -23,7 +23,7 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
 
-use chainfold::evm::{EvmLogHistory, LogCache, SubscribeTransport};
+use chainfold::evm::{ChainProvider, EvmLogHistory, LogCache, SubscribeTransport};
 
 use common::anvil::{local, skip_no_anvil};
 
@@ -61,6 +61,9 @@ async fn live_event_latency_ws() {
         .connect_ws(WsConnect::new(ws_url.as_str()))
         .await
         .expect("ws connect");
+    let provider = ChainProvider::discover(provider)
+        .await
+        .expect("discover chain id");
 
     let (_tmp, db_path) = temp_db();
     let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
@@ -124,7 +127,10 @@ async fn poll_drain_populates_scanned_ranges() {
         return;
     };
 
-    let provider = ProviderBuilder::new().connect_http(anvil.endpoint_url());
+    let provider =
+        ChainProvider::discover(ProviderBuilder::new().connect_http(anvil.endpoint_url()))
+            .await
+            .expect("discover chain id");
     let (_tmp, db_path) = temp_db();
     let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
 
@@ -181,7 +187,10 @@ async fn resume_seeds_from_current_tip() {
         return;
     };
 
-    let provider = ProviderBuilder::new().connect_http(anvil.endpoint_url());
+    let provider =
+        ChainProvider::discover(ProviderBuilder::new().connect_http(anvil.endpoint_url()))
+            .await
+            .expect("discover chain id");
     let (_tmp, db_path) = temp_db();
     let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
 

@@ -39,6 +39,29 @@ pub enum ConfigError {
 pub struct Config {
     pub provider: Option<ProviderConfig>,
     pub etherscan: Option<EtherscanConfig>,
+    pub evm: Option<EvmConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct EvmConfig {
+    /// What to do about the RPC's chain id on startup. Defaults to
+    /// [`ChainIdCheck::Verify`]. In TOML: `chain_id_check = "verify"` | `"trust"`.
+    pub chain_id_check: Option<ChainIdCheck>,
+}
+
+/// Whether to confirm the RPC serves the requested chain. A closed choice
+/// rather than a bare bool, so the config reads `"verify"` / `"trust"` instead
+/// of a `true`/`false` whose meaning you have to remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChainIdCheck {
+    /// Cross-check the RPC's reported chain id against the requested chain
+    /// (one `eth_chainId` call). The safe default.
+    #[default]
+    Verify,
+    /// Trust the configured chain id; skip the check and its `eth_chainId`
+    /// round-trip. Use only when you control the endpoint.
+    Trust,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -156,6 +179,15 @@ impl Config {
         self.etherscan.as_ref().map(|e| e.api_key.as_str())
     }
 
+    /// How to treat the RPC's chain id on startup. Defaults to
+    /// [`ChainIdCheck::Verify`] when unset.
+    pub fn chain_id_check(&self) -> ChainIdCheck {
+        self.evm
+            .as_ref()
+            .and_then(|e| e.chain_id_check)
+            .unwrap_or_default()
+    }
+
     /// Print resolved config with API key masked.
     pub fn show(&self) {
         println!("[provider]");
@@ -173,6 +205,8 @@ impl Config {
             Some(e) => println!("  api_key = {}", mask(&e.api_key)),
             None => println!("  (no etherscan config)"),
         }
+        println!("[evm]");
+        println!("  chain_id_check = {:?}", self.chain_id_check());
     }
 }
 
@@ -334,6 +368,7 @@ mod tests {
                 }),
             }),
             etherscan: None,
+            evm: None,
         }
     }
 
@@ -361,6 +396,7 @@ mod tests {
         let c = Config {
             provider: None,
             etherscan: None,
+            evm: None,
         };
         assert!(c.alchemy_url(1).is_none());
     }
@@ -370,6 +406,7 @@ mod tests {
         let c = Config {
             provider: Some(ProviderConfig { alchemy: None }),
             etherscan: None,
+            evm: None,
         };
         assert!(c.alchemy_url(1).is_none());
     }

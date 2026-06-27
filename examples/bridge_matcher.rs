@@ -31,7 +31,8 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::evm::{
-    EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer, versioned_path,
+    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer,
+    versioned_path,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
@@ -185,7 +186,7 @@ async fn open_history(
 > {
     let url: Url = rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    let provider = ProviderBuilder::new().connect_client(client);
+    let provider = ChainProvider::discover(ProviderBuilder::new().connect_client(client)).await?;
     std::fs::create_dir_all(db_subdir).ok();
     let db_path = versioned_path(&format!("{db_subdir}/log_store.db"));
     let store = Arc::new(LogCache::open(&db_path)?);

@@ -16,7 +16,9 @@ use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Hist, HistBackend};
-use chainfold::evm::{EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC};
+use chainfold::evm::{
+    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC,
+};
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
@@ -31,7 +33,9 @@ async fn build_history(
     chunk_size: u64,
 ) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static + use<>>> {
     let store = Arc::new(LogCache::open(db_path.to_str().unwrap()).expect("open store"));
-    let provider = ProviderBuilder::new().connect_http(endpoint);
+    let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint))
+        .await
+        .expect("discover chain id");
     EvmLogHistory::with_options(
         provider,
         store,

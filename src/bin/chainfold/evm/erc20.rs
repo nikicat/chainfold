@@ -7,8 +7,8 @@ use alloy::primitives::U256;
 use alloy::providers::Provider;
 use chainfold::arch::{Position, Positioned, watch_hist};
 use chainfold::evm::{
-    CacheDb, Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, OUT_KEY, OwnedErc20, SubscribeTransport,
-    apply_transfer, fetch_erc20_metadata,
+    CacheDb, ChainProvider, Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, OUT_KEY, OwnedErc20,
+    SubscribeTransport, apply_transfer, fetch_erc20_metadata,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -19,7 +19,7 @@ use crate::fmt::{self, FmtContext};
 use crate::util::{parse_hex_address, resolve_range};
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
-    provider: &P,
+    provider: &ChainProvider<P>,
     cache: &CacheDb,
     db_path: &str,
     evm_args: &EvmArgs,
