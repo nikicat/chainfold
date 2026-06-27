@@ -120,8 +120,8 @@ impl LogCache {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO cached_logs
                  (filter_hash, block_number, log_index, address, topic0, topic1, topic2, topic3,
-                  data, block_hash, transaction_hash, transaction_index)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  data, block_hash, transaction_hash, transaction_index, block_timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for log in logs {
                 let Some(block_hash) = log.block_hash else {
@@ -141,6 +141,7 @@ impl LogCache {
                     block_hash.as_slice(),
                     log.transaction_hash.map(|h| h.0.to_vec()),
                     log.transaction_index.unwrap_or(0) as i64,
+                    log.block_timestamp.map(|t| t as i64),
                 ])?;
             }
         }
@@ -161,7 +162,7 @@ impl LogCache {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT block_number, log_index, address, topic0, topic1, topic2, topic3,
-                    data, block_hash, transaction_hash, transaction_index
+                    data, block_hash, transaction_hash, transaction_index, block_timestamp
              FROM cached_logs
              WHERE filter_hash = ?1 AND block_hash = ?2 AND log_index = ?3
              LIMIT 1",
@@ -188,7 +189,7 @@ impl LogCache {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT block_number, log_index, address, topic0, topic1, topic2, topic3,
-                    data, block_hash, transaction_hash, transaction_index
+                    data, block_hash, transaction_hash, transaction_index, block_timestamp
              FROM cached_logs
              WHERE filter_hash = ?1 AND block_number >= ?2 AND block_number <= ?3
                AND block_hash NOT IN (SELECT block_hash FROM reorged_blocks)
@@ -440,6 +441,7 @@ fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
     let block_hash: Vec<u8> = row.get(8)?;
     let tx_hash: Option<Vec<u8>> = row.get(9)?;
     let tx_index: i64 = row.get(10)?;
+    let block_timestamp: Option<i64> = row.get(11)?;
 
     let mut topics = Vec::new();
     for bytes in [topic0, topic1, topic2, topic3].into_iter().flatten() {
@@ -457,7 +459,7 @@ fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
         },
         block_hash: Some(B256::from_slice(&block_hash)),
         block_number: Some(block_number as u64),
-        block_timestamp: None,
+        block_timestamp: block_timestamp.map(|t| t as u64),
         transaction_hash: tx_hash.map(|b| B256::from_slice(&b)),
         transaction_index: Some(tx_index as u64),
         log_index: Some(log_index as u64),
@@ -539,6 +541,20 @@ mod tests {
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].block_number, log.block_number);
         assert_eq!(retrieved[0].log_index, log.log_index);
+    }
+
+    #[test]
+    fn logs_preserve_block_timestamp() {
+        // The block_timestamp column survives the SQLite round-trip when the
+        // provider supplied it, and stays NULL/None when it didn't.
+        let store = LogCache::open_in_memory().unwrap();
+        let mut with_ts = make_test_log(100, 0, BLOCK_HASH_A);
+        with_ts.block_timestamp = Some(1_700_000_123);
+        let without_ts = make_test_log(101, 0, BLOCK_HASH_B); // block_timestamp: None
+        store.insert_logs(&FH, &[with_ts, without_ts]).unwrap();
+        let got = store.get_logs_in_range(&FH, 100, 101).unwrap();
+        assert_eq!(got[0].block_timestamp, Some(1_700_000_123));
+        assert_eq!(got[1].block_timestamp, None);
     }
 
     #[test]

@@ -236,6 +236,17 @@ pub(crate) fn migrations() -> rusqlite_migration::Migrations<'static> {
         ALTER TABLE event_signatures ADD COLUMN abi_json TEXT;
         ",
         ),
+        rusqlite_migration::M::up(
+            "
+        -- Per-log block timestamp, when the provider includes it on the
+        -- eth_getLogs response (a non-standard but common extension). Lets the
+        -- query path stamp EvmEvent.timestamp directly, skipping the
+        -- eth_getBlockByNumber header fetch. Nullable: most providers omit it,
+        -- and rows written before this column existed have NULL — in both
+        -- cases the reader falls back to the cached block header.
+        ALTER TABLE cached_logs ADD COLUMN block_timestamp INTEGER;
+        ",
+        ),
     ])
 }
 

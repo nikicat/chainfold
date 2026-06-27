@@ -398,10 +398,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistBackend<EvmEvent
             async move {
                 match result {
                     Ok(log) => {
-                        let bn = log.block_number.unwrap_or(0);
-                        let header = ensure_block_header_via(&provider, &store, bn).await?;
                         let mut event = log_to_evm_event(&log);
-                        event.timestamp = header.timestamp;
+                        // Only round-trip to a block header when the log didn't
+                        // already carry its timestamp.
+                        if log.block_timestamp.is_none() {
+                            let bn = log.block_number.unwrap_or(0);
+                            event.timestamp = ensure_block_header_via(&provider, &store, bn)
+                                .await?
+                                .timestamp;
+                        }
                         let pos = event.position();
                         Ok(Positioned::new(event, pos))
                     }
@@ -512,7 +517,9 @@ fn log_to_evm_event(log: &Log) -> EvmEvent {
     EvmEvent {
         contract_address: addr,
         block_number: log.block_number.unwrap_or(0),
-        timestamp: 0,
+        // Provider-supplied per-log timestamp when present; otherwise 0, and
+        // the caller fills it from the (cached) block header.
+        timestamp: log.block_timestamp.unwrap_or(0),
         block_hash,
         log_index: log.log_index.unwrap_or(0) as u32,
         tx_hash,
@@ -591,6 +598,11 @@ where
 
             let end_header = ensure_block_header_via(&provider, &store, to).await?;
             for log in &logs {
+                // Logs that carry their own timestamp need no header — the
+                // query path reads it straight off the persisted log.
+                if log.block_timestamp.is_some() {
+                    continue;
+                }
                 if let Some(bn) = log.block_number {
                     let _ = ensure_block_header_via(&provider, &store, bn).await;
                 }
@@ -760,6 +772,39 @@ mod tests {
         // block 100 header inserted with GENESIS_TS + 1200
         assert_eq!(items[0].item.timestamp, GENESIS_TS + 1200);
         assert_eq!(items[2].item.timestamp, GENESIS_TS + 1212);
+    }
+
+    /// When a log carries its own `block_timestamp`, the walk stamps the event
+    /// from it and never fetches the block header — proven by leaving no
+    /// header cached for that block and no `get_block_by_number` queued on the
+    /// mock provider, so a header fetch would error the walk.
+    #[tokio::test]
+    async fn iter_uses_log_block_timestamp_without_header_fetch() {
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
+        let fh = compute_filter_hash(&ADDR, &TOPICS);
+        // Anchor header (block 200) so construction is fully cache-served.
+        cache
+            .insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS)
+            .unwrap();
+        cache
+            .insert_block_header(200, &BH_200, &BH_101, GENESIS_TS + 2400)
+            .unwrap();
+        // A log at block 150 WITH a timestamp and deliberately NO header for 150.
+        let mut log = make_log(150, 0, [0x9A; 32]);
+        log.block_timestamp = Some(GENESIS_TS + 1800);
+        cache.insert_logs(&fh, std::slice::from_ref(&log)).unwrap();
+        cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();
+
+        let history = make_history(cache).await;
+        let backend: Arc<dyn HistBackend<_, _>> = history.clone();
+        let hist = Hist::new(
+            backend,
+            EvmPosition::new(149, u32::MAX),
+            EvmPosition::new(150, u32::MAX),
+        );
+        let items = collect(hist).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item.timestamp, GENESIS_TS + 1800);
     }
 
     #[tokio::test]
