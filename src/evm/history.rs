@@ -25,6 +25,7 @@
 //! current snapshot but will not advance until a tip update arrives —
 //! callers can also drive the tip manually via [`Self::update_tip`].
 
+use std::future::IntoFuture;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -37,6 +38,7 @@ use futures_util::StreamExt;
 use futures_util::stream::{empty, once, poll_fn};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::arch::{
     AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
@@ -44,6 +46,7 @@ use crate::arch::{
 };
 use crate::evm::cache::{BlockHeader, LogCache, compute_filter_hash};
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
+use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
 use crate::evm::types::{EvmEvent, EvmPosition};
 
@@ -122,10 +125,12 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
 
         let chain_id = provider
             .get_chain_id()
+            .instrument(rpc_span(RpcMethod::ChainId))
             .await
             .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
         let anchor_block = provider
             .get_block_number()
+            .instrument(rpc_span(RpcMethod::BlockNumber))
             .await
             .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))?;
         let anchor_timestamp = ensure_block_header_via(&provider, &store, anchor_block)
@@ -324,13 +329,12 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     async fn latest_block_number(&self) -> Result<u64, HistoryError> {
-        tracing::debug!("eth_blockNumber");
         let n = self
             .provider
             .get_block_number()
+            .instrument(rpc_span(RpcMethod::BlockNumber))
             .await
             .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))?;
-        tracing::debug!(block_number = n, "eth_blockNumber returned");
         Ok(n)
     }
 
@@ -530,14 +534,15 @@ where
         .get_block_header(block_number)
         .map_err(|e| HistoryError::internal(e.to_string()))?
     {
-        tracing::trace!(block_number, "block header cache hit");
+        cache_event(CacheLayer::BlockHeader, CacheOutcome::Hit);
         return Ok(header);
     }
-
-    tracing::debug!(block_number, "eth_getBlockByNumber");
+    cache_event(CacheLayer::BlockHeader, CacheOutcome::Miss);
 
     let block = provider
         .get_block_by_number(BlockNumberOrTag::Number(block_number))
+        .into_future()
+        .instrument(rpc_span(RpcMethod::GetBlockByNumber))
         .await
         .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
         .ok_or_else(|| HistoryError::internal(format!("block {block_number} not found")))?;
@@ -579,6 +584,7 @@ where
             tracing::debug!(from, to, blocks = to - from + 1, "eth_getLogs");
             let logs = provider
                 .get_logs(&filter)
+                .instrument(rpc_span(RpcMethod::GetLogs))
                 .await
                 .map_err(|e| HistoryError::internal(format!("eth_getLogs failed: {e}")))?;
             tracing::debug!(from, to, num_logs = logs.len(), "eth_getLogs returned");
@@ -800,6 +806,75 @@ mod tests {
         assert!(
             !s.contains("chain"),
             "EvmPosition Debug should not mention chain: {s}"
+        );
+    }
+
+    /// Guardrail for the "minimize RPC" guarantee: a fully-cached walk must
+    /// issue **zero** `eth_getLogs`. Counts the observability contract's RPC
+    /// spans rather than timing, so a refactor that reintroduces a network
+    /// round-trip on the warm path fails here, loudly.
+    #[tokio::test]
+    async fn warm_walk_issues_zero_get_logs() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tracing::Subscriber;
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id};
+        use tracing::subscriber::set_default;
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::registry::LookupSpan;
+
+        use crate::evm::observe::{RPC_TARGET, RpcMethod};
+
+        #[derive(Clone, Default)]
+        struct GetLogsCounter(StdArc<AtomicUsize>);
+
+        impl<S> Layer<S> for GetLogsCounter
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+                if attrs.metadata().target() != RPC_TARGET {
+                    return;
+                }
+                #[derive(Default)]
+                struct MethodField(Option<String>);
+                impl Visit for MethodField {
+                    fn record_str(&mut self, field: &Field, value: &str) {
+                        if field.name() == "method" {
+                            self.0 = Some(value.to_owned());
+                        }
+                    }
+                    fn record_debug(&mut self, _f: &Field, _v: &dyn std::fmt::Debug) {}
+                }
+                let mut found = MethodField::default();
+                attrs.record(&mut found);
+                if found.0.as_deref() == Some(RpcMethod::GetLogs.as_str()) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let (store, _) = warm_cache();
+        let history = make_history(store).await;
+        let backend: Arc<dyn HistBackend<_, _>> = history.clone();
+        let end = EvmPosition::new(200, u32::MAX);
+        let hist = Hist::new(backend, EvmPosition::earliest(), end);
+
+        // Install the counter only around the walk — make_history's setup RPCs
+        // (chain_id, block_number) happen before this and aren't counted.
+        let counter = GetLogsCounter::default();
+        let guard = set_default(tracing_subscriber::registry().with(counter.clone()));
+        let items = collect(hist).await;
+        drop(guard);
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            counter.0.load(Ordering::Relaxed),
+            0,
+            "a fully-cached walk must not issue eth_getLogs"
         );
     }
 

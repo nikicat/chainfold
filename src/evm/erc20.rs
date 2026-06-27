@@ -13,12 +13,16 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
+use std::future::IntoFuture;
+
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolEvent};
+use tracing::Instrument;
 
 use crate::arch::HistoryError;
 
 use super::cache::Erc20Cache;
+use super::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use super::types::EvmEvent;
 
 sol! {
@@ -58,13 +62,14 @@ pub async fn fetch_erc20_metadata<P: Provider<Ethereum>>(
         .get_erc20_metadata(&address, chain_id)
         .map_err(|e| HistoryError::internal(format!("cache read: {e}")))?
     {
-        tracing::debug!(addr = %Address::from_slice(&address), "erc20 metadata cache hit");
+        cache_event(CacheLayer::Erc20Metadata, CacheOutcome::Hit);
         return Ok(Erc20Metadata {
             name: cached.name,
             symbol: cached.symbol,
             decimals: cached.decimals,
         });
     }
+    cache_event(CacheLayer::Erc20Metadata, CacheOutcome::Miss);
 
     let meta = match fetch_metadata_multicall(provider, address).await {
         Ok(m) => m,
@@ -105,6 +110,7 @@ async fn fetch_metadata_multicall<P: Provider<Ethereum>>(
             Bytes::from(decimalsCall {}.abi_encode()),
         ))
         .aggregate()
+        .instrument(rpc_span(RpcMethod::Call))
         .await
         .map_err(|e| HistoryError::internal(format!("multicall3: {e}")))?;
 
@@ -149,6 +155,7 @@ async fn fetch_metadata_batch<P: Provider<Ethereum>>(
 
     batch
         .send()
+        .instrument(rpc_span(RpcMethod::Call))
         .await
         .map_err(|e| HistoryError::internal(format!("batch send: {e}")))?;
 
@@ -297,6 +304,8 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
     let result = provider
         .call(tx)
         .block(BlockNumberOrTag::Number(block).into())
+        .into_future()
+        .instrument(rpc_span(RpcMethod::Call))
         .await
         .map_err(|e| HistoryError::internal(format!("balanceOf call: {e}")))?;
 

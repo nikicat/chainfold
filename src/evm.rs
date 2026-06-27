@@ -15,6 +15,7 @@ mod cache;
 pub mod erc20;
 mod history;
 mod log_index;
+pub mod observe;
 mod owned_erc20;
 mod retry;
 mod subscriber;
@@ -37,6 +38,10 @@ pub use erc20::{
 };
 pub use history::EvmLogHistory;
 pub use log_index::{BlockPos, LogIndex, LogPage, LogRef};
+pub use observe::{
+    CACHE_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, RpcMethod, SQLITE_TARGET, SqliteOp,
+    cache_event, rpc_span, sqlite_span,
+};
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20};
 pub use retry::rpc_retry_layer;
 pub use subscriber::{AsyncCallback, EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};

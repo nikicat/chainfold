@@ -16,6 +16,7 @@ use super::LogIndex;
 use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
 use super::range_tree::{Range, install_gap_placeholder};
 use crate::arch::HistoryError;
+use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};
 
 // ============================================================
 // Fetcher
@@ -70,6 +71,8 @@ impl LogIndex {
                 // `cursor >= to` into `Done` on the next iteration.
                 WalkStep::Cached { end, .. } => cursor = end,
                 WalkStep::Wait(notify) => {
+                    // Coalesced onto a peer's in-flight fetch — an RPC saved.
+                    cache_event(CacheLayer::Singleflight, CacheOutcome::Hit);
                     notify.notified().await;
                 }
                 WalkStep::FillGap {
@@ -217,6 +220,8 @@ impl LogIndex {
                     // Tree changed; restart from current cursor.
                 }
                 WalkStep::Wait(notify) => {
+                    // Coalesced onto a peer's in-flight fetch — an RPC saved.
+                    cache_event(CacheLayer::Singleflight, CacheOutcome::Hit);
                     notify.notified().await;
                 }
             }

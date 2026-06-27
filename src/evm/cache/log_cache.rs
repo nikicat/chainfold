@@ -12,6 +12,7 @@ use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
 use alloy::rpc::types::Log;
 
 use super::{CacheError, SharedConn};
+use crate::evm::observe::{SqliteOp, sqlite_span};
 
 // ============================================================
 // Helpers
@@ -183,6 +184,7 @@ impl LogCache {
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<Log>, CacheError> {
+        let _span = sqlite_span(SqliteOp::GetLogsInRange).entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT block_number, log_index, address, topic0, topic1, topic2, topic3,
@@ -234,6 +236,7 @@ impl LogCache {
         &self,
         filter_hash: &[u8; 32],
     ) -> Result<Vec<(u64, u64)>, CacheError> {
+        let _span = sqlite_span(SqliteOp::GetScannedRanges).entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT start_block, end_block FROM scanned_ranges

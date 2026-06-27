@@ -20,6 +20,34 @@ downloading a chain.
 > status, [`blockchain_storage.md`](./blockchain_storage.md) for the
 > original design brainstorm.
 
+## Two guarantees
+
+Everything else is in service of these two properties:
+
+1. **Minimal RPC through aggressive caching.** Any block/time range is
+   fetched from the node *at most once*. Subsequent reads hit local
+   SQLite; partial overlaps fetch only the missing slice; concurrent
+   readers of the same cold gap are *singleflighted* into one
+   `eth_getLogs` (5 walkers → 1 RPC); ranges are snapped to aligned
+   chunk boundaries so slightly-different requests share cache entries.
+   A warm walk is ~98× faster than the cold one on a mainnet fork. RPC
+   is the scarce, rate-limited, billed resource — chainfold treats not
+   making a call as the default.
+
+2. **Real-time event & derived-state delivery.** Live logs reach the
+   consumer in **single-digit milliseconds end-to-end** (~3 ms measured
+   over WebSocket on local anvil); chainfold's **internal** hop — log
+   receipt → in-memory range index → consumer wake — is
+   **sub-millisecond**, because the live path never touches SQLite (the
+   durable write is drained in the background). Derived state
+   (`Matcher` correlation, balance folds) rides the same in-memory path,
+   so it updates at the same internal latency.
+
+To keep guarantee #1 from silently regressing as the code evolves, every
+RPC and cache boundary emits a structured `tracing` span/event; the CLI
+`--stats` flag tallies them into an end-of-run report, and tests assert
+on the same counts. See [Observability](#observability---stats).
+
 ## What you get
 
 * **Cached backfill** — ask for a time/block range once; subsequent
@@ -217,6 +245,42 @@ just coverage-lcov   # emits lcov.info (same format CI uploads)
 CI uploads to Codecov on every push. PRs get a status check that fails
 if patch coverage (the *changed* lines) drops below 80%, and a
 project-wide check that flags drops larger than 1%.
+
+## Observability (`--stats`)
+
+Chainfold instruments every RPC call and cache lookup with a structured
+`tracing` contract (targets `chainfold::rpc`, `chainfold::sqlite`,
+`chainfold::cache`). The `chainfold` CLI ships one consumer of it: pass
+`--stats` (or set `CHAINFOLD_STATS=1`) to print a session summary at exit.
+
+```text
+$ chainfold --stats evm --chain ethereum erc20 \
+    --address 0xA0b8…eB48 --owner 0xYour… balances
+...
+── chainfold session summary ──
+  duration                     1.84s
+  rpc calls                        7
+    eth_getLogs            3        612.4ms
+    eth_getBlockByNumber   2         98.1ms
+    eth_call               1         44.0ms
+    eth_chainId            1         21.7ms
+  sqlite reads                     6
+    get_logs_in_range      3          1.2ms
+    get_scanned_ranges     3        412µs
+  cache
+    block_header         140 hit /    3 miss  ( 97.9%)
+    erc20_metadata         0 hit /    1 miss  (  0.0%)
+    singleflight           4 hit /    0 miss  (100.0%)
+```
+
+The summary is for humans; the *same* contract is the regression guard —
+tests assert RPC counts directly (e.g. "a second walk of a cached range
+issues zero `eth_getLogs`"), so the caching guarantee can't silently
+rot. And because it's plain `tracing`, a server-side daemon embedding
+chainfold routes the identical spans to an OTLP exporter (Tempo/Jaeger)
+for distributed tracing — no separate instrumentation. The contract is
+documented in [`arch.md`](./arch.md#observability-contract) and lives in
+`src/evm/observe.rs`.
 
 ## License
 

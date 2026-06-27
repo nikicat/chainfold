@@ -383,6 +383,27 @@ Both `merge_hist_stores` tip aggregators and `BaseMatcher::changes()` aggregate 
 3. **Backends implement traits; users get a struct.** `EvmLogHistory: HistStoreBackend<EvmEvent, EvmPosition>` is wrapped in an `Arc<dyn HistStoreBackend>` and handed to consumers as a `HistStore<EvmEvent, EvmPosition>`. Consumers do not know the backend type.
 4. **No global state.** Every long-lived resource (SQLite connection, in-memory range tree, watch channel, background task) is owned by a struct with a clear `Drop`.
 
+## Observability contract
+
+The two headline guarantees — minimal RPC (§caching) and sub-ms live delivery — are only credible if they stay measurable as the code changes. Chainfold therefore emits a small, **stable** `tracing` contract at every RPC and cache boundary. It is a contract, not incidental logging: two independent consumers depend on the exact targets and field names, and it's defined in one place, `src/evm/observe.rs`.
+
+| Kind | target | span name | fields |
+|---|---|---|---|
+| RPC call (span) | `chainfold::rpc` | `rpc` | `method` |
+| SQLite read (span) | `chainfold::sqlite` | `sqlite` | `op` |
+| Cache hit/miss (event) | `chainfold::cache` | — | `layer`, `outcome` |
+
+Spans wrap the call/read and carry duration (open → close); a consumer sums wall-time per `method`/`op`. Cache events are instantaneous counters keyed by `layer` (`block_header`, `erc20_metadata`, `signature`, `singleflight`) + `outcome` (`hit`/`miss`). A `singleflight` hit means a concurrent caller was coalesced onto an in-flight fetch — an RPC *saved*.
+
+**The wire format is strings (what `tracing`/OTLP want); the emission API is typed.** `RpcMethod`, `SqliteOp`, `CacheLayer`, and `CacheOutcome` are closed enums with `as_str` / `from_wire` inverses (round-trip-tested), so a call site can't emit a stray method name and a subscriber keys its tallies by the typed value, never a raw string. Everything is DEBUG (spans) / TRACE (events) and costs nothing when no interested subscriber is installed.
+
+Two consumers, one contract:
+
+- **CLI `--stats`** (`src/bin/chainfold/stats.rs`) — a `tracing_subscriber::Layer` that tallies into an end-of-run summary (RPC calls by method + wall-time, SQLite read time, cache hit/miss). Opt-in via `--stats` or `CHAINFOLD_STATS`; it forces its own targets enabled independent of `RUST_LOG`, and writes to stderr so stdout stays pipeable.
+- **Server daemon** — embeds chainfold and routes the same spans to an OTLP exporter (Tempo/Jaeger). RPC spans nest under whatever request span the daemon opened; no chainfold-specific glue.
+
+This doubles as the **anti-regression guard** for guarantee #1: the instrumentation that feeds the human summary also feeds test assertions on RPC counts (e.g. a second walk of a cached range must issue zero `eth_getLogs`), so "minimize RPC" can't silently rot under refactors. Not-yet-instrumented: the live `eth_subscribe` stream (a single long-lived call, not a count worth minimizing).
+
 ## Future work
 
 Tracked in [refactor.md](./refactor.md) and `MEMORY.md`. The biggest unbuilt pieces are:

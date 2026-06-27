@@ -17,6 +17,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub follow: bool,
 
+    /// Print a session summary at exit: RPC calls by method (+ wall-time),
+    /// `SQLite` read time, and cache hit/miss counts. Also enabled by setting
+    /// `CHAINFOLD_STATS=1`.
+    #[arg(long, global = true)]
+    pub stats: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
