@@ -398,26 +398,6 @@ impl EvmEvent {
 }
 
 // ============================================================
-// Block / Transaction
-// ============================================================
-
-#[derive(Debug, Clone)]
-pub struct EvmBlock {
-    pub number: BlockNumber,
-    pub hash: BlockHash,
-    pub parent_hash: BlockHash,
-    pub timestamp: Timestamp,
-}
-
-#[derive(Debug, Clone)]
-pub struct EvmTransaction {
-    pub hash: TxHash,
-    pub from: Address,
-    pub to: Option<Address>,
-    pub value: u128,
-}
-
-// ============================================================
 // Asset / Amount
 // ============================================================
 
