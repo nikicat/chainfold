@@ -11,7 +11,7 @@
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use std::future::IntoFuture;
 
@@ -35,7 +35,7 @@ sol! {
 }
 
 /// Keccak256 of `Transfer(address,address,uint256)`.
-pub const TRANSFER_TOPIC: [u8; 32] = Transfer::SIGNATURE_HASH.0;
+pub const TRANSFER_TOPIC: B256 = Transfer::SIGNATURE_HASH;
 
 /// On-chain ERC20 metadata.
 pub struct Erc20Metadata {
@@ -54,7 +54,7 @@ pub struct Erc20Metadata {
 /// Handles bytes32-returning tokens (MKR, SAI) in the batch fallback path.
 pub async fn fetch_erc20_metadata<P: Provider<Ethereum>>(
     provider: &P,
-    address: [u8; 20],
+    address: Address,
     chain_id: ChainId,
     cache: &Erc20Cache,
 ) -> Result<Erc20Metadata, HistoryError> {
@@ -88,11 +88,11 @@ pub async fn fetch_erc20_metadata<P: Provider<Ethereum>>(
 
 async fn fetch_metadata_multicall<P: Provider<Ethereum>>(
     provider: &P,
-    address: [u8; 20],
+    address: Address,
 ) -> Result<Erc20Metadata, HistoryError> {
     use alloy::providers::CallItem;
 
-    let addr = Address::from_slice(&address);
+    let addr = address;
     tracing::debug!(%addr, "fetching erc20 metadata via multicall3");
 
     let (name, symbol, decimals) = provider
@@ -124,12 +124,12 @@ async fn fetch_metadata_multicall<P: Provider<Ethereum>>(
 
 async fn fetch_metadata_batch<P: Provider<Ethereum>>(
     provider: &P,
-    address: [u8; 20],
+    address: Address,
 ) -> Result<Erc20Metadata, HistoryError> {
     use alloy::network::TransactionBuilder;
     use alloy::rpc::types::TransactionRequest;
 
-    let addr = Address::from_slice(&address);
+    let addr = address;
     tracing::debug!(%addr, "fetching erc20 metadata via json-rpc batch");
 
     let name_tx = TransactionRequest::default()
@@ -171,10 +171,9 @@ async fn fetch_metadata_batch<P: Provider<Ethereum>>(
 
     if name_bytes.is_empty() && symbol_bytes.is_empty() && decimals_bytes.is_empty() {
         return Err(HistoryError::internal(format!(
-            "0x{} returned no data for name()/symbol()/decimals() — \
+            "{address:#x} returned no data for name()/symbol()/decimals() — \
              is this an ERC20 contract on this chain? \
              (passing an EOA/wallet address here will fail this way)",
-            hex::encode(address),
         )));
     }
 
@@ -184,8 +183,7 @@ async fn fetch_metadata_batch<P: Provider<Ethereum>>(
         .map_err(|_| decode_err("symbol", &address, &symbol_bytes))?;
     let decimals = decimalsCall::abi_decode_returns(&decimals_bytes).map_err(|e| {
         HistoryError::internal(format!(
-            "decimals() decode for 0x{}: {e} (raw: 0x{})",
-            hex::encode(address),
+            "decimals() decode for {address:#x}: {e} (raw: 0x{})",
             hex::encode(&decimals_bytes),
         ))
     })?;
@@ -216,20 +214,18 @@ fn decode_string_or_bytes32(data: &[u8]) -> Result<String, HistoryError> {
     ))
 }
 
-fn decode_err(field: &str, address: &[u8; 20], data: &[u8]) -> HistoryError {
+fn decode_err(field: &str, address: &Address, data: &[u8]) -> HistoryError {
     HistoryError::internal(format!(
-        "{}() decode for 0x{} failed (raw: 0x{}) — \
+        "{field}() decode for {address:#x} failed (raw: 0x{}) — \
          not a standard ERC20 (or wrong chain)?",
-        field,
-        hex::encode(address),
         hex::encode(data),
     ))
 }
 
 /// Decoded ERC20 Transfer event data.
 pub struct TransferData {
-    pub from: [u8; 20],
-    pub to: [u8; 20],
+    pub from: Address,
+    pub to: Address,
     pub amount: U256,
 }
 
@@ -239,10 +235,8 @@ pub fn decode_transfer(event: &EvmEvent) -> Option<TransferData> {
     if event.topics.len() < 3 || event.topics[0] != TRANSFER_TOPIC {
         return None;
     }
-    let mut from = [0u8; 20];
-    from.copy_from_slice(&event.topics[1][12..32]);
-    let mut to = [0u8; 20];
-    to.copy_from_slice(&event.topics[2][12..32]);
+    let from = Address::from_word(event.topics[1]);
+    let to = Address::from_word(event.topics[2]);
     let amount = if event.data.len() >= 32 {
         U256::from_be_slice(&event.data[..32])
     } else {
@@ -259,7 +253,7 @@ pub fn decode_transfer(event: &EvmEvent) -> Option<TransferData> {
 ///
 /// Non-Transfer events are returned unchanged. Pure / no I/O — fold this
 /// over a `HistStore` stream to derive a running balance.
-pub fn apply_transfer(owner: [u8; 20], balance: U256, event: &EvmEvent) -> U256 {
+pub fn apply_transfer(owner: Address, balance: U256, event: &EvmEvent) -> U256 {
     let Some(t) = decode_transfer(event) else {
         return balance;
     };
@@ -278,8 +272,8 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
     provider: &P,
     cache: &Erc20Cache,
     chain_id: ChainId,
-    token: [u8; 20],
-    owner: [u8; 20],
+    token: Address,
+    owner: Address,
     block: u64,
 ) -> Result<U256, HistoryError> {
     if let Some(cached) = cache
@@ -289,16 +283,13 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
         return Ok(cached);
     }
 
-    let calldata = balanceOfCall {
-        account: Address::from_slice(&owner),
-    }
-    .abi_encode();
+    let calldata = balanceOfCall { account: owner }.abi_encode();
 
     use alloy::network::TransactionBuilder;
     use alloy::rpc::types::TransactionRequest;
 
     let tx = TransactionRequest::default()
-        .with_to(Address::from_slice(&token))
+        .with_to(token)
         .with_input(Bytes::from(calldata));
 
     let result = provider
@@ -323,8 +314,8 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
 pub fn cached_balance_floor(
     cache: &Erc20Cache,
     chain_id: ChainId,
-    token: [u8; 20],
-    owner: [u8; 20],
+    token: Address,
+    owner: Address,
     block: u64,
 ) -> Option<(u64, U256)> {
     cache
@@ -340,13 +331,10 @@ pub fn cached_balance_floor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::B256;
     use std::sync::Arc;
 
-    fn make_transfer_event(from: [u8; 20], to: [u8; 20], amount: U256) -> EvmEvent {
-        let mut topic1 = [0u8; 32];
-        topic1[12..32].copy_from_slice(&from);
-        let mut topic2 = [0u8; 32];
-        topic2[12..32].copy_from_slice(&to);
+    fn make_transfer_event(from: Address, to: Address, amount: U256) -> EvmEvent {
         let mut data = vec![0u8; 32];
         amount
             .to_be_bytes::<32>()
@@ -355,21 +343,21 @@ mod tests {
             .for_each(|(i, b)| data[i] = *b);
 
         EvmEvent {
-            contract_address: [0x42; 20],
+            contract_address: Address::repeat_byte(0x42),
             block_number: 100,
             timestamp: 1000,
-            block_hash: [0; 32],
+            block_hash: B256::ZERO,
             log_index: 0,
-            tx_hash: [0; 32],
-            topics: vec![TRANSFER_TOPIC, topic1, topic2],
+            tx_hash: B256::ZERO,
+            topics: vec![TRANSFER_TOPIC, from.into_word(), to.into_word()],
             data,
         }
     }
 
     #[test]
     fn apply_incoming_adds() {
-        let owner = [0x01u8; 20];
-        let other = [0x02u8; 20];
+        let owner = Address::repeat_byte(0x01);
+        let other = Address::repeat_byte(0x02);
         let event = make_transfer_event(other, owner, U256::from(100));
         assert_eq!(
             apply_transfer(owner, U256::from(50), &event),
@@ -379,8 +367,8 @@ mod tests {
 
     #[test]
     fn apply_outgoing_subtracts() {
-        let owner = [0x01u8; 20];
-        let other = [0x02u8; 20];
+        let owner = Address::repeat_byte(0x01);
+        let other = Address::repeat_byte(0x02);
         let event = make_transfer_event(owner, other, U256::from(30));
         assert_eq!(
             apply_transfer(owner, U256::from(50), &event),
@@ -390,23 +378,23 @@ mod tests {
 
     #[test]
     fn apply_underflow_saturates_to_zero() {
-        let owner = [0x01u8; 20];
-        let other = [0x02u8; 20];
+        let owner = Address::repeat_byte(0x01);
+        let other = Address::repeat_byte(0x02);
         let event = make_transfer_event(owner, other, U256::from(100));
         assert_eq!(apply_transfer(owner, U256::from(50), &event), U256::ZERO);
     }
 
     #[test]
     fn apply_non_transfer_is_noop() {
-        let owner = [0x01u8; 20];
+        let owner = Address::repeat_byte(0x01);
         let event = EvmEvent {
-            contract_address: [0x42; 20],
+            contract_address: Address::repeat_byte(0x42),
             block_number: 100,
             timestamp: 1000,
-            block_hash: [0; 32],
+            block_hash: B256::ZERO,
             log_index: 0,
-            tx_hash: [0; 32],
-            topics: vec![[0xFF; 32]],
+            tx_hash: B256::ZERO,
+            topics: vec![B256::repeat_byte(0xFF)],
             data: vec![],
         };
         assert_eq!(
@@ -417,9 +405,9 @@ mod tests {
 
     #[test]
     fn apply_unrelated_transfer_is_noop() {
-        let owner = [0x01u8; 20];
-        let other_a = [0x02u8; 20];
-        let other_b = [0x03u8; 20];
+        let owner = Address::repeat_byte(0x01);
+        let other_a = Address::repeat_byte(0x02);
+        let other_b = Address::repeat_byte(0x03);
         let event = make_transfer_event(other_a, other_b, U256::from(100));
         assert_eq!(
             apply_transfer(owner, U256::from(50), &event),
@@ -429,8 +417,8 @@ mod tests {
 
     #[test]
     fn cached_balance_floor_walks_back() {
-        let owner = [0x01u8; 20];
-        let token = [0x42u8; 20];
+        let owner = Address::repeat_byte(0x01);
+        let token = Address::repeat_byte(0x42);
         let cache = Arc::new(Erc20Cache::open_in_memory().unwrap());
 
         cache

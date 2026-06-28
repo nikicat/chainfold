@@ -18,7 +18,7 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
@@ -30,8 +30,8 @@ use common::anvil::{local, skip_no_anvil};
 // Filter that matches no contract — push-path mechanics are exercised
 // purely by new-head deliveries (empty pages). Independent of any
 // contract emitting events.
-const SENTINEL_TOPIC: [u8; 32] = [0xCC; 32];
-const SENTINEL_ADDR: [u8; 20] = [0xDE; 20];
+const SENTINEL_TOPIC: B256 = B256::repeat_byte(0xCC);
+const SENTINEL_ADDR: Address = Address::repeat_byte(0xDE);
 
 fn temp_db() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");

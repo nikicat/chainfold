@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy::network::Ethereum;
+use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 
 use crate::arch::{HistStore, HistoryError};
@@ -40,18 +41,16 @@ pub const OUT_KEY: &str = "out";
 /// Source key for incoming transfers (`owner == to`).
 pub const IN_KEY: &str = "in";
 
-/// Pad a 20-byte address to a 32-byte topic by left-padding with 12 zero
-/// bytes — the EVM convention for indexed `address` event parameters.
-fn address_to_topic(addr: [u8; 20]) -> [u8; 32] {
-    let mut t = [0u8; 32];
-    t[12..].copy_from_slice(&addr);
-    t
+/// The 32-byte topic word for an indexed `address` event parameter — the
+/// address left-padded with 12 zero bytes (alloy's [`Address::into_word`]).
+fn address_to_topic(addr: Address) -> B256 {
+    addr.into_word()
 }
 
 /// ERC20 transfers from-or-to a fixed owner address on a single token.
 pub struct OwnedErc20<P: Provider<Ethereum> + Clone + Send + Sync + 'static> {
-    owner: [u8; 20],
-    token_address: [u8; 20],
+    owner: Address,
+    token_address: Address,
     out_history: Arc<EvmLogHistory<P>>,
     in_history: Arc<EvmLogHistory<P>>,
 }
@@ -69,8 +68,8 @@ where
     pub async fn new(
         provider: ChainProvider<P>,
         store: Arc<LogCache>,
-        owner: [u8; 20],
-        token_address: [u8; 20],
+        owner: Address,
+        token_address: Address,
     ) -> Result<Self, HistoryError> {
         Self::with_options(provider, store, owner, token_address, 1000, 12).await
     }
@@ -78,16 +77,14 @@ where
     pub async fn with_options(
         provider: ChainProvider<P>,
         store: Arc<LogCache>,
-        owner: [u8; 20],
-        token_address: [u8; 20],
+        owner: Address,
+        token_address: Address,
         chunk_size: u64,
         block_time: u64,
     ) -> Result<Self, HistoryError> {
         let owner_topic = address_to_topic(owner);
-        let out_topics: [Option<[u8; 32]>; 4] =
-            [Some(TRANSFER_TOPIC), Some(owner_topic), None, None];
-        let in_topics: [Option<[u8; 32]>; 4] =
-            [Some(TRANSFER_TOPIC), None, Some(owner_topic), None];
+        let out_topics: [Option<B256>; 4] = [Some(TRANSFER_TOPIC), Some(owner_topic), None, None];
+        let in_topics: [Option<B256>; 4] = [Some(TRANSFER_TOPIC), None, Some(owner_topic), None];
 
         let out_history = EvmLogHistory::with_options(
             provider.clone(),
@@ -116,12 +113,12 @@ where
         })
     }
 
-    pub fn owner(&self) -> &[u8; 20] {
-        &self.owner
+    pub fn owner(&self) -> Address {
+        self.owner
     }
 
-    pub fn token_address(&self) -> &[u8; 20] {
-        &self.token_address
+    pub fn token_address(&self) -> Address {
+        self.token_address
     }
 
     /// Update both inner histories' `latest_store` from the chain. Required
@@ -186,11 +183,11 @@ mod tests {
 
     #[test]
     fn address_to_topic_left_pads_with_zero() {
-        let addr = [0xAB; 20];
+        let addr = Address::repeat_byte(0xAB);
         let topic = address_to_topic(addr);
         // First 12 bytes zero, last 20 bytes the address.
-        assert_eq!(&topic[..12], &[0u8; 12]);
-        assert_eq!(&topic[12..], &addr);
+        assert_eq!(&topic.as_slice()[..12], &[0u8; 12]);
+        assert_eq!(&topic.as_slice()[12..], addr.as_slice());
     }
 
     #[test]

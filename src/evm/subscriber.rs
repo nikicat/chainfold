@@ -289,7 +289,7 @@ where
                     return Err(HistoryError::internal("logs subscription closed"));
                 };
                 let bn = log.block_number.unwrap_or(0);
-                let bh: [u8; 32] = log.block_hash.map_or([0; 32], |h| h.0);
+                let bh = log.block_hash.unwrap_or(B256::ZERO);
                 // Single-block page — covers exactly this block. The drain
                 // task records (bn, bn) as a scanned range; if heads_stream
                 // later announces a higher tip it adds the empty tail.
@@ -317,7 +317,7 @@ where
                 // Empty page covering (last_tip, bn] — records the scanned
                 // range. Any log delivered later for an intermediate block
                 // goes through `insert_late_item`.
-                let bh: [u8; 32] = head.hash.0;
+                let bh = head.hash;
                 let page = LogPage {
                     from_block: *last_tip + 1,
                     to_block: bn,
@@ -336,7 +336,7 @@ where
 // Helpers
 // ============================================================
 
-async fn fetch_block_hash<P>(provider: &P, number: u64) -> Result<[u8; 32], HistoryError>
+async fn fetch_block_hash<P>(provider: &P, number: u64) -> Result<B256, HistoryError>
 where
     P: Provider<Ethereum>,
 {
@@ -346,8 +346,7 @@ where
         .await
         .map_err(|e| HistoryError::internal(format!("get_block_by_number({number}): {e}")))?;
     let block = block.ok_or_else(|| HistoryError::internal(format!("block {number} not found")))?;
-    let hash: B256 = block.header.hash;
-    Ok(hash.0)
+    Ok(block.header.hash)
 }
 
 // ============================================================

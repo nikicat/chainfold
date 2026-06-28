@@ -14,6 +14,7 @@ mod common;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
+use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
 use chainfold::arch::{Hist, HistBackend, Position};
 use chainfold::evm::{
@@ -28,12 +29,6 @@ use common::{
     anvil::{fork_mainnet, skip_no_anvil},
     fixtures::{FORK_BLOCK, USDC},
 };
-
-fn padded_topic(addr: &[u8; 20]) -> [u8; 32] {
-    let mut t = [0u8; 32];
-    t[12..].copy_from_slice(addr);
-    t
-}
 
 fn merged_pos_for(p: EvmPosition) -> MergedPos {
     let bytes = p.marshal();
@@ -63,7 +58,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let broad = EvmLogHistory::with_options(
         provider.clone(),
         store.clone(),
-        USDC.0.0,
+        USDC,
         [Some(TRANSFER_TOPIC), None, None, None],
         10,
         12,
@@ -89,18 +84,16 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
 
     // Pick the first transfer's `from` as the owner under test.
     let first = &all_transfers[0];
-    let from_topic = first.topics[1];
-    let mut owner = [0u8; 20];
-    owner.copy_from_slice(&from_topic[12..]);
+    let owner = Address::from_word(first.topics[1]);
     println!(
-        "Chosen owner: 0x{} (with {} surrounding transfers)",
-        hex::encode(owner),
+        "Chosen owner: {:#x} (with {} surrounding transfers)",
+        owner,
         all_transfers.len()
     );
 
     // Build the expected set: every event where owner is either `from`
     // or `to`, deduped by (block, log_index).
-    let owner_padded = padded_topic(&owner);
+    let owner_padded = owner.into_word();
     let mut expected: Vec<&EvmEvent> = all_transfers
         .iter()
         .filter(|e| {
@@ -115,7 +108,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     );
 
     // Phase B — same range via OwnedErc20.
-    let owned = OwnedErc20::with_options(provider, store, owner, USDC.0.0, 10, 12)
+    let owned = OwnedErc20::with_options(provider, store, owner, USDC, 10, 12)
         .await
         .expect("OwnedErc20");
     owned.update_tips().await.expect("update_tips");
@@ -187,8 +180,8 @@ async fn owned_erc20_empty_for_inactive_address() {
 
     // An address with no real-world USDC activity (literally the zero
     // address — receivers of burns, but no transfers FROM it).
-    let owner = [0u8; 20];
-    let owned = OwnedErc20::with_options(provider, store, owner, USDC.0.0, 10, 12)
+    let owner = Address::ZERO;
+    let owned = OwnedErc20::with_options(provider, store, owner, USDC, 10, 12)
         .await
         .expect("OwnedErc20");
     owned.update_tips().await.expect("update_tips");
@@ -207,7 +200,7 @@ async fn owned_erc20_empty_for_inactive_address() {
         // outgoing. Verify direction is consistent if any event surfaces.
         let topic1 = item.item.value.topics.get(1).copied();
         let topic2 = item.item.value.topics.get(2).copied();
-        let owner_padded = padded_topic(&owner);
+        let owner_padded = owner.into_word();
         match item.item.source_key.as_str() {
             "out" => assert_eq!(topic1, Some(owner_padded)),
             "in" => assert_eq!(topic2, Some(owner_padded)),

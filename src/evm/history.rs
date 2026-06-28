@@ -51,9 +51,9 @@ use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
 use crate::evm::types::{ChainId, EvmEvent, EvmPosition};
 
-fn fmt_topic(t: Option<&[u8; 32]>) -> String {
+fn fmt_topic(t: Option<&B256>) -> String {
     match t {
-        Some(b) => format!("0x{}", hex::encode(b)),
+        Some(b) => format!("{b:#x}"),
         None => "*".into(),
     }
 }
@@ -73,8 +73,8 @@ pub struct EvmLogHistory<P> {
     store: Arc<LogCache>,
     index: Arc<LogIndex>,
     filter_hash: [u8; 32],
-    address: [u8; 20],
-    topics: [Option<[u8; 32]>; 4],
+    address: Address,
+    topics: [Option<B256>; 4],
     chunk_size: u64,
 
     // Reactive tip stores. `best`/`safe` are stubs whose watch channels
@@ -102,8 +102,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     pub async fn new(
         provider: ChainProvider<P>,
         store: Arc<LogCache>,
-        address: [u8; 20],
-        topics: [Option<[u8; 32]>; 4],
+        address: Address,
+        topics: [Option<B256>; 4],
     ) -> Result<Arc<Self>, HistoryError> {
         Self::with_options(
             provider,
@@ -119,8 +119,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     pub async fn with_options(
         provider: ChainProvider<P>,
         store: Arc<LogCache>,
-        address: [u8; 20],
-        topics: [Option<[u8; 32]>; 4],
+        address: Address,
+        topics: [Option<B256>; 4],
         chunk_size: u64,
         block_time: u64,
     ) -> Result<Arc<Self>, HistoryError> {
@@ -179,7 +179,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
 
         tracing::debug!(
             chain_id = %chain_id,
-            address = %format!("0x{}", hex::encode(address)),
+            address = %format!("{address:#x}"),
             topic0 = %fmt_topic(topics[0].as_ref()),
             topic1 = %fmt_topic(topics[1].as_ref()),
             topic2 = %fmt_topic(topics[2].as_ref()),
@@ -316,7 +316,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     fn build_filter(&self, from: Option<u64>, to: Option<u64>) -> Filter {
-        let mut filter = Filter::new().address(Address::from(self.address));
+        let mut filter = Filter::new().address(self.address);
         if let Some(f) = from {
             filter = filter.from_block(f);
         }
@@ -491,37 +491,33 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<Evm
 /// Apply `topics[0..3]` to an alloy [`Filter`] in the conventional slots
 /// (`event_signature` / `topic1` / `topic2` / `topic3`). Skips slots that
 /// are `None` (matches anything in that position).
-fn apply_topics(mut filter: Filter, topics: &[Option<[u8; 32]>; 4]) -> Filter {
+fn apply_topics(mut filter: Filter, topics: &[Option<B256>; 4]) -> Filter {
     if let Some(t) = topics[0] {
-        filter = filter.event_signature(B256::from(t));
+        filter = filter.event_signature(t);
     }
     if let Some(t) = topics[1] {
-        filter = filter.topic1(B256::from(t));
+        filter = filter.topic1(t);
     }
     if let Some(t) = topics[2] {
-        filter = filter.topic2(B256::from(t));
+        filter = filter.topic2(t);
     }
     if let Some(t) = topics[3] {
-        filter = filter.topic3(B256::from(t));
+        filter = filter.topic3(t);
     }
     filter
 }
 
 fn log_to_evm_event(log: &Log) -> EvmEvent {
-    let addr: [u8; 20] = log.address().0.0;
-    let block_hash: [u8; 32] = log.block_hash.map_or([0; 32], |h| h.0);
-    let tx_hash: [u8; 32] = log.transaction_hash.map_or([0; 32], |h| h.0);
-
     EvmEvent {
-        contract_address: addr,
+        contract_address: log.address(),
         block_number: log.block_number.unwrap_or(0),
         // Provider-supplied per-log timestamp when present; otherwise 0, and
         // the caller fills it from the (cached) block header.
         timestamp: log.block_timestamp.unwrap_or(0),
-        block_hash,
+        block_hash: log.block_hash.unwrap_or(B256::ZERO),
         log_index: log.log_index.unwrap_or(0) as u32,
-        tx_hash,
-        topics: log.topics().iter().map(|t| t.0).collect(),
+        tx_hash: log.transaction_hash.unwrap_or(B256::ZERO),
+        topics: log.topics().to_vec(),
         data: log.data().data.to_vec(),
     }
 }
@@ -552,8 +548,8 @@ where
         .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
         .ok_or_else(|| HistoryError::internal(format!("block {block_number} not found")))?;
 
-    let hash: [u8; 32] = block.header.hash.0;
-    let parent_hash: [u8; 32] = block.header.parent_hash.0;
+    let hash = block.header.hash;
+    let parent_hash = block.header.parent_hash;
     let timestamp = block.header.timestamp;
 
     store
@@ -571,8 +567,8 @@ where
 fn build_fetcher<P>(
     provider: P,
     store: Arc<LogCache>,
-    address: [u8; 20],
-    topics: [Option<[u8; 32]>; 4],
+    address: Address,
+    topics: [Option<B256>; 4],
 ) -> Fetcher
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
@@ -581,10 +577,7 @@ where
         let provider = provider.clone();
         let store = store.clone();
         Box::pin(async move {
-            let filter = Filter::new()
-                .address(Address::from(address))
-                .from_block(from)
-                .to_block(to);
+            let filter = Filter::new().address(address).from_block(from).to_block(to);
             let filter = apply_topics(filter, &topics);
             tracing::debug!(from, to, blocks = to - from + 1, "eth_getLogs");
             let logs = provider
@@ -629,27 +622,27 @@ mod tests {
     use alloy::transports::mock::Asserter;
     use futures_util::TryStreamExt;
 
-    const ADDR: [u8; 20] = [0x42; 20];
-    const TOPICS: [Option<[u8; 32]>; 4] = [None; 4];
+    const ADDR: Address = Address::repeat_byte(0x42);
+    const TOPICS: [Option<B256>; 4] = [None; 4];
     const GENESIS_TS: u64 = 1_600_000_000;
     const TEST_CHAIN: u64 = 1;
 
-    const BH_0: [u8; 32] = [0x00; 32];
-    const BH_100: [u8; 32] = [0xA0; 32];
-    const BH_101: [u8; 32] = [0xA1; 32];
-    const BH_200: [u8; 32] = [0xA2; 32];
+    const BH_0: B256 = B256::ZERO;
+    const BH_100: B256 = B256::repeat_byte(0xA0);
+    const BH_101: B256 = B256::repeat_byte(0xA1);
+    const BH_200: B256 = B256::repeat_byte(0xA2);
 
-    fn make_log(block_num: u64, log_idx: u64, block_hash: [u8; 32]) -> Log {
+    fn make_log(block_num: u64, log_idx: u64, block_hash: B256) -> Log {
         let topic0 = B256::from([0xDD; 32]);
         let data = Bytes::from(vec![0x01, 0x02]);
         let log_data = LogData::new_unchecked(vec![topic0], data);
 
         Log {
             inner: LogInner {
-                address: Address::from(ADDR),
+                address: ADDR,
                 data: log_data,
             },
-            block_hash: Some(B256::from(block_hash)),
+            block_hash: Some(block_hash),
             block_number: Some(block_num),
             block_timestamp: None,
             transaction_hash: Some(B256::from([0xCC; 32])),
@@ -664,7 +657,7 @@ mod tests {
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 
         cache
-            .insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS)
+            .insert_block_header(0, &BH_0, &B256::ZERO, GENESIS_TS)
             .unwrap();
         cache
             .insert_block_header(100, &BH_100, &BH_0, GENESIS_TS + 1200)
@@ -783,13 +776,13 @@ mod tests {
         let fh = compute_filter_hash(&ADDR, &TOPICS);
         // Anchor header (block 200) so construction is fully cache-served.
         cache
-            .insert_block_header(0, &BH_0, &[0; 32], GENESIS_TS)
+            .insert_block_header(0, &BH_0, &B256::ZERO, GENESIS_TS)
             .unwrap();
         cache
             .insert_block_header(200, &BH_200, &BH_101, GENESIS_TS + 2400)
             .unwrap();
         // A log at block 150 WITH a timestamp and deliberately NO header for 150.
-        let mut log = make_log(150, 0, [0x9A; 32]);
+        let mut log = make_log(150, 0, B256::repeat_byte(0x9A));
         log.block_timestamp = Some(GENESIS_TS + 1800);
         cache.insert_logs(&fh, std::slice::from_ref(&log)).unwrap();
         cache.record_scanned_range(&fh, 0, 200, &BH_200).unwrap();

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::network::Ethereum;
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use chainfold::arch::{Position, Positioned, watch_hist};
 use chainfold::evm::{
@@ -28,7 +28,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     _reverse: bool,
     follow: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addresses: Vec<[u8; 20]> = erc20_args
+    let addresses: Vec<Address> = erc20_args
         .address
         .iter()
         .map(|a| parse_hex_address(a))
@@ -45,7 +45,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         .map(|addr| fetch_erc20_metadata(provider, *addr, chain_id, &erc20_cache));
     let meta_results = join_all(meta_futures).await;
 
-    let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
+    let mut metadata: HashMap<Address, Erc20Metadata> = HashMap::new();
     for (addr, result) in addresses.iter().zip(meta_results) {
         let meta = result?;
         println!(
@@ -71,7 +71,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         base_url,
     };
 
-    println!("  Owner:    0x{}", hex::encode(owner));
+    println!("  Owner:    0x{}", hex::encode(owner.as_slice()));
     println!("  Tokens:   {}", addresses.len());
     println!("  Chain:    {chain_id}");
     println!("  DB:       {db_path}");
@@ -177,7 +177,7 @@ fn render_transfer(
     count: usize,
     ctx: &FmtContext<'_>,
     show_balance: bool,
-    owner: [u8; 20],
+    owner: Address,
 ) -> bool {
     let mi = &item.item;
     let event_pos = mi.value.position();

@@ -22,13 +22,13 @@ use crate::evm::observe::{SqliteOp, sqlite_span};
 ///
 /// Null topics use a 0xFF sentinel (all-ones, 32 bytes) to distinguish
 /// "no topic filter" from any real topic value.
-pub fn compute_filter_hash(address: &[u8; 20], topics: &[Option<[u8; 32]>; 4]) -> [u8; 32] {
+pub fn compute_filter_hash(address: &Address, topics: &[Option<B256>; 4]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(address);
+    hasher.update(address.as_slice());
     let sentinel = [0xFF_u8; 32];
     for topic in topics {
         match topic {
-            Some(t) => hasher.update(t),
+            Some(t) => hasher.update(t.as_slice()),
             None => hasher.update(&sentinel),
         };
     }
@@ -70,8 +70,8 @@ pub fn compute_gaps(requested: (u64, u64), scanned: &[(u64, u64)]) -> Vec<(u64, 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockHeader {
     pub height: u64,
-    pub hash: [u8; 32],
-    pub parent_hash: [u8; 32],
+    pub hash: B256,
+    pub parent_hash: B256,
     pub timestamp: u64,
 }
 
@@ -156,7 +156,7 @@ impl LogCache {
     pub fn get_log_by_ref(
         &self,
         filter_hash: &[u8; 32],
-        block_hash: &[u8; 32],
+        block_hash: &B256,
         log_index: u32,
     ) -> Result<Option<Log>, CacheError> {
         let conn = self.conn.lock().unwrap();
@@ -168,7 +168,7 @@ impl LogCache {
              LIMIT 1",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![&filter_hash[..], &block_hash[..], log_index as i64],
+            rusqlite::params![&filter_hash[..], block_hash.as_slice(), log_index as i64],
             row_to_log,
         )?;
         match rows.next() {
@@ -215,7 +215,7 @@ impl LogCache {
         filter_hash: &[u8; 32],
         start: u64,
         end: u64,
-        end_block_hash: &[u8; 32],
+        end_block_hash: &B256,
     ) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -225,7 +225,7 @@ impl LogCache {
                 &filter_hash[..],
                 start as i64,
                 end as i64,
-                &end_block_hash[..],
+                end_block_hash.as_slice(),
             ],
         )?;
         Ok(())
@@ -332,7 +332,7 @@ impl LogCache {
 
     /// Mark blocks as reorged. Logs from these blocks will be excluded from
     /// queries. Scanned ranges ending at these blocks become invalid.
-    pub fn mark_reorged(&self, blocks: &[([u8; 32], u64)]) -> Result<(), CacheError> {
+    pub fn mark_reorged(&self, blocks: &[(B256, u64)]) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
         {
@@ -340,7 +340,7 @@ impl LogCache {
                 "INSERT OR IGNORE INTO reorged_blocks (block_hash, block_number) VALUES (?1, ?2)",
             )?;
             for (hash, number) in blocks {
-                stmt.execute(rusqlite::params![&hash[..], *number as i64])?;
+                stmt.execute(rusqlite::params![hash.as_slice(), *number as i64])?;
             }
         }
         tx.commit()?;
@@ -381,15 +381,20 @@ impl LogCache {
     pub fn insert_block_header(
         &self,
         height: u64,
-        hash: &[u8; 32],
-        parent_hash: &[u8; 32],
+        hash: &B256,
+        parent_hash: &B256,
         timestamp: u64,
     ) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO cached_block_headers (height, hash, parent_hash, timestamp)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![height as i64, &hash[..], &parent_hash[..], timestamp as i64],
+            rusqlite::params![
+                height as i64,
+                hash.as_slice(),
+                parent_hash.as_slice(),
+                timestamp as i64
+            ],
         )?;
         Ok(())
     }
@@ -405,15 +410,10 @@ impl LogCache {
             let parent_bytes: Vec<u8> = row.get(1)?;
             let timestamp: i64 = row.get(2)?;
 
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&hash_bytes);
-            let mut parent_hash = [0u8; 32];
-            parent_hash.copy_from_slice(&parent_bytes);
-
             Ok(BlockHeader {
                 height,
-                hash,
-                parent_hash,
+                hash: B256::from_slice(&hash_bytes),
+                parent_hash: B256::from_slice(&parent_bytes),
                 timestamp: timestamp as u64,
             })
         })?;
@@ -476,11 +476,11 @@ mod tests {
     use super::*;
 
     const FH: [u8; 32] = [0xAA; 32];
-    const BLOCK_HASH_A: [u8; 32] = [0xBB; 32];
-    const BLOCK_HASH_B: [u8; 32] = [0xBC; 32];
-    const BLOCK_HASH_C: [u8; 32] = [0xBD; 32];
+    const BLOCK_HASH_A: B256 = B256::repeat_byte(0xBB);
+    const BLOCK_HASH_B: B256 = B256::repeat_byte(0xBC);
+    const BLOCK_HASH_C: B256 = B256::repeat_byte(0xBD);
 
-    fn make_test_log(block_num: u64, log_idx: u64, block_hash: [u8; 32]) -> Log {
+    fn make_test_log(block_num: u64, log_idx: u64, block_hash: B256) -> Log {
         let topic0 = B256::from([0xDD; 32]);
         let data = Bytes::from(vec![0x01, 0x02]);
         let log_data = LogData::new_unchecked(vec![topic0], data);
@@ -490,7 +490,7 @@ mod tests {
                 address: Address::from([0x42u8; 20]),
                 data: log_data,
             },
-            block_hash: Some(B256::from(block_hash)),
+            block_hash: Some(block_hash),
             block_number: Some(block_num),
             block_timestamp: None,
             transaction_hash: Some(B256::from([0xEE; 32])),
@@ -504,8 +504,8 @@ mod tests {
 
     #[test]
     fn filter_hash_deterministic() {
-        let addr = [0x42_u8; 20];
-        let topics = [Some([0xAA_u8; 32]), None, None, None];
+        let addr = Address::repeat_byte(0x42);
+        let topics = [Some(B256::repeat_byte(0xAA)), None, None, None];
         assert_eq!(
             compute_filter_hash(&addr, &topics),
             compute_filter_hash(&addr, &topics)
@@ -516,17 +516,17 @@ mod tests {
     fn filter_hash_different_address() {
         let topics = [None; 4];
         assert_ne!(
-            compute_filter_hash(&[0x01u8; 20], &topics),
-            compute_filter_hash(&[0x02u8; 20], &topics)
+            compute_filter_hash(&Address::repeat_byte(0x01), &topics),
+            compute_filter_hash(&Address::repeat_byte(0x02), &topics)
         );
     }
 
     #[test]
     fn filter_hash_none_vs_some() {
-        let addr = [0x42_u8; 20];
+        let addr = Address::repeat_byte(0x42);
         assert_ne!(
             compute_filter_hash(&addr, &[None, None, None, None]),
-            compute_filter_hash(&addr, &[Some([0x00u8; 32]), None, None, None])
+            compute_filter_hash(&addr, &[Some(B256::ZERO), None, None, None])
         );
     }
 

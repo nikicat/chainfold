@@ -2,6 +2,7 @@
 //! SQLite-backed [`EventSignatureCache`] so the CLI reuses the same cache
 //! file for event-signature caching.
 
+use alloy::primitives::{Address, B256};
 use async_trait::async_trait;
 use chainfold::evm::{ChainId, EventSignatureCache};
 use chainfold::signatures::{ResolvedEvent, SignatureCache, SignatureError};
@@ -25,11 +26,11 @@ impl SignatureCache for SqliteSignatureCache {
         event_name: &str,
     ) -> Result<Option<ResolvedEvent>, SignatureError> {
         self.cache
-            .get_event_signature(ChainId::new(chain_id), &address, event_name)
+            .get_event_signature(ChainId::new(chain_id), &Address::from(address), event_name)
             .map(|opt| {
                 opt.map(|(signature, topic0, abi_json)| ResolvedEvent {
                     signature,
-                    topic0,
+                    topic0: topic0.into(),
                     abi_json,
                 })
             })
@@ -46,10 +47,10 @@ impl SignatureCache for SqliteSignatureCache {
         self.cache
             .insert_event_signature(
                 ChainId::new(chain_id),
-                &address,
+                &Address::from(address),
                 event_name,
                 &entry.signature,
-                &entry.topic0,
+                &B256::from(entry.topic0),
                 entry.abi_json.as_deref(),
             )
             .map_err(|e| SignatureError::Cache(e.to_string()))

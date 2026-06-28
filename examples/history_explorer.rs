@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::network::Ethereum;
+use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
@@ -75,14 +76,6 @@ struct Args {
     measure: bool,
 }
 
-fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "address must be 20 bytes".into())
-}
-
 fn parse_datetime(s: &str) -> Result<u64, String> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| {
@@ -90,14 +83,6 @@ fn parse_datetime(s: &str) -> Result<u64, String> {
         })
         .map(|dt| dt.and_utc().timestamp() as u64)
         .map_err(|e| format!("invalid date: {e}"))
-}
-
-fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "value must be 32 bytes".into())
 }
 
 fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
@@ -168,9 +153,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    let address = parse_hex_address(&args.address)?;
-    let topic0 = args.topic0.as_deref().map(parse_hex_32).transpose()?;
-    let topics: [Option<[u8; 32]>; 4] = [topic0, None, None, None];
+    let address: Address = args.address.parse()?;
+    let topic0 = args.topic0.as_deref().map(str::parse::<B256>).transpose()?;
+    let topics: [Option<B256>; 4] = [topic0, None, None, None];
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
@@ -179,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(LogCache::open(&db_path)?);
 
     println!("Building EvmLogHistory...");
-    println!("  Address:  0x{}", hex::encode(address));
+    println!("  Address:  {address:#x}");
     if let Some(t) = &args.topic0 {
         println!("  Topic0:   {t}");
     }

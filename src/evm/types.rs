@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use alloy::primitives::{Address, B256};
+
 use crate::arch::{Position, Timestamp};
 
 // ============================================================
@@ -113,13 +115,13 @@ impl Position for EvmPosition {
 /// timestamp) so consumers don't need to round-trip the store for them.
 #[derive(Debug, Clone)]
 pub struct EvmEvent {
-    pub contract_address: [u8; 20],
+    pub contract_address: Address,
     pub block_number: u64,
     pub timestamp: Timestamp,
-    pub block_hash: [u8; 32],
+    pub block_hash: B256,
     pub log_index: u32,
-    pub tx_hash: [u8; 32],
-    pub topics: Vec<[u8; 32]>,
+    pub tx_hash: B256,
+    pub topics: Vec<B256>,
     pub data: Vec<u8>,
 }
 
@@ -139,16 +141,16 @@ impl EvmEvent {
 #[derive(Debug, Clone)]
 pub struct EvmBlock {
     pub number: u64,
-    pub hash: [u8; 32],
-    pub parent_hash: [u8; 32],
+    pub hash: B256,
+    pub parent_hash: B256,
     pub timestamp: Timestamp,
 }
 
 #[derive(Debug, Clone)]
 pub struct EvmTransaction {
-    pub hash: [u8; 32],
-    pub from: [u8; 20],
-    pub to: Option<[u8; 20]>,
+    pub hash: B256,
+    pub from: Address,
+    pub to: Option<Address>,
     pub value: u128,
 }
 
@@ -201,8 +203,8 @@ impl std::fmt::Display for Amount {
 pub struct Erc20Transfer {
     pub event: EvmEvent,
     pub token: Arc<Erc20>,
-    pub from: [u8; 20],
-    pub to: [u8; 20],
+    pub from: Address,
+    pub to: Address,
     pub amount: Amount,
 }
 
@@ -210,7 +212,7 @@ pub struct Erc20Transfer {
 pub struct Erc20Mint {
     pub event: EvmEvent,
     pub token: Arc<Erc20>,
-    pub to: [u8; 20],
+    pub to: Address,
     pub amount: Amount,
 }
 
@@ -218,7 +220,7 @@ pub struct Erc20Mint {
 pub struct Erc20Burn {
     pub event: EvmEvent,
     pub token: Arc<Erc20>,
-    pub from: [u8; 20],
+    pub from: Address,
     pub amount: Amount,
 }
 
@@ -228,7 +230,7 @@ pub struct Erc20Burn {
 
 #[derive(Debug)]
 pub struct Erc20 {
-    pub address: [u8; 20],
+    pub address: Address,
     pub symbol: String,
     pub name: String,
     pub decimals: u8,
@@ -247,6 +249,6 @@ impl Asset for Erc20 {
 #[derive(Clone)]
 pub struct Erc20Balance {
     pub token: Arc<Erc20>,
-    pub owner: [u8; 20],
+    pub owner: Address,
     pub balance: Amount,
 }

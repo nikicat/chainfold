@@ -20,6 +20,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
@@ -70,22 +71,6 @@ struct Args {
     limit: usize,
 }
 
-fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "address must be 20 bytes".into())
-}
-
-fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "value must be 32 bytes".into())
-}
-
 fn cmp_by_time(a: &MergedItem<EvmEvent>, b: &MergedItem<EvmEvent>) -> Ordering {
     a.value.timestamp.cmp(&b.value.timestamp)
 }
@@ -111,8 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let topic0 = match &args.topic0 {
-        Some(s) => parse_hex_32(s)?,
+    let topic0: B256 = match &args.topic0 {
+        Some(s) => s.parse()?,
         None => TRANSFER_TOPIC,
     };
 
@@ -124,14 +109,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
         let provider =
             ChainProvider::discover(ProviderBuilder::new().connect_client(client)).await?;
-        let address = parse_hex_address(&args.address[i])?;
+        let address: Address = args.address[i].parse()?;
 
         let db_dir = format!("{}/{}", args.db.trim_end_matches('/'), key);
         std::fs::create_dir_all(&db_dir).ok();
         let db_path = versioned_path(&format!("{db_dir}/log_store.db"));
         let store = Arc::new(LogCache::open(&db_path)?);
 
-        let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
+        let topics: [Option<B256>; 4] = [Some(topic0), None, None, None];
         let history = EvmLogHistory::with_options(
             provider.clone(),
             store,

@@ -1,15 +1,12 @@
+use alloy::primitives::Address;
 use chainfold::arch::HistStore;
 use chainfold::evm::{EvmEvent, EvmPosition};
 use chrono::NaiveDate;
 
 use crate::cli::EvmArgs;
 
-pub fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "address must be 20 bytes".into())
+pub fn parse_hex_address(s: &str) -> Result<Address, String> {
+    s.parse().map_err(|e| format!("invalid address: {e}"))
 }
 
 pub fn parse_datetime(s: &str) -> Result<u64, String> {

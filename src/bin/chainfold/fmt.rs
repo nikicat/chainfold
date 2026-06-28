@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, B256, U256};
 use chainfold::arch::Positioned;
 use chainfold::evm::{Erc20Metadata, EvmEvent, EvmPosition, decode_transfer};
 
@@ -22,21 +22,23 @@ pub fn osc8_link(url: &str, text: &str) -> String {
     format!("\x1b]8;;{url}\x07{text}\x1b]8;;\x07")
 }
 
-pub fn abbrev_addr(addr: &[u8; 20]) -> String {
-    format!("0x{}…{}", hex::encode(&addr[..3]), hex::encode(&addr[18..]))
+pub fn abbrev_addr(addr: &Address) -> String {
+    let b = addr.as_slice();
+    format!("0x{}…{}", hex::encode(&b[..3]), hex::encode(&b[18..]))
 }
 
-fn abbrev_tx_hash(hash: &[u8; 32]) -> String {
-    format!("0x{}…{}", hex::encode(&hash[..4]), hex::encode(&hash[30..]))
+fn abbrev_tx_hash(hash: &B256) -> String {
+    let b = hash.as_slice();
+    format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
 }
 
-pub fn linked_addr(addr: &[u8; 20], base_url: &str) -> String {
-    let url = format!("{}/address/0x{}", base_url, hex::encode(addr));
+pub fn linked_addr(addr: &Address, base_url: &str) -> String {
+    let url = format!("{base_url}/address/{addr:#x}");
     osc8_link(&url, &abbrev_addr(addr))
 }
 
-fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
-    let url = format!("{}/tx/0x{}", base_url, hex::encode(hash));
+fn linked_tx_hash(hash: &B256, base_url: &str) -> String {
+    let url = format!("{base_url}/tx/{hash:#x}");
     osc8_link(&url, &abbrev_tx_hash(hash))
 }
 
@@ -72,8 +74,8 @@ pub fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: us
 }
 
 pub struct FmtContext<'a> {
-    pub owner: &'a [u8; 20],
-    pub metadata: &'a HashMap<[u8; 20], Erc20Metadata>,
+    pub owner: &'a Address,
+    pub metadata: &'a HashMap<Address, Erc20Metadata>,
     pub max_sym_width: usize,
     pub max_decimals: usize,
     pub base_url: &'static str,

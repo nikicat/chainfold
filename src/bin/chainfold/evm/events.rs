@@ -4,7 +4,7 @@ use std::time::Duration;
 use alloy::dyn_abi::{DecodedEvent, DynSolValue, EventExt};
 use alloy::json_abi::Event;
 use alloy::network::Ethereum;
-use alloy::primitives::B256;
+use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
 use chainfold::evm::{
@@ -48,7 +48,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         decoder,
     };
 
-    let topics: [Option<[u8; 32]>; 4] = [Some(resolved.topic0), None, None, None];
+    let topics: [Option<B256>; 4] = [Some(resolved.topic0), None, None, None];
     let backend = EvmLogHistory::with_options(
         provider.clone(),
         Arc::new(cache.logs()),
@@ -61,11 +61,11 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let hist_store = backend.hist_store();
     let (start, end) = resolve_range(evm_args, &hist_store).await?;
 
-    println!("  Address:  0x{}", hex::encode(address));
+    println!("  Address:  {address:#x}");
     if let Some(sig) = &resolved.signature {
         println!("  Event:    {sig}");
     }
-    println!("  Topic0:   0x{}", hex::encode(resolved.topic0));
+    println!("  Topic0:   {:#x}", resolved.topic0);
     println!("  Chain:    {chain_id}");
     println!("  Range:    block {} .. {}", start.block, end.block);
     println!("  DB:       {db_path}");
@@ -115,7 +115,7 @@ struct Lookup {
     /// Canonical signature, when known (always present unless the user
     /// supplied `--topic0` directly).
     signature: Option<String>,
-    topic0: [u8; 32],
+    topic0: B256,
     /// ABI item JSON for the matched event. Only populated when `--event`
     /// was used and Sourcify/Etherscan returned an ABI.
     abi_json: Option<String>,
@@ -125,36 +125,40 @@ async fn resolve_lookup(
     cache: &CacheDb,
     config: &Config,
     chain_id: ChainId,
-    address: [u8; 20],
+    address: Address,
     args: &EventsArgs,
 ) -> Result<Lookup, Box<dyn std::error::Error>> {
     if let Some(hex) = &args.topic0 {
         return Ok(Lookup {
             signature: None,
-            topic0: parse_topic_hex(hex)?,
+            topic0: hex
+                .parse()
+                .map_err(|e| format!("invalid topic0 hex: {e}"))?,
             abi_json: None,
         });
     }
     if let Some(sig) = &args.event_sig {
         return Ok(Lookup {
             signature: Some(sig.clone()),
-            topic0: topic_from_signature(sig),
+            topic0: B256::from(topic_from_signature(sig)),
             abi_json: None,
         });
     }
     if let Some(name) = &args.event {
         let sig_cache = SqliteSignatureCache::new(cache.signatures());
+        // `signatures` is source-agnostic and speaks `[u8; 20]`/`[u8; 32]`;
+        // convert at this boundary.
         let resolved = resolve_event(
             &sig_cache,
             chain_id.get(),
-            address,
+            address.0.0,
             name,
             config.etherscan_api_key(),
         )
         .await?;
         return Ok(Lookup {
             signature: Some(resolved.signature),
-            topic0: resolved.topic0,
+            topic0: B256::from(resolved.topic0),
             abi_json: resolved.abi_json,
         });
     }
@@ -172,24 +176,13 @@ fn build_decoder(lookup: &Lookup) -> Result<Event, Box<dyn std::error::Error>> {
     Ok(event)
 }
 
-fn parse_topic_hex(s: &str) -> Result<[u8; 32], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid topic0 hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "topic0 must be 32 bytes".into())
-}
-
 fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize, opts: &PrintOpts) {
     let e = &item.item;
     let tx_str = if opts.full {
-        format!("0x{}", hex::encode(e.tx_hash))
+        format!("{:#x}", e.tx_hash)
     } else {
-        format!(
-            "0x{}…{}",
-            hex::encode(&e.tx_hash[..4]),
-            hex::encode(&e.tx_hash[30..])
-        )
+        let b = e.tx_hash.as_slice();
+        format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
     };
     // When decoding, raw topics + data are redundant with the per-param
     // breakdown below.
@@ -215,14 +208,17 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize, opts: &Pr
     }
 }
 
-fn format_topics(topics: &[[u8; 32]], full: bool) -> String {
+fn format_topics(topics: &[B256], full: bool) -> String {
     // topic0 is the event selector — fixed by the filter, redundant.
     let rest = topics.iter().skip(1);
     let parts: Vec<String> = if full {
-        rest.map(|t| format!("0x{}", hex::encode(t))).collect()
+        rest.map(|t| format!("{t:#x}")).collect()
     } else {
-        rest.map(|t| format!("0x{}…{}", hex::encode(&t[..4]), hex::encode(&t[28..])))
-            .collect()
+        rest.map(|t| {
+            let b = t.as_slice();
+            format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[28..]))
+        })
+        .collect()
     };
     if parts.is_empty() {
         String::new()
@@ -244,8 +240,7 @@ fn format_data(data: &[u8], full: bool) -> String {
 }
 
 fn print_decoded(event: &Event, log: &EvmEvent, full: bool) {
-    let topics: Vec<B256> = log.topics.iter().map(|t| B256::from(*t)).collect();
-    let decoded = match event.decode_log_parts(topics.iter().copied(), &log.data) {
+    let decoded = match event.decode_log_parts(log.topics.iter().copied(), &log.data) {
         Ok(d) => d,
         Err(err) => {
             println!("       decode error: {err}");
@@ -323,8 +318,8 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, B256, U256};
 
-    fn t32(b: u8) -> [u8; 32] {
-        [b; 32]
+    fn t32(b: u8) -> B256 {
+        B256::repeat_byte(b)
     }
 
     #[test]

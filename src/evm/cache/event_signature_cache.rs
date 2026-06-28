@@ -7,12 +7,14 @@
 //! `SignatureCache`) to avoid colliding with the
 //! [`SignatureCache`](crate::signatures::SignatureCache) resolver trait.
 
+use alloy::primitives::{Address, B256};
+
 use super::{CacheError, SharedConn};
 use crate::evm::types::ChainId;
 
 /// A single row from `event_signatures`: canonical signature, topic0,
 /// and (when populated) the matched ABI event item JSON.
-pub type EventSignatureRow = (String, [u8; 32], Option<String>);
+pub type EventSignatureRow = (String, B256, Option<String>);
 
 /// Durable SQLite-backed event-signature cache.
 pub struct EventSignatureCache {
@@ -39,7 +41,7 @@ impl EventSignatureCache {
     pub fn get_event_signature(
         &self,
         chain_id: ChainId,
-        address: &[u8; 20],
+        address: &Address,
         event_name: &str,
     ) -> Result<Option<EventSignatureRow>, CacheError> {
         let conn = self.conn.lock().unwrap();
@@ -48,7 +50,7 @@ impl EventSignatureCache {
              WHERE chain_id = ?1 AND address = ?2 AND event_name = ?3",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![chain_id.get() as i64, &address[..], event_name],
+            rusqlite::params![chain_id, address.as_slice(), event_name],
             |row| {
                 let sig: String = row.get(0)?;
                 let topic: Vec<u8> = row.get(1)?;
@@ -58,9 +60,7 @@ impl EventSignatureCache {
         )?;
         match rows.next() {
             Some(Ok((sig, topic, abi))) if topic.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&topic);
-                Ok(Some((sig, arr, abi)))
+                Ok(Some((sig, B256::from_slice(&topic), abi)))
             }
             Some(Err(e)) => Err(e.into()),
             _ => Ok(None),
@@ -70,10 +70,10 @@ impl EventSignatureCache {
     pub fn insert_event_signature(
         &self,
         chain_id: ChainId,
-        address: &[u8; 20],
+        address: &Address,
         event_name: &str,
         signature: &str,
-        topic0: &[u8; 32],
+        topic0: &B256,
         abi_json: Option<&str>,
     ) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
@@ -82,11 +82,11 @@ impl EventSignatureCache {
              (chain_id, address, event_name, signature, topic0, abi_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
-                chain_id.get() as i64,
-                &address[..],
+                chain_id,
+                address.as_slice(),
                 event_name,
                 signature,
-                &topic0[..],
+                topic0.as_slice(),
                 abi_json,
             ],
         )?;
@@ -102,8 +102,8 @@ impl EventSignatureCache {
 mod tests {
     use super::*;
 
-    const ADDR: [u8; 20] = [0x42; 20];
-    const TOPIC0: [u8; 32] = [0xDD; 32];
+    const ADDR: Address = Address::repeat_byte(0x42);
+    const TOPIC0: B256 = B256::repeat_byte(0xDD);
 
     #[test]
     fn signature_round_trip_with_abi() {

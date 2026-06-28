@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use alloy::network::Ethereum;
+use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
@@ -108,22 +109,6 @@ enum MatchOn {
     Data,
 }
 
-fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "address must be 20 bytes".into())
-}
-
-fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "value must be 32 bytes".into())
-}
-
 fn extract_key(e: &EvmEvent, on: MatchOn) -> Option<Vec<u8>> {
     match on {
         MatchOn::Topic1 => e.topics.get(1).map(|t| t.to_vec()),
@@ -176,8 +161,8 @@ fn make_match_fn(
 
 async fn open_history(
     rpc_url: &str,
-    address: [u8; 20],
-    topic0: [u8; 32],
+    address: Address,
+    topic0: B256,
     db_subdir: &str,
     chunk_size: u64,
 ) -> Result<
@@ -190,7 +175,7 @@ async fn open_history(
     std::fs::create_dir_all(db_subdir).ok();
     let db_path = versioned_path(&format!("{db_subdir}/log_store.db"));
     let store = Arc::new(LogCache::open(&db_path)?);
-    let topics: [Option<[u8; 32]>; 4] = [Some(topic0), None, None, None];
+    let topics: [Option<B256>; 4] = [Some(topic0), None, None, None];
     Ok(EvmLogHistory::with_options(provider, store, address, topics, chunk_size, 12).await?)
 }
 
@@ -202,18 +187,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    let src_addr = parse_hex_address(&args.src_address)?;
-    let dst_addr = parse_hex_address(&args.dst_address)?;
+    let src_addr: Address = args.src_address.parse()?;
+    let dst_addr: Address = args.dst_address.parse()?;
     let src_topic0 = args
         .src_topic0
         .as_ref()
-        .map(|s| parse_hex_32(s))
+        .map(|s| s.parse::<B256>())
         .transpose()?
         .unwrap_or(TRANSFER_TOPIC);
     let dst_topic0 = args
         .dst_topic0
         .as_ref()
-        .map(|s| parse_hex_32(s))
+        .map(|s| s.parse::<B256>())
         .transpose()?
         .unwrap_or(TRANSFER_TOPIC);
 

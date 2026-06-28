@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::network::Ethereum;
-use alloy::primitives::U256;
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
@@ -94,14 +94,6 @@ fn parse_datetime(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid date: {e}"))
 }
 
-fn parse_hex_address(s: &str) -> Result<[u8; 20], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| format!("invalid address hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "address must be 20 bytes".into())
-}
-
 async fn resolve_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     args: &Args,
     backend: &Arc<EvmLogHistory<P>>,
@@ -161,21 +153,23 @@ fn osc8_link(url: &str, text: &str) -> String {
     format!("\x1b]8;;{url}\x07{text}\x1b]8;;\x07")
 }
 
-fn abbrev_addr(addr: &[u8; 20]) -> String {
-    format!("0x{}…{}", hex::encode(&addr[..3]), hex::encode(&addr[18..]))
+fn abbrev_addr(addr: &Address) -> String {
+    let b = addr.as_slice();
+    format!("0x{}…{}", hex::encode(&b[..3]), hex::encode(&b[18..]))
 }
 
-fn abbrev_tx_hash(hash: &[u8; 32]) -> String {
-    format!("0x{}…{}", hex::encode(&hash[..4]), hex::encode(&hash[30..]))
+fn abbrev_tx_hash(hash: &B256) -> String {
+    let b = hash.as_slice();
+    format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
 }
 
-fn linked_addr(addr: &[u8; 20], base_url: &str) -> String {
-    let url = format!("{}/address/0x{}", base_url, hex::encode(addr));
+fn linked_addr(addr: &Address, base_url: &str) -> String {
+    let url = format!("{base_url}/address/{addr:#x}");
     osc8_link(&url, &abbrev_addr(addr))
 }
 
-fn linked_tx_hash(hash: &[u8; 32], base_url: &str) -> String {
-    let url = format!("{}/tx/0x{}", base_url, hex::encode(hash));
+fn linked_tx_hash(hash: &B256, base_url: &str) -> String {
+    let url = format!("{base_url}/tx/{hash:#x}");
     osc8_link(&url, &abbrev_tx_hash(hash))
 }
 
@@ -214,7 +208,7 @@ fn print_transfer(
     direction_key: &str,
     balance: U256,
     index: usize,
-    owner: &[u8; 20],
+    owner: &Address,
     meta: &Erc20Metadata,
     max_sym_width: usize,
     max_decimals: usize,
@@ -266,12 +260,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    let addresses: Vec<[u8; 20]> = args
+    let addresses: Vec<Address> = args
         .address
         .iter()
-        .map(|a| parse_hex_address(a))
+        .map(|a| a.parse::<Address>())
         .collect::<Result<_, _>>()?;
-    let owner = parse_hex_address(&args.owner)?;
+    let owner: Address = args.owner.parse()?;
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
@@ -291,7 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|addr| fetch_erc20_metadata(&provider, *addr, chain_id, &erc20_cache));
     let meta_results = join_all(meta_futures).await;
 
-    let mut metadata: HashMap<[u8; 20], Erc20Metadata> = HashMap::new();
+    let mut metadata: HashMap<Address, Erc20Metadata> = HashMap::new();
     for (addr, result) in addresses.iter().zip(meta_results) {
         let meta = result?;
         println!(
@@ -308,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(0);
     println!();
 
-    println!("  Owner:    0x{}", hex::encode(owner));
+    println!("  Owner:    {owner:#x}");
     println!("  Tokens:   {}", addresses.len());
     println!("  Chain:    {chain_id}");
     println!("  DB:       {db_path}");

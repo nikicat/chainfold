@@ -20,6 +20,9 @@
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
+use rusqlite::types::{ToSql, ToSqlOutput};
+
+use crate::evm::types::ChainId;
 
 mod erc20_cache;
 mod event_signature_cache;
@@ -28,6 +31,18 @@ mod log_cache;
 pub use erc20_cache::{CachedErc20Metadata, Erc20Cache};
 pub use event_signature_cache::{EventSignatureCache, EventSignatureRow};
 pub use log_cache::{BlockHeader, LogCache, compute_filter_hash, compute_gaps};
+
+/// `ChainId` persists as its underlying `u64` in an `INTEGER` column. Defining
+/// `ToSql` here — in the persistence layer, not on the domain type in
+/// [`types`](crate::evm::types) — keeps `ChainId` free of any `SQLite`
+/// dependency while letting the caches bind it directly, with no `.get() as
+/// i64` cast at every call site. Read-back isn't needed (no query selects the
+/// chain id into a `ChainId`), so there's deliberately no `FromSql`.
+impl ToSql for ChainId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.get() as i64))
+    }
+}
 
 // ============================================================
 // Versioning
@@ -263,6 +278,7 @@ pub(crate) fn configure_connection(conn: &Connection) -> Result<(), rusqlite::Er
 mod tests {
     use super::*;
     use crate::evm::ChainId;
+    use alloy::primitives::Address;
 
     #[test]
     fn versioned_path_inserts_version_before_extension() {
@@ -277,7 +293,7 @@ mod tests {
         // the same CacheDb proves they share a single underlying connection.
         let db = CacheDb::open_in_memory().unwrap();
         let erc20 = db.erc20();
-        let addr = [0x42u8; 20];
+        let addr = Address::repeat_byte(0x42);
         erc20
             .insert_erc20_metadata(&addr, ChainId::new(1), "X", "X", 18)
             .unwrap();

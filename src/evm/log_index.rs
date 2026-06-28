@@ -189,10 +189,10 @@ mod tests {
     use tokio::time::sleep;
 
     pub(super) const FH: [u8; 32] = [0xAA; 32];
-    pub(super) const HASH_A: [u8; 32] = [0xBB; 32];
-    pub(super) const HASH_B: [u8; 32] = [0xBC; 32];
+    pub(super) const HASH_A: B256 = B256::repeat_byte(0xBB);
+    pub(super) const HASH_B: B256 = B256::repeat_byte(0xBC);
 
-    pub(super) fn mk_log(block: u64, idx: u64, block_hash: [u8; 32]) -> Log {
+    pub(super) fn mk_log(block: u64, idx: u64, block_hash: B256) -> Log {
         let topic0 = B256::from([0xDD; 32]);
         let data = Bytes::from(vec![0x01]);
         let log_data = LogData::new_unchecked(vec![topic0], data);
@@ -201,7 +201,7 @@ mod tests {
                 address: Address::from([0x42u8; 20]),
                 data: log_data,
             },
-            block_hash: Some(B256::from(block_hash)),
+            block_hash: Some(block_hash),
             block_number: Some(block),
             block_timestamp: None,
             transaction_hash: Some(B256::from([0xEE; 32])),

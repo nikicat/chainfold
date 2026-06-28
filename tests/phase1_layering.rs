@@ -39,7 +39,7 @@ async fn build_history(
     EvmLogHistory::with_options(
         provider,
         store,
-        USDC.0.0,
+        USDC,
         [Some(TRANSFER_TOPIC), None, None, None],
         chunk_size,
         12,
