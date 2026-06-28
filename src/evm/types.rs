@@ -3,6 +3,7 @@
 //! Source-agnostic core lives in [`crate::arch`]; this module is the
 //! EVM-specific counterpart referenced by the rest of `crate::evm`.
 
+use std::ops::{Add, Sub};
 use std::sync::Arc;
 
 use alloy::primitives::{Address, B256, BlockHash, TxHash};
@@ -162,6 +163,95 @@ impl std::fmt::Debug for FilterHash {
 }
 
 // ============================================================
+// BlockNumber
+// ============================================================
+
+/// A block height. A newtype over `u64` so it can't be silently swapped with a
+/// [`ChainId`], a [`LogIdx`], a timestamp, or any other bare integer as it
+/// flows through positions, events, headers, the range tree, and the cache.
+///
+/// It is part of [`EvmPosition`], so `#[serde(transparent)]` keeps the postcard
+/// marshal byte-identical and saved resume-anchors loadable.
+///
+/// Arithmetic is *affine*: a block ± a `u64` offset is another block ([`Add`] /
+/// [`Sub`] / [`BlockNumber::saturating_add`] / [`BlockNumber::saturating_sub`]
+/// / [`BlockNumber::checked_sub`]); the *distance* between two blocks is a
+/// `u64`, computed via [`BlockNumber::get`]. Convert to `u64` at the alloy RPC
+/// and `SQLite` edges with [`BlockNumber::get`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct BlockNumber(u64);
+
+impl BlockNumber {
+    /// Genesis / lower-bound sentinel.
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(n: u64) -> Self {
+        Self(n)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// `self + rhs`, saturating at `u64::MAX`.
+    pub const fn saturating_add(self, rhs: u64) -> Self {
+        Self(self.0.saturating_add(rhs))
+    }
+
+    /// `self - rhs`, saturating at `0`.
+    pub const fn saturating_sub(self, rhs: u64) -> Self {
+        Self(self.0.saturating_sub(rhs))
+    }
+
+    /// `self - rhs`, or `None` if it would underflow below genesis.
+    pub const fn checked_sub(self, rhs: u64) -> Option<Self> {
+        match self.0.checked_sub(rhs) {
+            Some(n) => Some(Self(n)),
+            None => None,
+        }
+    }
+}
+
+impl From<u64> for BlockNumber {
+    fn from(n: u64) -> Self {
+        Self(n)
+    }
+}
+
+impl Add<u64> for BlockNumber {
+    type Output = Self;
+    fn add(self, rhs: u64) -> Self {
+        Self(self.0 + rhs)
+    }
+}
+
+impl Sub<u64> for BlockNumber {
+    type Output = Self;
+    fn sub(self, rhs: u64) -> Self {
+        Self(self.0 - rhs)
+    }
+}
+
+impl std::fmt::Display for BlockNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ============================================================
 // LogIdx
 // ============================================================
 
@@ -249,14 +339,14 @@ impl std::fmt::Display for LogIdx {
     serde::Deserialize,
 )]
 pub struct EvmPosition {
-    pub block: u64,
+    pub block: BlockNumber,
     pub log_index: LogIdx,
 }
 
 impl EvmPosition {
     pub const fn new(block: u64, log_index: u32) -> Self {
         Self {
-            block,
+            block: BlockNumber::new(block),
             log_index: LogIdx::new(log_index),
         }
     }
@@ -264,7 +354,7 @@ impl EvmPosition {
     /// Lower-bound sentinel: strictly less than every real log position.
     pub const fn earliest() -> Self {
         Self {
-            block: 0,
+            block: BlockNumber::ZERO,
             log_index: LogIdx::ZERO,
         }
     }
@@ -289,7 +379,7 @@ impl Position for EvmPosition {
 #[derive(Debug, Clone)]
 pub struct EvmEvent {
     pub contract_address: Address,
-    pub block_number: u64,
+    pub block_number: BlockNumber,
     pub timestamp: Timestamp,
     pub block_hash: BlockHash,
     pub log_index: LogIdx,
@@ -313,7 +403,7 @@ impl EvmEvent {
 
 #[derive(Debug, Clone)]
 pub struct EvmBlock {
-    pub number: u64,
+    pub number: BlockNumber,
     pub hash: BlockHash,
     pub parent_hash: BlockHash,
     pub timestamp: Timestamp,

@@ -43,7 +43,7 @@ pub async fn resolve_range(
                 start.block + 1,
                 end.block + 1
             );
-            let end_inclusive = EvmPosition::new(end.block.saturating_add(1), u32::MAX);
+            let end_inclusive = EvmPosition::new(end.block.saturating_add(1).get(), u32::MAX);
             Ok((start, end_inclusive))
         }
         (None, None, Some(from_block)) => Ok(block_range(from_block, args.num_blocks)),

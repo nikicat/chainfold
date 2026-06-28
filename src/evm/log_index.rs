@@ -126,8 +126,8 @@ impl LogIndex {
                 }
                 if let Err(e) = store.record_scanned_range(
                     &filter_hash,
-                    page.from_block,
-                    page.to_block,
+                    page.from_block.get(),
+                    page.to_block.get(),
                     &page.end_block_hash,
                 ) {
                     tracing::warn!(error = %e, "drain record_scanned_range");
@@ -182,7 +182,7 @@ mod tests {
     use super::range_tree::align_window;
     use super::*;
     use crate::evm::cache::LogCache;
-    use crate::evm::types::LogIdx;
+    use crate::evm::types::{BlockNumber, LogIdx};
     use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
     use alloy::rpc::types::Log;
     use std::sync::Arc;
@@ -231,7 +231,7 @@ mod tests {
         assert!(
             BlockPos::before_block(1)
                 == BlockPos::At {
-                    block: 0,
+                    block: BlockNumber::new(0),
                     log_index: LogIdx::MAX,
                 }
         );
@@ -244,8 +244,8 @@ mod tests {
         let idx = mk_index();
         // First page: blocks [100, 200] with two logs at (150, 0) and (180, 0).
         let page = LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A), mk_log(180, 0, HASH_B)],
             end_block_hash: HASH_B,
         };
@@ -258,16 +258,16 @@ mod tests {
     fn insert_range_at_existing_end_extends_not_duplicates() {
         let idx = mk_index();
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A)],
             end_block_hash: HASH_A,
         });
         let before = idx.len();
         // Second page covering [200, 300] with one log at (250, 0).
         idx.insert_page(&LogPage {
-            from_block: 201,
-            to_block: 300,
+            from_block: BlockNumber::new(201),
+            to_block: BlockNumber::new(300),
             items: vec![mk_log(250, 0, HASH_B)],
             end_block_hash: HASH_B,
         });
@@ -282,8 +282,8 @@ mod tests {
         let idx = mk_index();
         // Set up: page with single log at (200, 0) covering [100, 300].
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 300,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(300),
             items: vec![mk_log(200, 0, HASH_A)],
             end_block_hash: HASH_A,
         });
@@ -294,7 +294,7 @@ mod tests {
         LogIndex::insert_late_item(
             &mut tree,
             LogRef {
-                block_number: 250,
+                block_number: BlockNumber::new(250),
                 log_index: LogIdx::ZERO,
                 block_hash: HASH_B,
             },
@@ -313,8 +313,8 @@ mod tests {
         // Page with no items so tree gets a single empty range ending at
         // end_of_block(200).
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![],
             end_block_hash: HASH_A,
         });
@@ -329,7 +329,7 @@ mod tests {
         LogIndex::insert_late_item(
             &mut tree,
             LogRef {
-                block_number: 200,
+                block_number: BlockNumber::new(200),
                 log_index: LogIdx::MAX,
                 block_hash: HASH_B,
             },
@@ -345,8 +345,8 @@ mod tests {
     fn late_item_duplicate_is_ignored() {
         let idx = mk_index();
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A)],
             end_block_hash: HASH_A,
         });
@@ -356,7 +356,7 @@ mod tests {
         LogIndex::insert_late_item(
             &mut tree,
             LogRef {
-                block_number: 150,
+                block_number: BlockNumber::new(150),
                 log_index: LogIdx::ZERO,
                 block_hash: HASH_B, // different hash — still ignored
             },
@@ -371,8 +371,8 @@ mod tests {
         // First page [100, 200] with one log — gives filled@(150, 0)
         // and empty-tail at end_of_block(200).
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A)],
             end_block_hash: HASH_A,
         });
@@ -382,7 +382,7 @@ mod tests {
         LogIndex::insert_late_item(
             &mut tree,
             LogRef {
-                block_number: 90,
+                block_number: BlockNumber::new(90),
                 log_index: LogIdx::ZERO,
                 block_hash: HASH_B,
             },
@@ -437,8 +437,8 @@ mod tests {
         // this with insert_page over a no-log scan.
         let idx = mk_index();
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![],
             end_block_hash: HASH_A,
         });
@@ -458,8 +458,8 @@ mod tests {
     async fn first_at_or_after_finds_next_cached_log() {
         let idx = Arc::new(mk_index());
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)],
             end_block_hash: HASH_B,
         });
@@ -487,8 +487,8 @@ mod tests {
     async fn last_at_or_before_finds_prev_cached_log() {
         let idx = Arc::new(mk_index());
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)],
             end_block_hash: HASH_B,
         });
@@ -516,8 +516,8 @@ mod tests {
         store.insert_logs(&FH, &logs).unwrap();
         let idx = Arc::new(LogIndex::new(store, FH, never_fetch()));
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: logs,
             end_block_hash: HASH_B,
         });
@@ -636,8 +636,8 @@ mod tests {
         assert!(!idx.attach_drain(), "second attach is a no-op");
 
         let page = LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A), mk_log(180, 2, HASH_B)],
             end_block_hash: HASH_B,
         };
@@ -671,8 +671,8 @@ mod tests {
         assert!(!idx.has_drain());
 
         idx.insert_page(&LogPage {
-            from_block: 100,
-            to_block: 200,
+            from_block: BlockNumber::new(100),
+            to_block: BlockNumber::new(200),
             items: vec![mk_log(150, 0, HASH_A)],
             end_block_hash: HASH_A,
         });

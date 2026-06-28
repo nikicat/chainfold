@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Pre-cache the window so merge doesn't fight cold fetches per chain.
         let from_block = tip.block.saturating_sub(args.num_blocks);
-        let from_pos = EvmPosition::new(from_block.saturating_sub(1), u32::MAX);
+        let from_pos = EvmPosition::new(from_block.saturating_sub(1).get(), u32::MAX);
         let hs = history.hist_store();
         let hist = hs.next().await;
         let (_, _tail) = hist.split(from_pos);
@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_vec();
         let pos = EvmPosition::unmarshal(&key_bytes)
             .ok_or_else(|| format!("could not unmarshal position for {key}"))?;
-        let from = EvmPosition::new(pos.block.saturating_sub(args.num_blocks), u32::MAX);
+        let from = EvmPosition::new(pos.block.saturating_sub(args.num_blocks).get(), u32::MAX);
         start_positions.insert(key.clone(), from.marshal());
     }
     let start = MergedPos::new(start_positions);

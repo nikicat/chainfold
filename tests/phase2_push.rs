@@ -99,7 +99,7 @@ async fn live_event_latency_ws() {
     let latency = start.elapsed();
 
     assert!(
-        observed.block > 0,
+        observed.block.get() > 0,
         "tip advanced past block 0 (got {})",
         observed.block
     );
@@ -174,7 +174,7 @@ async fn poll_drain_populates_scanned_ranges() {
     );
     let max_end = ranges.iter().map(|(_, end)| *end).max().unwrap_or(0);
     assert!(
-        max_end >= final_tip,
+        max_end >= final_tip.get(),
         "scanned coverage at or past final tip (max_end={max_end} final={final_tip})",
     );
 }

@@ -75,8 +75,8 @@ impl LogIndex {
         assert_increasing(&page.items);
 
         let mut tree = self.tree.lock().unwrap();
-        let page_start = BlockPos::before_block(page.from_block);
-        let page_end = BlockPos::end_of_block(page.to_block);
+        let page_start = BlockPos::before_block(page.from_block.get());
+        let page_end = BlockPos::end_of_block(page.to_block.get());
 
         // Tail = last range currently in the tree (max by key = max by end).
         let tail_end = tree.keys().next_back().copied();

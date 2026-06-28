@@ -234,9 +234,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let src_from = src_tip.block.saturating_sub(args.num_blocks);
         let dst_from = dst_tip.block.saturating_sub(args.num_blocks);
         let src_hist = src_history.hist_store().next().await;
-        let _ = src_hist.split(EvmPosition::new(src_from.saturating_sub(1), u32::MAX));
+        let _ = src_hist.split(EvmPosition::new(src_from.saturating_sub(1).get(), u32::MAX));
         let dst_hist = dst_history.hist_store().next().await;
-        let _ = dst_hist.split(EvmPosition::new(dst_from.saturating_sub(1), u32::MAX));
+        let _ = dst_hist.split(EvmPosition::new(dst_from.saturating_sub(1).get(), u32::MAX));
     }
 
     // Set up anchor store + matcher.

@@ -17,7 +17,7 @@ use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
 use super::range_tree::{Range, install_gap_placeholder};
 use crate::arch::HistoryError;
 use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};
-use crate::evm::types::LogIdx;
+use crate::evm::types::{BlockNumber, LogIdx};
 
 // ============================================================
 // Fetcher
@@ -29,7 +29,10 @@ use crate::evm::types::LogIdx;
 /// In production this wraps `eth_getLogs`; tests pass a closure to make
 /// `LogIndex` pure-Rust testable.
 pub type Fetcher = Arc<
-    dyn Fn(u64, u64) -> Pin<Box<dyn Future<Output = Result<LogPage, HistoryError>> + Send>>
+    dyn Fn(
+            BlockNumber,
+            BlockNumber,
+        ) -> Pin<Box<dyn Future<Output = Result<LogPage, HistoryError>> + Send>>
         + Send
         + Sync,
 >;
@@ -133,8 +136,8 @@ impl LogIndex {
         self.store
             .record_scanned_range(
                 &self.filter_hash,
-                page.from_block,
-                page.to_block,
+                page.from_block.get(),
+                page.to_block.get(),
                 &page.end_block_hash,
             )
             .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))?;
@@ -312,9 +315,9 @@ struct ItemsState {
 /// bounds `(from_block, to_block)` suitable for the fetcher. If `start`
 /// is at the end of a block, advance past that block. If `start` is
 /// `Bottom`, start from block 0.
-fn gap_block_range(start: BlockPos, end: BlockPos) -> (u64, u64) {
+fn gap_block_range(start: BlockPos, end: BlockPos) -> (BlockNumber, BlockNumber) {
     let from_block = match start {
-        BlockPos::Bottom => 0,
+        BlockPos::Bottom => BlockNumber::ZERO,
         BlockPos::At { block, log_index } => {
             if log_index == LogIdx::MAX {
                 block.saturating_add(1)
@@ -324,7 +327,7 @@ fn gap_block_range(start: BlockPos, end: BlockPos) -> (u64, u64) {
         }
     };
     let to_block = match end {
-        BlockPos::Bottom => 0,
+        BlockPos::Bottom => BlockNumber::ZERO,
         BlockPos::At { block, .. } => block,
     };
     (from_block, to_block)

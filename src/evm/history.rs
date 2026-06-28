@@ -49,7 +49,7 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
-use crate::evm::types::{ChainId, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic};
+use crate::evm::types::{BlockNumber, ChainId, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic};
 
 fn fmt_topic(t: Option<&Topic>) -> String {
     match t {
@@ -250,8 +250,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         let pos = EvmPosition::new(block_number, u32::MAX);
         let prev = self.latest_store.get().block;
         let _ = self.latest_tx.send(pos);
-        if block_number != prev {
-            tracing::debug!(block_number, prev, "tip updated");
+        if block_number != prev.get() {
+            tracing::debug!(block_number, prev = prev.get(), "tip updated");
         }
         Ok(())
     }
@@ -380,7 +380,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistBackend<EvmEvent
         // instead of falling through to the fetcher.
         let from_block = start.block;
         let to_block = end.block;
-        if let Err(e) = self.index.ensure_window_loaded(from_block, to_block) {
+        if let Err(e) = self
+            .index
+            .ensure_window_loaded(from_block.get(), to_block.get())
+        {
             return Box::pin(once(async move { Err(e) }));
         }
 
@@ -510,7 +513,7 @@ fn apply_topics(mut filter: Filter, topics: &[Option<Topic>; 4]) -> Filter {
 fn log_to_evm_event(log: &Log) -> EvmEvent {
     EvmEvent {
         contract_address: log.address(),
-        block_number: log.block_number.unwrap_or(0),
+        block_number: BlockNumber::new(log.block_number.unwrap_or(0)),
         // Provider-supplied per-log timestamp when present; otherwise 0, and
         // the caller fills it from the (cached) block header.
         timestamp: log.block_timestamp.unwrap_or(0),
@@ -573,21 +576,35 @@ fn build_fetcher<P>(
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
-    Arc::new(move |from, to| {
+    Arc::new(move |from: BlockNumber, to: BlockNumber| {
         let provider = provider.clone();
         let store = store.clone();
         Box::pin(async move {
-            let filter = Filter::new().address(address).from_block(from).to_block(to);
+            let (from_u, to_u) = (from.get(), to.get());
+            let filter = Filter::new()
+                .address(address)
+                .from_block(from_u)
+                .to_block(to_u);
             let filter = apply_topics(filter, &topics);
-            tracing::debug!(from, to, blocks = to - from + 1, "eth_getLogs");
+            tracing::debug!(
+                from = from_u,
+                to = to_u,
+                blocks = to_u - from_u + 1,
+                "eth_getLogs"
+            );
             let logs = provider
                 .get_logs(&filter)
                 .instrument(rpc_span(RpcMethod::GetLogs))
                 .await
                 .map_err(|e| HistoryError::internal(format!("eth_getLogs failed: {e}")))?;
-            tracing::debug!(from, to, num_logs = logs.len(), "eth_getLogs returned");
+            tracing::debug!(
+                from = from_u,
+                to = to_u,
+                num_logs = logs.len(),
+                "eth_getLogs returned"
+            );
 
-            let end_header = ensure_block_header_via(&provider, &store, to).await?;
+            let end_header = ensure_block_header_via(&provider, &store, to_u).await?;
             for log in &logs {
                 // Logs that carry their own timestamp need no header — the
                 // query path reads it straight off the persisted log.
@@ -815,7 +832,7 @@ mod tests {
         // anchor block 200 @ GENESIS_TS + 2400; block_time = 12
         // 100 blocks before anchor → block 100 → time_pos returns cut "just before 100"
         let pos = hs.time_pos(GENESIS_TS + 1200).await.unwrap();
-        assert_eq!(pos.block, 99);
+        assert_eq!(pos.block, BlockNumber::new(99));
         assert_eq!(pos.log_index, LogIdx::MAX);
     }
 

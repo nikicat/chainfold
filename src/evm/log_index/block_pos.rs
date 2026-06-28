@@ -7,7 +7,7 @@
 use alloy::primitives::BlockHash;
 use alloy::rpc::types::Log;
 
-use crate::evm::types::LogIdx;
+use crate::evm::types::{BlockNumber, LogIdx};
 
 // ============================================================
 // BlockPos — position type for the tree
@@ -23,7 +23,10 @@ pub enum BlockPos {
     /// Strictly below every real `(block, log_index)`.
     Bottom,
     /// Concrete `(block, log_index)` coordinate.
-    At { block: u64, log_index: LogIdx },
+    At {
+        block: BlockNumber,
+        log_index: LogIdx,
+    },
 }
 
 impl BlockPos {
@@ -33,7 +36,7 @@ impl BlockPos {
     pub fn before_block(block: u64) -> Self {
         match block.checked_sub(1) {
             Some(prev) => BlockPos::At {
-                block: prev,
+                block: BlockNumber::new(prev),
                 log_index: LogIdx::MAX,
             },
             None => BlockPos::Bottom,
@@ -45,7 +48,7 @@ impl BlockPos {
     /// a block-level scanned range whose end is `block`.
     pub fn end_of_block(block: u64) -> Self {
         BlockPos::At {
-            block,
+            block: BlockNumber::new(block),
             log_index: LogIdx::MAX,
         }
     }
@@ -53,14 +56,14 @@ impl BlockPos {
     /// Convert a concrete (block, `log_index`) pair to a position.
     pub fn at(block: u64, log_index: u32) -> Self {
         BlockPos::At {
-            block,
+            block: BlockNumber::new(block),
             log_index: LogIdx::new(log_index),
         }
     }
 
     /// The block number this position sits in, if concrete. `None` for
     /// [`Bottom`].
-    pub fn block(&self) -> Option<u64> {
+    pub fn block(&self) -> Option<BlockNumber> {
         match self {
             BlockPos::Bottom => None,
             BlockPos::At { block, .. } => Some(*block),
@@ -78,7 +81,7 @@ impl BlockPos {
 /// into blocks that have since been canonicalized away.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct LogRef {
-    pub block_number: u64,
+    pub block_number: BlockNumber,
     pub log_index: LogIdx,
     pub block_hash: BlockHash,
 }
@@ -103,8 +106,8 @@ impl LogRef {
 /// entry in `LogCache::record_scanned_range`.
 #[derive(Clone)]
 pub struct LogPage {
-    pub from_block: u64,
-    pub to_block: u64,
+    pub from_block: BlockNumber,
+    pub to_block: BlockNumber,
     pub items: Vec<Log>,
     pub end_block_hash: BlockHash,
 }
@@ -115,7 +118,7 @@ pub struct LogPage {
 pub(super) fn log_ref_from(log: &Log) -> Option<LogRef> {
     let block_hash = log.block_hash?;
     Some(LogRef {
-        block_number: log.block_number?,
+        block_number: BlockNumber::new(log.block_number?),
         log_index: LogIdx::new(log.log_index? as u32),
         block_hash,
     })

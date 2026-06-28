@@ -118,7 +118,7 @@ async fn resolve_range(
             println!("  Estimated blocks: {} → {}", start.block + 1, end.block + 1);
             // time_pos returns the cut "just before block B"; for `end` we
             // want the cut "after the last log of block B", i.e. end_of_block.
-            let end_inclusive = EvmPosition::new(end.block.saturating_add(1), u32::MAX);
+            let end_inclusive = EvmPosition::new(end.block.saturating_add(1).get(), u32::MAX);
             Ok((start, end_inclusive))
         }
         (None, None, Some(from_block)) => {
@@ -232,7 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!(
             "--measure summary over {} blocks:",
-            end.block - start.block + 1
+            end.block.get() - start.block.get() + 1
         );
         println!("  cold  {cold_n:>6} events  {cold_ms:>10.2} ms  (RPC + SQLite + BTree)");
         println!("  warm  {warm_n:>6} events  {warm_ms:>10.2} ms  (SQLite -> fresh BTree)");

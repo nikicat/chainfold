@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::arch::HistoryError;
 use crate::evm::log_index::LogPage;
+use crate::evm::types::BlockNumber;
 
 /// Choice of subscription transport.
 #[derive(Clone, Debug)]
@@ -240,8 +241,8 @@ where
         let end_block_hash = fetch_block_hash(provider, to).await?;
 
         let page = LogPage {
-            from_block: from,
-            to_block: to,
+            from_block: BlockNumber::new(from),
+            to_block: BlockNumber::new(to),
             items: logs,
             end_block_hash,
         };
@@ -294,8 +295,8 @@ where
                 // task records (bn, bn) as a scanned range; if heads_stream
                 // later announces a higher tip it adds the empty tail.
                 let page = LogPage {
-                    from_block: bn,
-                    to_block: bn,
+                    from_block: BlockNumber::new(bn),
+                    to_block: BlockNumber::new(bn),
                     items: vec![log],
                     end_block_hash: bh,
                 };
@@ -319,8 +320,8 @@ where
                 // goes through `insert_late_item`.
                 let bh = head.hash;
                 let page = LogPage {
-                    from_block: *last_tip + 1,
-                    to_block: bn,
+                    from_block: BlockNumber::new(*last_tip + 1),
+                    to_block: BlockNumber::new(bn),
                     items: vec![],
                     end_block_hash: bh,
                 };
