@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use rusqlite::types::{ToSql, ToSqlOutput};
 
-use crate::evm::types::ChainId;
+use crate::evm::types::{ChainId, FilterHash};
 
 mod erc20_cache;
 mod event_signature_cache;
@@ -41,6 +41,17 @@ pub use log_cache::{BlockHeader, LogCache, compute_filter_hash, compute_gaps};
 impl ToSql for ChainId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(self.get() as i64))
+    }
+}
+
+/// `FilterHash` persists as its 32 raw bytes in a `BLOB` column. Like
+/// [`ChainId`]'s, this `ToSql` lives in the persistence layer so the domain
+/// type stays `SQLite`-free, and the caches bind it directly instead of
+/// reaching for `&fh.as_slice()[..]` at every call site. No `FromSql` — a
+/// filter hash is always supplied by the caller, never read back from a row.
+impl ToSql for FilterHash {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_slice()))
     }
 }
 
@@ -305,6 +316,10 @@ mod tests {
         );
         // Distinct concern on the same file.
         let logs = db.logs();
-        assert!(logs.get_scanned_ranges(&[0u8; 32]).unwrap().is_empty());
+        assert!(
+            logs.get_scanned_ranges(&FilterHash::new([0u8; 32]))
+                .unwrap()
+                .is_empty()
+        );
     }
 }

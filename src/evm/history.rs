@@ -49,7 +49,7 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
-use crate::evm::types::{ChainId, EvmEvent, EvmPosition, Topic};
+use crate::evm::types::{ChainId, EvmEvent, EvmPosition, FilterHash, Topic};
 
 fn fmt_topic(t: Option<&Topic>) -> String {
     match t {
@@ -72,7 +72,7 @@ pub struct EvmLogHistory<P> {
     provider: ChainProvider<P>,
     store: Arc<LogCache>,
     index: Arc<LogIndex>,
-    filter_hash: [u8; 32],
+    filter_hash: FilterHash,
     address: Address,
     topics: [Option<Topic>; 4],
     chunk_size: u64,
@@ -185,7 +185,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
             topic2 = %fmt_topic(topics[2].as_ref()),
             topic3 = %fmt_topic(topics[3].as_ref()),
             chunk_size,
-            filter_hash = %format!("0x{}", hex::encode(&filter_hash[..8])),
+            filter_hash = %format!("0x{}", hex::encode(&filter_hash.as_slice()[..8])),
             "EvmLogHistory created"
         );
 
@@ -201,8 +201,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         self.provider.chain_id()
     }
 
-    pub fn filter_hash(&self) -> &[u8; 32] {
-        &self.filter_hash
+    pub fn filter_hash(&self) -> FilterHash {
+        self.filter_hash
     }
 
     pub fn chunk_size(&self) -> u64 {
@@ -652,7 +652,7 @@ mod tests {
         }
     }
 
-    fn warm_cache() -> (Arc<LogCache>, [u8; 32]) {
+    fn warm_cache() -> (Arc<LogCache>, FilterHash) {
         let cache = Arc::new(LogCache::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &TOPICS);
 

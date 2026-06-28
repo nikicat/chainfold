@@ -32,6 +32,7 @@ use std::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::cache::LogCache;
+use crate::evm::types::FilterHash;
 use std::sync::Arc;
 
 mod block_pos;
@@ -55,7 +56,7 @@ use range_tree::Range;
 /// [`Self::ensure_window_loaded`].
 pub struct LogIndex {
     store: Arc<LogCache>,
-    filter_hash: [u8; 32],
+    filter_hash: FilterHash,
     fetcher: Fetcher,
     /// Aligned scanned-range chunk size (blocks). Determines the
     /// granularity at which gaps get fetched and the alignment of
@@ -77,14 +78,14 @@ pub struct LogIndex {
 impl LogIndex {
     /// Construct a fresh, empty index over `store` for `filter_hash`.
     /// Aligned chunk size defaults to `1000` blocks via [`Self::with_chunk_size`].
-    pub fn new(store: Arc<LogCache>, filter_hash: [u8; 32], fetcher: Fetcher) -> Self {
+    pub fn new(store: Arc<LogCache>, filter_hash: FilterHash, fetcher: Fetcher) -> Self {
         Self::with_chunk_size(store, filter_hash, fetcher, 1000)
     }
 
     /// Like [`Self::new`] but with an explicit aligned chunk size.
     pub fn with_chunk_size(
         store: Arc<LogCache>,
-        filter_hash: [u8; 32],
+        filter_hash: FilterHash,
         fetcher: Fetcher,
         chunk_size: u64,
     ) -> Self {
@@ -144,8 +145,8 @@ impl LogIndex {
     }
 
     /// Filter hash this index serves.
-    pub fn filter_hash(&self) -> &[u8; 32] {
-        &self.filter_hash
+    pub fn filter_hash(&self) -> FilterHash {
+        self.filter_hash
     }
 
     /// Aligned chunk size in blocks.
@@ -188,7 +189,7 @@ mod tests {
     use tokio::task::yield_now;
     use tokio::time::sleep;
 
-    pub(super) const FH: [u8; 32] = [0xAA; 32];
+    pub(super) const FH: FilterHash = FilterHash::new([0xAA; 32]);
     pub(super) const HASH_A: B256 = B256::repeat_byte(0xBB);
     pub(super) const HASH_B: B256 = B256::repeat_byte(0xBC);
 

@@ -4,7 +4,7 @@
 //! lightweight pointer the tree stores in lieu of full `Log`s; [`LogPage`]
 //! is the unit of input to page insertion and gap fills.
 
-use alloy::primitives::B256;
+use alloy::primitives::BlockHash;
 use alloy::rpc::types::Log;
 
 // ============================================================
@@ -75,7 +75,7 @@ impl BlockPos {
 pub struct LogRef {
     pub block_number: u64,
     pub log_index: u32,
-    pub block_hash: B256,
+    pub block_hash: BlockHash,
 }
 
 impl LogRef {
@@ -101,7 +101,7 @@ pub struct LogPage {
     pub from_block: u64,
     pub to_block: u64,
     pub items: Vec<Log>,
-    pub end_block_hash: B256,
+    pub end_block_hash: BlockHash,
 }
 
 /// Build a [`LogRef`] from an alloy [`Log`]. Returns `None` for logs

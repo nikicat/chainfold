@@ -8,12 +8,12 @@
 //! bookkeeping, reorg invalidation, and header lookup. Navigation queries
 //! (first/last log) live in the in-memory [`LogIndex`](crate::evm::LogIndex).
 
-use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
+use alloy::primitives::{Address, B256, BlockHash, Bytes, Log as LogInner, LogData};
 use alloy::rpc::types::Log;
 
 use super::{CacheError, SharedConn};
 use crate::evm::observe::{SqliteOp, sqlite_span};
-use crate::evm::types::Topic;
+use crate::evm::types::{FilterHash, Topic};
 
 // ============================================================
 // Helpers
@@ -23,7 +23,7 @@ use crate::evm::types::Topic;
 ///
 /// Null topics use a 0xFF sentinel (all-ones, 32 bytes) to distinguish
 /// "no topic filter" from any real topic value.
-pub fn compute_filter_hash(address: &Address, topics: &[Option<Topic>; 4]) -> [u8; 32] {
+pub fn compute_filter_hash(address: &Address, topics: &[Option<Topic>; 4]) -> FilterHash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(address.as_slice());
     let sentinel = [0xFF_u8; 32];
@@ -33,7 +33,7 @@ pub fn compute_filter_hash(address: &Address, topics: &[Option<Topic>; 4]) -> [u
             None => hasher.update(&sentinel),
         };
     }
-    *hasher.finalize().as_bytes()
+    FilterHash::new(*hasher.finalize().as_bytes())
 }
 
 /// Compute uncovered sub-ranges within `requested` given sorted, non-overlapping `scanned` ranges.
@@ -71,8 +71,8 @@ pub fn compute_gaps(requested: (u64, u64), scanned: &[(u64, u64)]) -> Vec<(u64, 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockHeader {
     pub height: u64,
-    pub hash: B256,
-    pub parent_hash: B256,
+    pub hash: BlockHash,
+    pub parent_hash: BlockHash,
     pub timestamp: u64,
 }
 
@@ -114,7 +114,7 @@ impl LogCache {
 
     /// Insert logs. Deduplicates by (`filter_hash`, `block_hash`, `log_index`).
     /// Logs without a `block_hash` (pending/mempool) are silently skipped.
-    pub fn insert_logs(&self, filter_hash: &[u8; 32], logs: &[Log]) -> Result<(), CacheError> {
+    pub fn insert_logs(&self, filter_hash: &FilterHash, logs: &[Log]) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
         {
@@ -130,7 +130,7 @@ impl LogCache {
                 };
                 let topics = log.topics();
                 stmt.execute(rusqlite::params![
-                    &filter_hash[..],
+                    filter_hash,
                     log.block_number.unwrap_or(0) as i64,
                     log.log_index.unwrap_or(0) as i64,
                     log.address().as_slice(),
@@ -156,8 +156,8 @@ impl LogCache {
     /// a reorged block.
     pub fn get_log_by_ref(
         &self,
-        filter_hash: &[u8; 32],
-        block_hash: &B256,
+        filter_hash: &FilterHash,
+        block_hash: &BlockHash,
         log_index: u32,
     ) -> Result<Option<Log>, CacheError> {
         let conn = self.conn.lock().unwrap();
@@ -169,7 +169,7 @@ impl LogCache {
              LIMIT 1",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![&filter_hash[..], block_hash.as_slice(), log_index as i64],
+            rusqlite::params![filter_hash, block_hash.as_slice(), log_index as i64],
             row_to_log,
         )?;
         match rows.next() {
@@ -182,7 +182,7 @@ impl LogCache {
     /// ordered by (`block_number`, `log_index`).
     pub fn get_logs_in_range(
         &self,
-        filter_hash: &[u8; 32],
+        filter_hash: &FilterHash,
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<Log>, CacheError> {
@@ -198,7 +198,7 @@ impl LogCache {
         )?;
         let logs = stmt
             .query_map(
-                rusqlite::params![&filter_hash[..], from_block as i64, to_block as i64],
+                rusqlite::params![filter_hash, from_block as i64, to_block as i64],
                 row_to_log,
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -213,17 +213,17 @@ impl LogCache {
     /// separately for finalized ranges.
     pub fn record_scanned_range(
         &self,
-        filter_hash: &[u8; 32],
+        filter_hash: &FilterHash,
         start: u64,
         end: u64,
-        end_block_hash: &B256,
+        end_block_hash: &BlockHash,
     ) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO scanned_ranges (filter_hash, start_block, end_block, end_block_hash)
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
-                &filter_hash[..],
+                filter_hash,
                 start as i64,
                 end as i64,
                 end_block_hash.as_slice(),
@@ -236,7 +236,7 @@ impl LogCache {
     /// Excludes ranges whose `end_block_hash` is in `reorged_blocks`.
     pub fn get_scanned_ranges(
         &self,
-        filter_hash: &[u8; 32],
+        filter_hash: &FilterHash,
     ) -> Result<Vec<(u64, u64)>, CacheError> {
         let _span = sqlite_span(SqliteOp::GetScannedRanges).entered();
         let conn = self.conn.lock().unwrap();
@@ -247,7 +247,7 @@ impl LogCache {
              ORDER BY start_block ASC",
         )?;
         let ranges = stmt
-            .query_map(rusqlite::params![&filter_hash[..]], |row| {
+            .query_map(rusqlite::params![filter_hash], |row| {
                 Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -261,7 +261,7 @@ impl LogCache {
     /// the constituent range with the highest `end_block`.
     pub fn compact_ranges(
         &self,
-        filter_hash: &[u8; 32],
+        filter_hash: &FilterHash,
         up_to_block: u64,
     ) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
@@ -275,17 +275,14 @@ impl LogCache {
                  ORDER BY start_block ASC",
             )?;
             let result: Vec<(i64, u64, u64, Vec<u8>)> = stmt
-                .query_map(
-                    rusqlite::params![&filter_hash[..], up_to_block as i64],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get::<_, i64>(1)? as u64,
-                            row.get::<_, i64>(2)? as u64,
-                            row.get::<_, Vec<u8>>(3)?,
-                        ))
-                    },
-                )?
+                .query_map(rusqlite::params![filter_hash, up_to_block as i64], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get::<_, i64>(1)? as u64,
+                        row.get::<_, i64>(2)? as u64,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                })?
                 .collect::<Result<_, _>>()?;
             result
         };
@@ -318,7 +315,7 @@ impl LogCache {
                 tx.execute(
                     "INSERT INTO scanned_ranges (filter_hash, start_block, end_block, end_block_hash)
                      VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![&filter_hash[..], *start as i64, *end as i64, &end_hash[..]],
+                    rusqlite::params![filter_hash, *start as i64, *end as i64, &end_hash[..]],
                 )?;
             }
             tx.commit()?;
@@ -333,7 +330,7 @@ impl LogCache {
 
     /// Mark blocks as reorged. Logs from these blocks will be excluded from
     /// queries. Scanned ranges ending at these blocks become invalid.
-    pub fn mark_reorged(&self, blocks: &[(B256, u64)]) -> Result<(), CacheError> {
+    pub fn mark_reorged(&self, blocks: &[(BlockHash, u64)]) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
         {
@@ -351,13 +348,13 @@ impl LogCache {
     /// Delete scanned ranges whose `end_block_hash` is in `reorged_blocks`.
     /// Call after [`Self::mark_reorged`] so gaps are recomputed for affected
     /// block ranges.
-    pub fn invalidate_reorged_ranges(&self, filter_hash: &[u8; 32]) -> Result<usize, CacheError> {
+    pub fn invalidate_reorged_ranges(&self, filter_hash: &FilterHash) -> Result<usize, CacheError> {
         let conn = self.conn.lock().unwrap();
         let deleted = conn.execute(
             "DELETE FROM scanned_ranges
              WHERE filter_hash = ?1
                AND end_block_hash IN (SELECT block_hash FROM reorged_blocks)",
-            rusqlite::params![&filter_hash[..]],
+            rusqlite::params![filter_hash],
         )?;
         Ok(deleted)
     }
@@ -382,8 +379,8 @@ impl LogCache {
     pub fn insert_block_header(
         &self,
         height: u64,
-        hash: &B256,
-        parent_hash: &B256,
+        hash: &BlockHash,
+        parent_hash: &BlockHash,
         timestamp: u64,
     ) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
@@ -476,10 +473,10 @@ fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
 mod tests {
     use super::*;
 
-    const FH: [u8; 32] = [0xAA; 32];
-    const BLOCK_HASH_A: B256 = B256::repeat_byte(0xBB);
-    const BLOCK_HASH_B: B256 = B256::repeat_byte(0xBC);
-    const BLOCK_HASH_C: B256 = B256::repeat_byte(0xBD);
+    const FH: FilterHash = FilterHash::new([0xAA; 32]);
+    const BLOCK_HASH_A: BlockHash = BlockHash::repeat_byte(0xBB);
+    const BLOCK_HASH_B: BlockHash = BlockHash::repeat_byte(0xBC);
+    const BLOCK_HASH_C: BlockHash = BlockHash::repeat_byte(0xBD);
 
     fn make_test_log(block_num: u64, log_idx: u64, block_hash: B256) -> Log {
         let topic0 = B256::from([0xDD; 32]);

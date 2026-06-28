@@ -166,7 +166,7 @@ async fn poll_drain_populates_scanned_ranges() {
     );
 
     let ranges = store
-        .get_scanned_ranges(history.filter_hash())
+        .get_scanned_ranges(&history.filter_hash())
         .expect("get_scanned_ranges");
     assert!(
         !ranges.is_empty(),
