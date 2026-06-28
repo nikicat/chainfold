@@ -8,8 +8,8 @@ use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, SubscribeTransport,
-    Topic,
+    CacheDb, ChainId, ChainProvider, DEFAULT_BLOCK_TIME, EvmEvent, EvmLogHistory, EvmPosition,
+    SubscribeTransport, Topic,
 };
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
@@ -76,7 +76,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         address,
         topics,
         evm_args.chunk_size,
-        12,
+        DEFAULT_BLOCK_TIME,
     )
     .await?;
     let hist_store = backend.hist_store();

@@ -7,8 +7,8 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use chainfold::arch::{Position, Positioned, watch_hist};
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, Erc20Metadata, EvmEvent, EvmPosition, IN_KEY, OUT_KEY,
-    OwnedErc20, SubscribeTransport, apply_transfer, fetch_erc20_metadata,
+    CacheDb, ChainId, ChainProvider, DEFAULT_BLOCK_TIME, Erc20Metadata, EvmEvent, EvmPosition,
+    IN_KEY, OUT_KEY, OwnedErc20, SubscribeTransport, apply_transfer, fetch_erc20_metadata,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -90,7 +90,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             owner,
             *address,
             evm_args.chunk_size,
-            12,
+            DEFAULT_BLOCK_TIME,
         )
         .await?;
         owned.update_tips().await?;

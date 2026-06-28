@@ -62,7 +62,10 @@ fn fmt_topic(t: Option<&Topic>) -> String {
 const DEFAULT_CHUNK_SIZE: u64 = 1000;
 
 /// Assumed block time in seconds for [`HistStore::time_pos`] estimation.
-const DEFAULT_BLOCK_TIME: u64 = 12;
+///
+/// Public so callers that go through [`EvmLogHistory::with_options`] (to set a
+/// custom chunk size) can pass the same default instead of a bare literal.
+pub const DEFAULT_BLOCK_TIME: u64 = 12;
 
 // ============================================================
 // EvmLogHistory
@@ -706,7 +709,7 @@ mod tests {
         asserter.push_success(&U64::from(200u64));
         let provider = ProviderBuilder::default().connect_mocked_client(asserter);
         let provider = ChainProvider::new(provider, ChainId::new(TEST_CHAIN));
-        EvmLogHistory::with_options(provider, store, ADDR, TOPICS, 100, 12)
+        EvmLogHistory::with_options(provider, store, ADDR, TOPICS, 100, DEFAULT_BLOCK_TIME)
             .await
             .unwrap()
     }

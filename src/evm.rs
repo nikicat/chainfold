@@ -38,7 +38,7 @@ pub use erc20::{
     Erc20Metadata, TRANSFER_TOPIC, TransferData, apply_transfer, decode_transfer,
     fetch_erc20_metadata,
 };
-pub use history::EvmLogHistory;
+pub use history::{DEFAULT_BLOCK_TIME, EvmLogHistory};
 pub use log_index::{BlockPos, LogIndex, LogPage, LogRef};
 pub use observe::{
     CACHE_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, RpcMethod, SQLITE_TARGET, SqliteOp,
