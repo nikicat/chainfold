@@ -10,11 +10,18 @@
 use alloy::primitives::{Address, B256};
 
 use super::{CacheError, SharedConn};
-use crate::evm::types::ChainId;
+use crate::evm::types::{ChainId, Topic};
 
-/// A single row from `event_signatures`: canonical signature, topic0,
-/// and (when populated) the matched ABI event item JSON.
-pub type EventSignatureRow = (String, B256, Option<String>);
+/// A single resolved row from `event_signatures`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventSignatureRow {
+    /// Canonical event signature, e.g. `Transfer(address,address,uint256)`.
+    pub signature: String,
+    /// `topic0` — the keccak256 hash of the signature.
+    pub topic0: Topic,
+    /// JSON of the matched ABI event item, when populated.
+    pub abi_json: Option<String>,
+}
 
 /// Durable SQLite-backed event-signature cache.
 pub struct EventSignatureCache {
@@ -59,9 +66,11 @@ impl EventSignatureCache {
             },
         )?;
         match rows.next() {
-            Some(Ok((sig, topic, abi))) if topic.len() == 32 => {
-                Ok(Some((sig, B256::from_slice(&topic), abi)))
-            }
+            Some(Ok((sig, topic, abi))) if topic.len() == 32 => Ok(Some(EventSignatureRow {
+                signature: sig,
+                topic0: Topic::from(B256::from_slice(&topic)),
+                abi_json: abi,
+            })),
             Some(Err(e)) => Err(e.into()),
             _ => Ok(None),
         }
@@ -73,7 +82,7 @@ impl EventSignatureCache {
         address: &Address,
         event_name: &str,
         signature: &str,
-        topic0: &B256,
+        topic0: Topic,
         abi_json: Option<&str>,
     ) -> Result<(), CacheError> {
         let conn = self.conn.lock().unwrap();
@@ -114,17 +123,17 @@ mod tests {
                 &ADDR,
                 "Transfer",
                 "Transfer(address,address,uint256)",
-                &TOPIC0,
+                Topic::from(TOPIC0),
                 Some("{\"type\":\"event\"}"),
             )
             .unwrap();
-        let (sig, topic, abi) = cache
+        let row = cache
             .get_event_signature(ChainId::new(1), &ADDR, "Transfer")
             .unwrap()
             .unwrap();
-        assert_eq!(sig, "Transfer(address,address,uint256)");
-        assert_eq!(topic, TOPIC0);
-        assert_eq!(abi.as_deref(), Some("{\"type\":\"event\"}"));
+        assert_eq!(row.signature, "Transfer(address,address,uint256)");
+        assert_eq!(row.topic0, Topic::from(TOPIC0));
+        assert_eq!(row.abi_json.as_deref(), Some("{\"type\":\"event\"}"));
     }
 
     #[test]
@@ -147,14 +156,14 @@ mod tests {
                 &ADDR,
                 "Approval",
                 "Approval()",
-                &TOPIC0,
+                Topic::from(TOPIC0),
                 None,
             )
             .unwrap();
-        let (_, _, abi) = cache
+        let row = cache
             .get_event_signature(ChainId::new(1), &ADDR, "Approval")
             .unwrap()
             .unwrap();
-        assert!(abi.is_none());
+        assert!(row.abi_json.is_none());
     }
 }

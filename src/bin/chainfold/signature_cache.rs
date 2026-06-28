@@ -4,7 +4,7 @@
 
 use alloy::primitives::{Address, B256};
 use async_trait::async_trait;
-use chainfold::evm::{ChainId, EventSignatureCache};
+use chainfold::evm::{ChainId, EventSignatureCache, Topic};
 use chainfold::signatures::{ResolvedEvent, SignatureCache, SignatureError};
 
 pub struct SqliteSignatureCache {
@@ -28,10 +28,10 @@ impl SignatureCache for SqliteSignatureCache {
         self.cache
             .get_event_signature(ChainId::new(chain_id), &Address::from(address), event_name)
             .map(|opt| {
-                opt.map(|(signature, topic0, abi_json)| ResolvedEvent {
-                    signature,
-                    topic0: topic0.into(),
-                    abi_json,
+                opt.map(|row| ResolvedEvent {
+                    signature: row.signature,
+                    topic0: row.topic0.b256().into(),
+                    abi_json: row.abi_json,
                 })
             })
             .map_err(|e| SignatureError::Cache(e.to_string()))
@@ -50,7 +50,7 @@ impl SignatureCache for SqliteSignatureCache {
                 &Address::from(address),
                 event_name,
                 &entry.signature,
-                &B256::from(entry.topic0),
+                Topic::from(B256::from(entry.topic0)),
                 entry.abi_json.as_deref(),
             )
             .map_err(|e| SignatureError::Cache(e.to_string()))
