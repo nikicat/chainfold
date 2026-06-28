@@ -17,6 +17,7 @@ use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
 use super::range_tree::{Range, install_gap_placeholder};
 use crate::arch::HistoryError;
 use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};
+use crate::evm::types::LogIdx;
 
 // ============================================================
 // Fetcher
@@ -315,7 +316,7 @@ fn gap_block_range(start: BlockPos, end: BlockPos) -> (u64, u64) {
     let from_block = match start {
         BlockPos::Bottom => 0,
         BlockPos::At { block, log_index } => {
-            if log_index == u32::MAX {
+            if log_index == LogIdx::MAX {
                 block.saturating_add(1)
             } else {
                 block

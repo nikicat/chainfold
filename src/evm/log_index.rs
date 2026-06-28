@@ -182,6 +182,7 @@ mod tests {
     use super::range_tree::align_window;
     use super::*;
     use crate::evm::cache::LogCache;
+    use crate::evm::types::LogIdx;
     use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
     use alloy::rpc::types::Log;
     use std::sync::Arc;
@@ -231,7 +232,7 @@ mod tests {
             BlockPos::before_block(1)
                 == BlockPos::At {
                     block: 0,
-                    log_index: u32::MAX,
+                    log_index: LogIdx::MAX,
                 }
         );
     }
@@ -294,7 +295,7 @@ mod tests {
             &mut tree,
             LogRef {
                 block_number: 250,
-                log_index: 0,
+                log_index: LogIdx::ZERO,
                 block_hash: HASH_B,
             },
             BlockPos::at(200, 0),
@@ -329,7 +330,7 @@ mod tests {
             &mut tree,
             LogRef {
                 block_number: 200,
-                log_index: u32::MAX,
+                log_index: LogIdx::MAX,
                 block_hash: HASH_B,
             },
             BlockPos::at(150, 0),
@@ -356,7 +357,7 @@ mod tests {
             &mut tree,
             LogRef {
                 block_number: 150,
-                log_index: 0,
+                log_index: LogIdx::ZERO,
                 block_hash: HASH_B, // different hash — still ignored
             },
             BlockPos::at(100, 0),
@@ -382,7 +383,7 @@ mod tests {
             &mut tree,
             LogRef {
                 block_number: 90,
-                log_index: 0,
+                log_index: LogIdx::ZERO,
                 block_hash: HASH_B,
             },
             BlockPos::before_block(90),

@@ -162,6 +162,62 @@ impl std::fmt::Debug for FilterHash {
 }
 
 // ============================================================
+// LogIdx
+// ============================================================
+
+/// A log's index within its block (the EVM `log_index`). A newtype over `u32`
+/// so it can't be silently swapped with a block number or any other bare
+/// integer as it flows through positions, events, and the range tree.
+///
+/// It is part of [`EvmPosition`], and therefore of its postcard marshal —
+/// hence `#[serde(transparent)]`, so saved resume-anchors stay byte-identical
+/// to the pre-newtype `u32` encoding. [`LogIdx::MAX`] is the end-of-block
+/// sentinel (`BlockPos::end_of_block`, tip positions): strictly greater than
+/// every real log index in a block.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct LogIdx(u32);
+
+impl LogIdx {
+    /// The first log index in a block.
+    pub const ZERO: Self = Self(0);
+    /// End-of-block sentinel: strictly greater than every real log index.
+    pub const MAX: Self = Self(u32::MAX);
+
+    pub const fn new(idx: u32) -> Self {
+        Self(idx)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for LogIdx {
+    fn from(idx: u32) -> Self {
+        Self(idx)
+    }
+}
+
+impl std::fmt::Display for LogIdx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ============================================================
 // EvmPosition — totally ordered (block, log_index)
 // ============================================================
 
@@ -194,19 +250,22 @@ impl std::fmt::Debug for FilterHash {
 )]
 pub struct EvmPosition {
     pub block: u64,
-    pub log_index: u32,
+    pub log_index: LogIdx,
 }
 
 impl EvmPosition {
     pub const fn new(block: u64, log_index: u32) -> Self {
-        Self { block, log_index }
+        Self {
+            block,
+            log_index: LogIdx::new(log_index),
+        }
     }
 
     /// Lower-bound sentinel: strictly less than every real log position.
     pub const fn earliest() -> Self {
         Self {
             block: 0,
-            log_index: 0,
+            log_index: LogIdx::ZERO,
         }
     }
 }
@@ -233,7 +292,7 @@ pub struct EvmEvent {
     pub block_number: u64,
     pub timestamp: Timestamp,
     pub block_hash: BlockHash,
-    pub log_index: u32,
+    pub log_index: LogIdx,
     pub tx_hash: TxHash,
     pub topics: Vec<Topic>,
     pub data: Vec<u8>,

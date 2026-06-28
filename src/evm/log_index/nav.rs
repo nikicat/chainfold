@@ -25,12 +25,12 @@ impl LogIndex {
         block: u64,
         log_index: u32,
     ) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_forward(BlockPos::At { block, log_index }, true)
+        self.cached_navigate_forward(BlockPos::at(block, log_index), true)
     }
 
     /// First cached log strictly after `(block, log_index)`.
     pub fn first_after(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_forward(BlockPos::At { block, log_index }, false)
+        self.cached_navigate_forward(BlockPos::at(block, log_index), false)
     }
 
     /// Last cached log at or before `(block, log_index)`.
@@ -39,12 +39,12 @@ impl LogIndex {
         block: u64,
         log_index: u32,
     ) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_backward(BlockPos::At { block, log_index }, true)
+        self.cached_navigate_backward(BlockPos::at(block, log_index), true)
     }
 
     /// Last cached log strictly before `(block, log_index)`.
     pub fn last_before(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_backward(BlockPos::At { block, log_index }, false)
+        self.cached_navigate_backward(BlockPos::at(block, log_index), false)
     }
 
     /// Forward variant of cached navigation. `inclusive` controls whether

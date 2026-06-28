@@ -331,6 +331,7 @@ pub fn cached_balance_floor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evm::types::LogIdx;
     use alloy::primitives::B256;
     use std::sync::Arc;
 
@@ -347,7 +348,7 @@ mod tests {
             block_number: 100,
             timestamp: 1000,
             block_hash: B256::ZERO,
-            log_index: 0,
+            log_index: LogIdx::ZERO,
             tx_hash: B256::ZERO,
             topics: vec![TRANSFER_TOPIC, from.into(), to.into()],
             data,
@@ -392,7 +393,7 @@ mod tests {
             block_number: 100,
             timestamp: 1000,
             block_hash: B256::ZERO,
-            log_index: 0,
+            log_index: LogIdx::ZERO,
             tx_hash: B256::ZERO,
             topics: vec![Topic::new(B256::repeat_byte(0xFF))],
             data: vec![],

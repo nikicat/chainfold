@@ -49,7 +49,7 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
-use crate::evm::types::{ChainId, EvmEvent, EvmPosition, FilterHash, Topic};
+use crate::evm::types::{ChainId, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic};
 
 fn fmt_topic(t: Option<&Topic>) -> String {
     match t {
@@ -515,7 +515,7 @@ fn log_to_evm_event(log: &Log) -> EvmEvent {
         // the caller fills it from the (cached) block header.
         timestamp: log.block_timestamp.unwrap_or(0),
         block_hash: log.block_hash.unwrap_or(B256::ZERO),
-        log_index: log.log_index.unwrap_or(0) as u32,
+        log_index: LogIdx::new(log.log_index.unwrap_or(0) as u32),
         tx_hash: log.transaction_hash.unwrap_or(B256::ZERO),
         topics: log.topics().iter().copied().map(Topic::new).collect(),
         data: log.data().data.to_vec(),
@@ -816,7 +816,7 @@ mod tests {
         // 100 blocks before anchor → block 100 → time_pos returns cut "just before 100"
         let pos = hs.time_pos(GENESIS_TS + 1200).await.unwrap();
         assert_eq!(pos.block, 99);
-        assert_eq!(pos.log_index, u32::MAX);
+        assert_eq!(pos.log_index, LogIdx::MAX);
     }
 
     #[tokio::test]

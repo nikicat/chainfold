@@ -13,7 +13,7 @@ use alloy::rpc::types::Log;
 
 use super::{CacheError, SharedConn};
 use crate::evm::observe::{SqliteOp, sqlite_span};
-use crate::evm::types::{FilterHash, Topic};
+use crate::evm::types::{FilterHash, LogIdx, Topic};
 
 // ============================================================
 // Helpers
@@ -158,7 +158,7 @@ impl LogCache {
         &self,
         filter_hash: &FilterHash,
         block_hash: &BlockHash,
-        log_index: u32,
+        log_index: LogIdx,
     ) -> Result<Option<Log>, CacheError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
@@ -169,7 +169,7 @@ impl LogCache {
              LIMIT 1",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![filter_hash, block_hash.as_slice(), log_index as i64],
+            rusqlite::params![filter_hash, block_hash.as_slice(), log_index.get() as i64],
             row_to_log,
         )?;
         match rows.next() {

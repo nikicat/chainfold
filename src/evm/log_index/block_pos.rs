@@ -7,6 +7,8 @@
 use alloy::primitives::BlockHash;
 use alloy::rpc::types::Log;
 
+use crate::evm::types::LogIdx;
+
 // ============================================================
 // BlockPos — position type for the tree
 // ============================================================
@@ -21,7 +23,7 @@ pub enum BlockPos {
     /// Strictly below every real `(block, log_index)`.
     Bottom,
     /// Concrete `(block, log_index)` coordinate.
-    At { block: u64, log_index: u32 },
+    At { block: u64, log_index: LogIdx },
 }
 
 impl BlockPos {
@@ -32,7 +34,7 @@ impl BlockPos {
         match block.checked_sub(1) {
             Some(prev) => BlockPos::At {
                 block: prev,
-                log_index: u32::MAX,
+                log_index: LogIdx::MAX,
             },
             None => BlockPos::Bottom,
         }
@@ -44,13 +46,16 @@ impl BlockPos {
     pub fn end_of_block(block: u64) -> Self {
         BlockPos::At {
             block,
-            log_index: u32::MAX,
+            log_index: LogIdx::MAX,
         }
     }
 
     /// Convert a concrete (block, `log_index`) pair to a position.
     pub fn at(block: u64, log_index: u32) -> Self {
-        BlockPos::At { block, log_index }
+        BlockPos::At {
+            block,
+            log_index: LogIdx::new(log_index),
+        }
     }
 
     /// The block number this position sits in, if concrete. `None` for
@@ -74,7 +79,7 @@ impl BlockPos {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct LogRef {
     pub block_number: u64,
-    pub log_index: u32,
+    pub log_index: LogIdx,
     pub block_hash: BlockHash,
 }
 
@@ -111,7 +116,7 @@ pub(super) fn log_ref_from(log: &Log) -> Option<LogRef> {
     let block_hash = log.block_hash?;
     Some(LogRef {
         block_number: log.block_number?,
-        log_index: log.log_index? as u32,
+        log_index: LogIdx::new(log.log_index? as u32),
         block_hash,
     })
 }
