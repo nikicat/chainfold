@@ -36,9 +36,10 @@
 > `[evm] chain_id_check`), and a type-discipline pass replacing blind
 > primitives in the EVM layer with semantic types — `ChainId`, `Topic`,
 > `Address`/`B256` (+ alloy `TxHash`/`BlockHash` aliases), and `ChainProvider`
-> (bundles `chain_id` so the lib stops re-fetching `eth_chainId`). Remaining
-> newtypes (`FilterHash`, `LogIndex`, `BlockNumber`) are queued in
-> [`TODO.md`](./TODO.md).
+> (bundles `chain_id` so the lib stops re-fetching `eth_chainId`). The sweep
+> was finished by three more newtypes — `FilterHash` (BLAKE3 cache key),
+> `LogIdx` (per-block log index), and the affine `BlockNumber` — so no bare
+> block-number/log-index/filter-hash primitives remain in the EVM layer.
 > Most targets are gated behind the non-default `evm` feature; the CLI binary
 > behind `cli`. Bare `cargo test` only exercises the 35 source-agnostic lib
 > tests + phases 3–6.

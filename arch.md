@@ -391,8 +391,11 @@ The EVM layer favors semantic types over blind primitives, so a 20-byte address 
 - **`Topic`** — a real newtype over `B256` for EVM log topics, since topics flow through chainfold's own filter API (`EvmEvent.topics`, the `[Option<Topic>; 4]` filter slots, `TRANSFER_TOPIC`, `compute_filter_hash`). It owns the address↔topic relationship (`From<Address>` left-pads; `Topic::address()` extracts). Unwrap to `B256` at the alloy `Filter`/`Log` boundary via `Topic::b256()`.
 - **`ChainId`** — newtype over `u64`; its SQLite mapping (`ToSql`) lives in the cache layer, not on the domain type, so `ChainId` stays persistence-free.
 - **`ChainProvider<P>`** — an alloy `Provider` paired with its `ChainId` (it delegates the trait's one required method, `root()`), so the EVM layer reads the chain for free instead of re-fetching `eth_chainId` at every history construction. The CLI's chain-id cross-check is config-gated (`[evm] chain_id_check = "verify" | "trust"`).
+- **`FilterHash([u8; 32])`** — the BLAKE3 cache partition key (address + topics). Not an EVM hash, so a newtype rather than a `B256`/alias; like `ChainId`, its `ToSql` lives in the cache layer so the domain type stays persistence-free.
+- **`LogIdx(u32)`** — the per-block log index. Named `LogIdx`, *not* `LogIndex`, to avoid colliding with the [`LogIndex`](#evm-source-layer) range tree.
+- **`BlockNumber(u64)`** — block heights, with an *affine* algebra: a block ± a `u64` offset is a block (`Add`/`Sub`/`saturating_*`/`checked_sub`); the distance between two blocks is a `u64` via `.get()`. The SQLite/`LogCache` layer, `compute_gaps`, `aligned_block_ranges`, and the alloy RPC boundary stay `u64`, converting at the seam.
 
-Still bare primitives, queued in [`TODO.md`](./TODO.md): the BLAKE3 `filter_hash` (`FilterHash`), `log_index` (`LogIndex`), and `block_number` (`BlockNumber`).
+`LogIdx` and `BlockNumber` are both `#[serde(transparent)]`, so the `EvmPosition` postcard marshal — and saved resume-anchors — stay byte-identical to the pre-newtype encoding.
 
 ## Observability contract
 
