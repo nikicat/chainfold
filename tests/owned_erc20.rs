@@ -19,7 +19,7 @@ use alloy::providers::ProviderBuilder;
 use chainfold::arch::{Hist, HistBackend, Position};
 use chainfold::evm::{
     ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, LogCache, OUT_KEY, OwnedErc20,
-    TRANSFER_TOPIC,
+    TRANSFER_TOPIC, Topic,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -84,7 +84,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
 
     // Pick the first transfer's `from` as the owner under test.
     let first = &all_transfers[0];
-    let owner = Address::from_word(first.topics[1]);
+    let owner = first.topics[1].address();
     println!(
         "Chosen owner: {:#x} (with {} surrounding transfers)",
         owner,
@@ -93,7 +93,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
 
     // Build the expected set: every event where owner is either `from`
     // or `to`, deduped by (block, log_index).
-    let owner_padded = owner.into_word();
+    let owner_padded = Topic::from(owner);
     let mut expected: Vec<&EvmEvent> = all_transfers
         .iter()
         .filter(|e| {
@@ -200,7 +200,7 @@ async fn owned_erc20_empty_for_inactive_address() {
         // outgoing. Verify direction is consistent if any event surfaces.
         let topic1 = item.item.value.topics.get(1).copied();
         let topic2 = item.item.value.topics.get(2).copied();
-        let owner_padded = owner.into_word();
+        let owner_padded = Topic::from(owner);
         match item.item.source_key.as_str() {
             "out" => assert_eq!(topic1, Some(owner_padded)),
             "in" => assert_eq!(topic2, Some(owner_padded)),

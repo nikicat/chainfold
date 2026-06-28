@@ -17,13 +17,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, B256};
+use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Hist, HistBackend, HistStore, HistoryError, Positioned, watch_hist};
 use chainfold::evm::{
-    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, SubscribeTransport,
+    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, SubscribeTransport, Topic,
     rpc_retry_layer, versioned_path,
 };
 use chrono::NaiveDate;
@@ -90,7 +90,7 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
     let topic0_hex = e
         .topics
         .first()
-        .map_or_else(|| "(none)".into(), |t| format!("0x{}", hex::encode(t)));
+        .map_or_else(|| "(none)".into(), |t| format!("{t}"));
 
     println!(
         "[{:>4}] block={} log_idx={} tx=0x{}..{} topic0={}..{}",
@@ -154,8 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let address: Address = args.address.parse()?;
-    let topic0 = args.topic0.as_deref().map(str::parse::<B256>).transpose()?;
-    let topics: [Option<B256>; 4] = [topic0, None, None, None];
+    let topic0 = args
+        .topic0
+        .as_deref()
+        .map(str::parse::<Topic>)
+        .transpose()?;
+    let topics: [Option<Topic>; 4] = [topic0, None, None, None];
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);

@@ -9,6 +9,7 @@ use alloy::providers::Provider;
 use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainId, ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, SubscribeTransport,
+    Topic,
 };
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
@@ -19,8 +20,28 @@ use crate::fmt::format_timestamp;
 use crate::signature_cache::SqliteSignatureCache;
 use crate::util::{parse_hex_address, resolve_range};
 
+/// How much of a hex value to render — driven by the `--full` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HexDetail {
+    /// Every byte.
+    Full,
+    /// Abbreviated `0xdead…beef` head/tail.
+    Abbreviated,
+}
+
+impl HexDetail {
+    /// From the `--full` flag: `true` → [`Self::Full`].
+    fn from_full(full: bool) -> Self {
+        if full { Self::Full } else { Self::Abbreviated }
+    }
+
+    fn is_full(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 struct PrintOpts {
-    full: bool,
+    detail: HexDetail,
     decoder: Option<Event>,
 }
 
@@ -44,11 +65,11 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         None
     };
     let opts = PrintOpts {
-        full: events_args.full,
+        detail: HexDetail::from_full(events_args.full),
         decoder,
     };
 
-    let topics: [Option<B256>; 4] = [Some(resolved.topic0), None, None, None];
+    let topics: [Option<Topic>; 4] = [Some(Topic::from(resolved.topic0)), None, None, None];
     let backend = EvmLogHistory::with_options(
         provider.clone(),
         Arc::new(cache.logs()),
@@ -178,7 +199,7 @@ fn build_decoder(lookup: &Lookup) -> Result<Event, Box<dyn std::error::Error>> {
 
 fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize, opts: &PrintOpts) {
     let e = &item.item;
-    let tx_str = if opts.full {
+    let tx_str = if opts.detail.is_full() {
         format!("{:#x}", e.tx_hash)
     } else {
         let b = e.tx_hash.as_slice();
@@ -190,8 +211,8 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize, opts: &Pr
         (String::new(), String::new())
     } else {
         (
-            format_topics(&e.topics, opts.full),
-            format_data(&e.data, opts.full),
+            format_topics(&e.topics, opts.detail),
+            format_data(&e.data, opts.detail),
         )
     };
     println!(
@@ -204,15 +225,15 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize, opts: &Pr
         data_str,
     );
     if let Some(event) = &opts.decoder {
-        print_decoded(event, e, opts.full);
+        print_decoded(event, e, opts.detail);
     }
 }
 
-fn format_topics(topics: &[B256], full: bool) -> String {
+fn format_topics(topics: &[Topic], detail: HexDetail) -> String {
     // topic0 is the event selector — fixed by the filter, redundant.
     let rest = topics.iter().skip(1);
-    let parts: Vec<String> = if full {
-        rest.map(|t| format!("{t:#x}")).collect()
+    let parts: Vec<String> = if detail.is_full() {
+        rest.map(|t| format!("{t}")).collect()
     } else {
         rest.map(|t| {
             let b = t.as_slice();
@@ -227,11 +248,11 @@ fn format_topics(topics: &[B256], full: bool) -> String {
     }
 }
 
-fn format_data(data: &[u8], full: bool) -> String {
+fn format_data(data: &[u8], detail: HexDetail) -> String {
     if data.is_empty() {
         return String::new();
     }
-    if full {
+    if detail.is_full() {
         return format!("  data=0x{}", hex::encode(data));
     }
     let n = data.len().min(16);
@@ -239,8 +260,8 @@ fn format_data(data: &[u8], full: bool) -> String {
     format!("  data=0x{}{}", hex::encode(&data[..n]), suffix)
 }
 
-fn print_decoded(event: &Event, log: &EvmEvent, full: bool) {
-    let decoded = match event.decode_log_parts(log.topics.iter().copied(), &log.data) {
+fn print_decoded(event: &Event, log: &EvmEvent, detail: HexDetail) {
+    let decoded = match event.decode_log_parts(log.topics.iter().map(|t| t.b256()), &log.data) {
         Ok(d) => d,
         Err(err) => {
             println!("       decode error: {err}");
@@ -268,7 +289,7 @@ fn print_decoded(event: &Event, log: &EvmEvent, full: bool) {
         } else {
             ty.into_owned()
         };
-        println!("       {name} ({kind}) = {}", format_value(&value, full));
+        println!("       {name} ({kind}) = {}", format_value(&value, detail));
     }
 }
 
@@ -277,7 +298,7 @@ const PREVIEW_BYTES: usize = 16;
 /// Max chars shown for a `String` value when not in `--full` mode.
 const PREVIEW_STRING_CHARS: usize = 60;
 
-fn format_value(v: &DynSolValue, full: bool) -> String {
+fn format_value(v: &DynSolValue, detail: HexDetail) -> String {
     match v {
         DynSolValue::Bool(b) => b.to_string(),
         DynSolValue::Int(i, _) => i.to_string(),
@@ -285,17 +306,17 @@ fn format_value(v: &DynSolValue, full: bool) -> String {
         DynSolValue::Address(a) => format!("0x{}", hex::encode(a.as_slice())),
         DynSolValue::Function(f) => format!("0x{}", hex::encode(f.as_slice())),
         DynSolValue::FixedBytes(b, n) => format!("0x{}", hex::encode(&b.as_slice()[..*n])),
-        DynSolValue::Bytes(b) => format_bytes(b, full),
-        DynSolValue::String(s) => format_string(s, full),
+        DynSolValue::Bytes(b) => format_bytes(b, detail),
+        DynSolValue::String(s) => format_string(s, detail),
         DynSolValue::Array(items) | DynSolValue::FixedArray(items) | DynSolValue::Tuple(items) => {
-            let parts: Vec<String> = items.iter().map(|i| format_value(i, full)).collect();
+            let parts: Vec<String> = items.iter().map(|i| format_value(i, detail)).collect();
             format!("[{}]", parts.join(", "))
         }
     }
 }
 
-fn format_bytes(b: &[u8], full: bool) -> String {
-    if full || b.len() <= PREVIEW_BYTES {
+fn format_bytes(b: &[u8], detail: HexDetail) -> String {
+    if detail.is_full() || b.len() <= PREVIEW_BYTES {
         return format!("0x{}", hex::encode(b));
     }
     format!(
@@ -305,8 +326,8 @@ fn format_bytes(b: &[u8], full: bool) -> String {
     )
 }
 
-fn format_string(s: &str, full: bool) -> String {
-    if full || s.chars().count() <= PREVIEW_STRING_CHARS {
+fn format_string(s: &str, detail: HexDetail) -> String {
+    if detail.is_full() || s.chars().count() <= PREVIEW_STRING_CHARS {
         return format!("\"{s}\"");
     }
     let truncated: String = s.chars().take(PREVIEW_STRING_CHARS).collect();
@@ -318,14 +339,14 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, B256, U256};
 
-    fn t32(b: u8) -> B256 {
-        B256::repeat_byte(b)
+    fn t32(b: u8) -> Topic {
+        Topic::new(B256::repeat_byte(b))
     }
 
     #[test]
     fn topics_truncate_skips_topic0_and_shortens() {
         let topics = [t32(0xaa), t32(0xbb)];
-        let s = format_topics(&topics, false);
+        let s = format_topics(&topics, HexDetail::Abbreviated);
         // topic0 (0xaa…) must be filtered out; topic1 shown truncated
         // (first 4 + last 4 bytes only, not the full 32).
         assert!(!s.contains("aaaa"));
@@ -336,23 +357,23 @@ mod tests {
     #[test]
     fn topics_full_shows_each_topic_in_full() {
         let topics = [t32(0xaa), t32(0xbb), t32(0xcc)];
-        let s = format_topics(&topics, true);
-        assert!(s.contains(&format!("0x{}", hex::encode(t32(0xbb)))));
-        assert!(s.contains(&format!("0x{}", hex::encode(t32(0xcc)))));
+        let s = format_topics(&topics, HexDetail::Full);
+        assert!(s.contains(&format!("0x{}", hex::encode(t32(0xbb).as_slice()))));
+        assert!(s.contains(&format!("0x{}", hex::encode(t32(0xcc).as_slice()))));
         // topic0 still filtered.
-        assert!(!s.contains(&format!("0x{}", hex::encode(t32(0xaa)))));
+        assert!(!s.contains(&format!("0x{}", hex::encode(t32(0xaa).as_slice()))));
     }
 
     #[test]
     fn topics_empty_when_only_topic0() {
-        assert_eq!(format_topics(&[t32(0xaa)], false), "");
-        assert_eq!(format_topics(&[], false), "");
+        assert_eq!(format_topics(&[t32(0xaa)], HexDetail::Abbreviated), "");
+        assert_eq!(format_topics(&[], HexDetail::Abbreviated), "");
     }
 
     #[test]
     fn data_truncates_to_16_bytes_with_ellipsis() {
         let data = vec![0xab; 32];
-        let s = format_data(&data, false);
+        let s = format_data(&data, HexDetail::Abbreviated);
         // 16 bytes = 32 hex chars, plus ellipsis.
         assert_eq!(s, format!("  data=0x{}…", "ab".repeat(16)));
     }
@@ -360,21 +381,21 @@ mod tests {
     #[test]
     fn data_full_shows_everything() {
         let data = vec![0xab; 32];
-        let s = format_data(&data, true);
+        let s = format_data(&data, HexDetail::Full);
         assert_eq!(s, format!("  data=0x{}", "ab".repeat(32)));
     }
 
     #[test]
     fn data_empty_is_blank() {
-        assert_eq!(format_data(&[], false), "");
-        assert_eq!(format_data(&[], true), "");
+        assert_eq!(format_data(&[], HexDetail::Abbreviated), "");
+        assert_eq!(format_data(&[], HexDetail::Full), "");
     }
 
     #[test]
     fn format_bytes_below_preview_threshold_is_not_truncated() {
         let b = vec![0u8; PREVIEW_BYTES];
         assert_eq!(
-            format_bytes(&b, false),
+            format_bytes(&b, HexDetail::Abbreviated),
             format!("0x{}", "00".repeat(PREVIEW_BYTES))
         );
     }
@@ -382,21 +403,21 @@ mod tests {
     #[test]
     fn format_bytes_above_threshold_truncates_and_reports_length() {
         let b = vec![0xcd; 100];
-        let s = format_bytes(&b, false);
+        let s = format_bytes(&b, HexDetail::Abbreviated);
         assert_eq!(s, format!("0x{}… (100 bytes)", "cd".repeat(PREVIEW_BYTES)));
     }
 
     #[test]
     fn format_bytes_full_overrides_truncation() {
         let b = vec![0xcd; 100];
-        let s = format_bytes(&b, true);
+        let s = format_bytes(&b, HexDetail::Full);
         assert_eq!(s, format!("0x{}", "cd".repeat(100)));
     }
 
     #[test]
     fn format_string_truncates_with_char_count() {
         let s = "x".repeat(120);
-        let out = format_string(&s, false);
+        let out = format_string(&s, HexDetail::Abbreviated);
         assert_eq!(
             out,
             format!("\"{}…\" (120 chars)", "x".repeat(PREVIEW_STRING_CHARS))
@@ -405,8 +426,8 @@ mod tests {
 
     #[test]
     fn format_string_short_is_quoted_in_full() {
-        assert_eq!(format_string("hello", false), "\"hello\"");
-        assert_eq!(format_string("hello", true), "\"hello\"");
+        assert_eq!(format_string("hello", HexDetail::Abbreviated), "\"hello\"");
+        assert_eq!(format_string("hello", HexDetail::Full), "\"hello\"");
     }
 
     #[test]
@@ -416,7 +437,7 @@ mod tests {
             DynSolValue::Uint(U256::from(42u64), 256),
             DynSolValue::Bytes(vec![0xee; 50]),
         ]);
-        let s = format_value(&value, false);
+        let s = format_value(&value, HexDetail::Abbreviated);
         assert_eq!(
             s,
             format!("[42, 0x{}… (50 bytes)]", "ee".repeat(PREVIEW_BYTES))
@@ -427,20 +448,26 @@ mod tests {
     fn format_value_address_and_fixed_bytes() {
         let addr = Address::from([0x12u8; 20]);
         assert_eq!(
-            format_value(&DynSolValue::Address(addr), false),
+            format_value(&DynSolValue::Address(addr), HexDetail::Abbreviated),
             "0x1212121212121212121212121212121212121212"
         );
 
         let v = DynSolValue::FixedBytes(B256::from([0x34u8; 32]), 4);
         // bytes4 should show only first 4 bytes.
-        assert_eq!(format_value(&v, false), "0x34343434");
+        assert_eq!(format_value(&v, HexDetail::Abbreviated), "0x34343434");
     }
 
     #[test]
     fn format_value_bool_int_uint() {
-        assert_eq!(format_value(&DynSolValue::Bool(true), false), "true");
         assert_eq!(
-            format_value(&DynSolValue::Uint(U256::from(1_000_000u64), 256), false),
+            format_value(&DynSolValue::Bool(true), HexDetail::Abbreviated),
+            "true"
+        );
+        assert_eq!(
+            format_value(
+                &DynSolValue::Uint(U256::from(1_000_000u64), 256),
+                HexDetail::Abbreviated
+            ),
             "1000000"
         );
     }

@@ -29,11 +29,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, B256};
+use alloy::primitives::Address;
 use alloy::providers::Provider;
 
 use crate::arch::{HistStore, HistoryError};
-use crate::evm::{ChainProvider, EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC};
+use crate::evm::{ChainProvider, EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC, Topic};
 use crate::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 
 /// Source key for outgoing transfers (`owner == from`).
@@ -41,10 +41,10 @@ pub const OUT_KEY: &str = "out";
 /// Source key for incoming transfers (`owner == to`).
 pub const IN_KEY: &str = "in";
 
-/// The 32-byte topic word for an indexed `address` event parameter — the
-/// address left-padded with 12 zero bytes (alloy's [`Address::into_word`]).
-fn address_to_topic(addr: Address) -> B256 {
-    addr.into_word()
+/// The topic for an indexed `address` event parameter — the address
+/// left-padded with 12 zero bytes (see [`Topic::from`]`(Address)`).
+fn address_to_topic(addr: Address) -> Topic {
+    addr.into()
 }
 
 /// ERC20 transfers from-or-to a fixed owner address on a single token.
@@ -83,8 +83,8 @@ where
         block_time: u64,
     ) -> Result<Self, HistoryError> {
         let owner_topic = address_to_topic(owner);
-        let out_topics: [Option<B256>; 4] = [Some(TRANSFER_TOPIC), Some(owner_topic), None, None];
-        let in_topics: [Option<B256>; 4] = [Some(TRANSFER_TOPIC), None, Some(owner_topic), None];
+        let out_topics: [Option<Topic>; 4] = [Some(TRANSFER_TOPIC), Some(owner_topic), None, None];
+        let in_topics: [Option<Topic>; 4] = [Some(TRANSFER_TOPIC), None, Some(owner_topic), None];
 
         let out_history = EvmLogHistory::with_options(
             provider.clone(),

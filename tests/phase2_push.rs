@@ -23,14 +23,14 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
 
-use chainfold::evm::{ChainProvider, EvmLogHistory, LogCache, SubscribeTransport};
+use chainfold::evm::{ChainProvider, EvmLogHistory, LogCache, SubscribeTransport, Topic};
 
 use common::anvil::{local, skip_no_anvil};
 
 // Filter that matches no contract — push-path mechanics are exercised
 // purely by new-head deliveries (empty pages). Independent of any
 // contract emitting events.
-const SENTINEL_TOPIC: B256 = B256::repeat_byte(0xCC);
+const SENTINEL_TOPIC: Topic = Topic::new(B256::repeat_byte(0xCC));
 const SENTINEL_ADDR: Address = Address::repeat_byte(0xDE);
 
 fn temp_db() -> (tempfile::TempDir, String) {

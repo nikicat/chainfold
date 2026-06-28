@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::{Address, B256, BlockHash, TxHash};
 
 use crate::arch::{Position, Timestamp};
 
@@ -44,6 +44,77 @@ impl std::fmt::Display for ChainId {
 impl From<u64> for ChainId {
     fn from(id: u64) -> Self {
         Self(id)
+    }
+}
+
+// ============================================================
+// Topic
+// ============================================================
+
+/// An EVM log topic (`topic0`..`topic3`). A real newtype over [`B256`] —
+/// unlike block/transaction hashes, which use alloy's [`BlockHash`]/[`TxHash`]
+/// *aliases* (documentation only) — because a topic is a distinct concept that
+/// flows through chainfold's own filter API, and confusing one with a hash
+/// would be a genuine bug. alloy itself models all three as a bare `B256`.
+///
+/// Unwrap to the inner `B256` with [`Topic::b256`] at the alloy `Filter`/`Log`
+/// boundary; everything chainfold-facing speaks `Topic`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Topic(B256);
+
+impl Topic {
+    pub const fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// The inner 32-byte value, for the alloy boundary.
+    pub const fn b256(self) -> B256 {
+        self.0
+    }
+
+    /// Raw bytes, for hashing / `SQLite` binds.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    /// Interpret this topic as an indexed `address` event parameter — the low
+    /// 20 bytes (alloy's [`Address::from_word`]). Inverse of `Topic::from(addr)`.
+    pub fn address(self) -> Address {
+        Address::from_word(self.0)
+    }
+}
+
+impl From<B256> for Topic {
+    fn from(value: B256) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Address> for Topic {
+    /// An indexed `address` event parameter is the address left-padded with 12
+    /// zero bytes (alloy's [`Address::into_word`]).
+    fn from(address: Address) -> Self {
+        Self(address.into_word())
+    }
+}
+
+impl From<Topic> for B256 {
+    fn from(topic: Topic) -> Self {
+        topic.0
+    }
+}
+
+impl std::fmt::Display for Topic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl std::str::FromStr for Topic {
+    type Err = <B256 as std::str::FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<B256>().map(Self)
     }
 }
 
@@ -118,10 +189,10 @@ pub struct EvmEvent {
     pub contract_address: Address,
     pub block_number: u64,
     pub timestamp: Timestamp,
-    pub block_hash: B256,
+    pub block_hash: BlockHash,
     pub log_index: u32,
-    pub tx_hash: B256,
-    pub topics: Vec<B256>,
+    pub tx_hash: TxHash,
+    pub topics: Vec<Topic>,
     pub data: Vec<u8>,
 }
 
@@ -141,14 +212,14 @@ impl EvmEvent {
 #[derive(Debug, Clone)]
 pub struct EvmBlock {
     pub number: u64,
-    pub hash: B256,
-    pub parent_hash: B256,
+    pub hash: BlockHash,
+    pub parent_hash: BlockHash,
     pub timestamp: Timestamp,
 }
 
 #[derive(Debug, Clone)]
 pub struct EvmTransaction {
-    pub hash: B256,
+    pub hash: TxHash,
     pub from: Address,
     pub to: Option<Address>,
     pub value: u128,

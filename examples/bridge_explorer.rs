@@ -20,14 +20,14 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{HistStore, Position};
 use chainfold::evm::{
-    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer,
-    versioned_path,
+    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, Topic,
+    rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 use clap::Parser;
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let topic0: B256 = match &args.topic0 {
+    let topic0: Topic = match &args.topic0 {
         Some(s) => s.parse()?,
         None => TRANSFER_TOPIC,
     };
@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db_path = versioned_path(&format!("{db_dir}/log_store.db"));
         let store = Arc::new(LogCache::open(&db_path)?);
 
-        let topics: [Option<B256>; 4] = [Some(topic0), None, None, None];
+        let topics: [Option<Topic>; 4] = [Some(topic0), None, None, None];
         let history = EvmLogHistory::with_options(
             provider.clone(),
             store,
@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let m = &item.item;
         let topic0_hex = m.value.topics.first().map_or_else(
             || "(none)".into(),
-            |t| format!("0x{}", hex::encode(&t[..4])),
+            |t| format!("0x{}", hex::encode(&t.as_slice()[..4])),
         );
         let ts = chrono::DateTime::from_timestamp(m.value.timestamp as i64, 0).map_or_else(
             || "----------T--:--:--Z".into(),

@@ -49,11 +49,11 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::log_index::{BlockPos, Fetcher, LogIndex, LogPage};
 use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
 use crate::evm::subscriber::{EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};
-use crate::evm::types::{ChainId, EvmEvent, EvmPosition};
+use crate::evm::types::{ChainId, EvmEvent, EvmPosition, Topic};
 
-fn fmt_topic(t: Option<&B256>) -> String {
+fn fmt_topic(t: Option<&Topic>) -> String {
     match t {
-        Some(b) => format!("{b:#x}"),
+        Some(b) => format!("{b}"),
         None => "*".into(),
     }
 }
@@ -74,7 +74,7 @@ pub struct EvmLogHistory<P> {
     index: Arc<LogIndex>,
     filter_hash: [u8; 32],
     address: Address,
-    topics: [Option<B256>; 4],
+    topics: [Option<Topic>; 4],
     chunk_size: u64,
 
     // Reactive tip stores. `best`/`safe` are stubs whose watch channels
@@ -103,7 +103,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         provider: ChainProvider<P>,
         store: Arc<LogCache>,
         address: Address,
-        topics: [Option<B256>; 4],
+        topics: [Option<Topic>; 4],
     ) -> Result<Arc<Self>, HistoryError> {
         Self::with_options(
             provider,
@@ -120,7 +120,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
         provider: ChainProvider<P>,
         store: Arc<LogCache>,
         address: Address,
-        topics: [Option<B256>; 4],
+        topics: [Option<Topic>; 4],
         chunk_size: u64,
         block_time: u64,
     ) -> Result<Arc<Self>, HistoryError> {
@@ -491,18 +491,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<Evm
 /// Apply `topics[0..3]` to an alloy [`Filter`] in the conventional slots
 /// (`event_signature` / `topic1` / `topic2` / `topic3`). Skips slots that
 /// are `None` (matches anything in that position).
-fn apply_topics(mut filter: Filter, topics: &[Option<B256>; 4]) -> Filter {
+fn apply_topics(mut filter: Filter, topics: &[Option<Topic>; 4]) -> Filter {
     if let Some(t) = topics[0] {
-        filter = filter.event_signature(t);
+        filter = filter.event_signature(t.b256());
     }
     if let Some(t) = topics[1] {
-        filter = filter.topic1(t);
+        filter = filter.topic1(t.b256());
     }
     if let Some(t) = topics[2] {
-        filter = filter.topic2(t);
+        filter = filter.topic2(t.b256());
     }
     if let Some(t) = topics[3] {
-        filter = filter.topic3(t);
+        filter = filter.topic3(t.b256());
     }
     filter
 }
@@ -517,7 +517,7 @@ fn log_to_evm_event(log: &Log) -> EvmEvent {
         block_hash: log.block_hash.unwrap_or(B256::ZERO),
         log_index: log.log_index.unwrap_or(0) as u32,
         tx_hash: log.transaction_hash.unwrap_or(B256::ZERO),
-        topics: log.topics().to_vec(),
+        topics: log.topics().iter().copied().map(Topic::new).collect(),
         data: log.data().data.to_vec(),
     }
 }
@@ -568,7 +568,7 @@ fn build_fetcher<P>(
     provider: P,
     store: Arc<LogCache>,
     address: Address,
-    topics: [Option<B256>; 4],
+    topics: [Option<Topic>; 4],
 ) -> Fetcher
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
@@ -623,7 +623,7 @@ mod tests {
     use futures_util::TryStreamExt;
 
     const ADDR: Address = Address::repeat_byte(0x42);
-    const TOPICS: [Option<B256>; 4] = [None; 4];
+    const TOPICS: [Option<Topic>; 4] = [None; 4];
     const GENESIS_TS: u64 = 1_600_000_000;
     const TEST_CHAIN: u64 = 1;
 

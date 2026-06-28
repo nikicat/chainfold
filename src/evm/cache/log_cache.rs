@@ -13,6 +13,7 @@ use alloy::rpc::types::Log;
 
 use super::{CacheError, SharedConn};
 use crate::evm::observe::{SqliteOp, sqlite_span};
+use crate::evm::types::Topic;
 
 // ============================================================
 // Helpers
@@ -22,7 +23,7 @@ use crate::evm::observe::{SqliteOp, sqlite_span};
 ///
 /// Null topics use a 0xFF sentinel (all-ones, 32 bytes) to distinguish
 /// "no topic filter" from any real topic value.
-pub fn compute_filter_hash(address: &Address, topics: &[Option<B256>; 4]) -> [u8; 32] {
+pub fn compute_filter_hash(address: &Address, topics: &[Option<Topic>; 4]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(address.as_slice());
     let sentinel = [0xFF_u8; 32];
@@ -505,7 +506,7 @@ mod tests {
     #[test]
     fn filter_hash_deterministic() {
         let addr = Address::repeat_byte(0x42);
-        let topics = [Some(B256::repeat_byte(0xAA)), None, None, None];
+        let topics = [Some(Topic::new(B256::repeat_byte(0xAA))), None, None, None];
         assert_eq!(
             compute_filter_hash(&addr, &topics),
             compute_filter_hash(&addr, &topics)
@@ -526,7 +527,7 @@ mod tests {
         let addr = Address::repeat_byte(0x42);
         assert_ne!(
             compute_filter_hash(&addr, &[None, None, None, None]),
-            compute_filter_hash(&addr, &[Some(B256::ZERO), None, None, None])
+            compute_filter_hash(&addr, &[Some(Topic::new(B256::ZERO)), None, None, None])
         );
     }
 

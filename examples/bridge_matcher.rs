@@ -27,13 +27,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, B256};
+use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::evm::{
-    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, rpc_retry_layer,
-    versioned_path,
+    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, Topic,
+    rpc_retry_layer, versioned_path,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
@@ -111,9 +111,9 @@ enum MatchOn {
 
 fn extract_key(e: &EvmEvent, on: MatchOn) -> Option<Vec<u8>> {
     match on {
-        MatchOn::Topic1 => e.topics.get(1).map(|t| t.to_vec()),
-        MatchOn::Topic2 => e.topics.get(2).map(|t| t.to_vec()),
-        MatchOn::Topic3 => e.topics.get(3).map(|t| t.to_vec()),
+        MatchOn::Topic1 => e.topics.get(1).map(|t| t.as_slice().to_vec()),
+        MatchOn::Topic2 => e.topics.get(2).map(|t| t.as_slice().to_vec()),
+        MatchOn::Topic3 => e.topics.get(3).map(|t| t.as_slice().to_vec()),
         MatchOn::Data => Some(e.data.clone()),
     }
 }
@@ -162,7 +162,7 @@ fn make_match_fn(
 async fn open_history(
     rpc_url: &str,
     address: Address,
-    topic0: B256,
+    topic0: Topic,
     db_subdir: &str,
     chunk_size: u64,
 ) -> Result<
@@ -175,7 +175,7 @@ async fn open_history(
     std::fs::create_dir_all(db_subdir).ok();
     let db_path = versioned_path(&format!("{db_subdir}/log_store.db"));
     let store = Arc::new(LogCache::open(&db_path)?);
-    let topics: [Option<B256>; 4] = [Some(topic0), None, None, None];
+    let topics: [Option<Topic>; 4] = [Some(topic0), None, None, None];
     Ok(EvmLogHistory::with_options(provider, store, address, topics, chunk_size, 12).await?)
 }
 
@@ -192,13 +192,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src_topic0 = args
         .src_topic0
         .as_ref()
-        .map(|s| s.parse::<B256>())
+        .map(|s| s.parse::<Topic>())
         .transpose()?
         .unwrap_or(TRANSFER_TOPIC);
     let dst_topic0 = args
         .dst_topic0
         .as_ref()
-        .map(|s| s.parse::<B256>())
+        .map(|s| s.parse::<Topic>())
         .transpose()?
         .unwrap_or(TRANSFER_TOPIC);
 

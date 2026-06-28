@@ -11,7 +11,7 @@
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, B256, Bytes, U256};
+use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
 use std::future::IntoFuture;
 
@@ -23,7 +23,7 @@ use crate::arch::HistoryError;
 
 use super::cache::Erc20Cache;
 use super::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
-use super::types::{ChainId, EvmEvent};
+use super::types::{ChainId, EvmEvent, Topic};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -35,7 +35,7 @@ sol! {
 }
 
 /// Keccak256 of `Transfer(address,address,uint256)`.
-pub const TRANSFER_TOPIC: B256 = Transfer::SIGNATURE_HASH;
+pub const TRANSFER_TOPIC: Topic = Topic::new(Transfer::SIGNATURE_HASH);
 
 /// On-chain ERC20 metadata.
 pub struct Erc20Metadata {
@@ -235,8 +235,8 @@ pub fn decode_transfer(event: &EvmEvent) -> Option<TransferData> {
     if event.topics.len() < 3 || event.topics[0] != TRANSFER_TOPIC {
         return None;
     }
-    let from = Address::from_word(event.topics[1]);
-    let to = Address::from_word(event.topics[2]);
+    let from = event.topics[1].address();
+    let to = event.topics[2].address();
     let amount = if event.data.len() >= 32 {
         U256::from_be_slice(&event.data[..32])
     } else {
@@ -349,7 +349,7 @@ mod tests {
             block_hash: B256::ZERO,
             log_index: 0,
             tx_hash: B256::ZERO,
-            topics: vec![TRANSFER_TOPIC, from.into_word(), to.into_word()],
+            topics: vec![TRANSFER_TOPIC, from.into(), to.into()],
             data,
         }
     }
@@ -394,7 +394,7 @@ mod tests {
             block_hash: B256::ZERO,
             log_index: 0,
             tx_hash: B256::ZERO,
-            topics: vec![B256::repeat_byte(0xFF)],
+            topics: vec![Topic::new(B256::repeat_byte(0xFF))],
             data: vec![],
         };
         assert_eq!(
