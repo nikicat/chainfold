@@ -11,7 +11,7 @@ downloading a chain.
 
 > **Status:** under active development. Phases 0–6 of the
 > [refactor plan](./refactor.md) and the OwnedErc20 follow-up shipped.
-> 126 active tests + 7 anvil/fork-only tests pass. EVM source is the
+> 194 active tests + 8 anvil/fork-only tests pass. EVM source is the
 > first concrete backend; the source-agnostic core is shaped to take
 > Solana, Bitcoin, CEX, etc.
 >
@@ -80,7 +80,7 @@ on the same counts. See [Observability](#observability---stats).
 git clone <repo> chainfold
 cd chainfold
 cargo build --features evm
-cargo test --features evm   # 126 tests, ~1s
+cargo test --all-features   # 194 tests, ~1s
 ```
 
 If you plan to commit changes, install the pre-commit hooks once per
@@ -220,10 +220,10 @@ for that source. All combinators, merge, and matcher work automatically.
 ## Running integration tests
 
 ```bash
-# Quick lib + source-agnostic suite (126 tests, ~1s):
+# Quick lib + source-agnostic suite (194 tests, ~1s):
 cargo test --features evm
 
-# Anvil + fork-mainnet tests (7 tests, slower; needs `anvil` on PATH
+# Anvil + fork-mainnet tests (8 tests, slower; needs `anvil` on PATH
 # and optionally MAINNET_RPC_URL in .env):
 cargo test --features evm -- --ignored
 ```

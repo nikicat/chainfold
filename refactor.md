@@ -24,10 +24,21 @@
 > | Same-`P` merge alias | ⏳ Deferred | Not load-bearing; `MergedItem.source_key` is useful as-is. |
 > | Reducer | ⏳ Deferred (Phase 6 spec) | Sibling of Matcher; `Erc20Balance` rebuild gates on it. |
 >
-> **Test totals (2026-05-26, `cargo test --all-features`):** 106 lib + 49
+> **Test totals (2026-06-28, `cargo test --all-features`):** 113 lib + 50
 > CLI-bin unit + 31 active integration (anvil_smoke + mock_provider_smoke +
-> 9 phase3 + 6 phase4 + 8 phase5 + 6 phase6) = **186 active**, 7 ignored
-> (anvil/fork-only: owned_erc20, phase1_layering, phase2_push, 1 anvil_smoke).
+> 9 phase3 + 6 phase4 + 8 phase5 + 6 phase6) = **194 active**, 8 ignored
+> (anvil/fork-only: owned_erc20, phase1_layering, phase2_push, 1 anvil_smoke,
+> + 1 ignored `rpc_span` doctest).
+>
+> **2026-06 follow-up work (shipped, not a numbered phase):** an
+> observability contract + CLI `--stats` summary (`src/evm/observe.rs`;
+> `block_timestamp` fast-path; the chain-id cross-check is config-gated via
+> `[evm] chain_id_check`), and a type-discipline pass replacing blind
+> primitives in the EVM layer with semantic types — `ChainId`, `Topic`,
+> `Address`/`B256` (+ alloy `TxHash`/`BlockHash` aliases), and `ChainProvider`
+> (bundles `chain_id` so the lib stops re-fetching `eth_chainId`). Remaining
+> newtypes (`FilterHash`, `LogIndex`, `BlockNumber`) are queued in
+> [`TODO.md`](./TODO.md).
 > Most targets are gated behind the non-default `evm` feature; the CLI binary
 > behind `cli`. Bare `cargo test` only exercises the 35 source-agnostic lib
 > tests + phases 3–6.

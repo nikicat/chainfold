@@ -383,6 +383,17 @@ Both `merge_hist_stores` tip aggregators and `BaseMatcher::changes()` aggregate 
 3. **Backends implement traits; users get a struct.** `EvmLogHistory: HistStoreBackend<EvmEvent, EvmPosition>` is wrapped in an `Arc<dyn HistStoreBackend>` and handed to consumers as a `HistStore<EvmEvent, EvmPosition>`. Consumers do not know the backend type.
 4. **No global state.** Every long-lived resource (SQLite connection, in-memory range tree, watch channel, background task) is owned by a struct with a clear `Drop`.
 
+## Type discipline (EVM layer)
+
+The EVM layer favors semantic types over blind primitives, so a 20-byte address can't be passed where a 32-byte hash is expected, a chain id can't be swapped with a block number, and a topic can't be confused with a hash:
+
+- **`Address`** (alloy) for 20-byte addresses; **`B256`** for 32-byte hashes, with alloy's **`TxHash`/`BlockHash`** aliases on the fields that carry those (documentation, zero friction — they *are* `B256`).
+- **`Topic`** — a real newtype over `B256` for EVM log topics, since topics flow through chainfold's own filter API (`EvmEvent.topics`, the `[Option<Topic>; 4]` filter slots, `TRANSFER_TOPIC`, `compute_filter_hash`). It owns the address↔topic relationship (`From<Address>` left-pads; `Topic::address()` extracts). Unwrap to `B256` at the alloy `Filter`/`Log` boundary via `Topic::b256()`.
+- **`ChainId`** — newtype over `u64`; its SQLite mapping (`ToSql`) lives in the cache layer, not on the domain type, so `ChainId` stays persistence-free.
+- **`ChainProvider<P>`** — an alloy `Provider` paired with its `ChainId` (it delegates the trait's one required method, `root()`), so the EVM layer reads the chain for free instead of re-fetching `eth_chainId` at every history construction. The CLI's chain-id cross-check is config-gated (`[evm] chain_id_check = "verify" | "trust"`).
+
+Still bare primitives, queued in [`TODO.md`](./TODO.md): the BLAKE3 `filter_hash` (`FilterHash`), `log_index` (`LogIndex`), and `block_number` (`BlockNumber`).
+
 ## Observability contract
 
 The two headline guarantees — minimal RPC (§caching) and sub-ms live delivery — are only credible if they stay measurable as the code changes. Chainfold therefore emits a small, **stable** `tracing` contract at every RPC and cache boundary. It is a contract, not incidental logging: two independent consumers depend on the exact targets and field names, and it's defined in one place, `src/evm/observe.rs`.
@@ -439,7 +450,7 @@ All four examples require `--features evm`.
 | `tests/phase2_push.rs` | (3 ignored) | Anvil live-event latency tests. |
 | `tests/owned_erc20.rs` | (2 ignored) | Fork-mainnet OwnedErc20 correctness vs broad-filter baseline. |
 
-Total: **126 active, 7 ignored** (anvil/fork-only — gated behind `--ignored` and the `anvil` binary). Run ignored tests with:
+Total: **194 active, 8 ignored** (anvil/fork-only — gated behind `--ignored` and the `anvil` binary). Run ignored tests with:
 
 ```bash
 MAINNET_RPC_URL=https://your-rpc cargo test --features evm -- --ignored
