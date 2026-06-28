@@ -48,18 +48,6 @@ fn default_cache_path() -> PathBuf {
         .join("chainlist.json")
 }
 
-fn privacy_rank(tracking: Option<&str>) -> u8 {
-    match tracking {
-        Some("none") => 0,
-        Some("limited") => 1,
-        Some("yes") => 3,
-        // Treat absent or unknown ("unspecified", anything we don't recognize)
-        // as middle-rank — prefer it over "yes" but not over an explicit
-        // privacy commitment.
-        None | Some(_) => 2,
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(
@@ -102,11 +90,43 @@ pub struct NativeCurrency {
     pub decimals: u8,
 }
 
+/// Privacy/tracking policy a chainlist RPC entry advertises. Drives public-RPC
+/// selection — a lower [`rank`](PrivacyTracking::rank) is more private and
+/// therefore preferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrivacyTracking {
+    /// No tracking at all — most preferred.
+    None,
+    /// Limited tracking.
+    Limited,
+    /// Tracks users — least preferred.
+    Yes,
+    /// Field absent or an unrecognized value; ranked between `limited` and `yes`.
+    #[default]
+    #[serde(other)]
+    Unspecified,
+}
+
+impl PrivacyTracking {
+    /// Selection rank — lower is more private, hence preferred. Absent/unknown
+    /// (`Unspecified`) sits above an explicit `yes` but below any privacy
+    /// commitment.
+    fn rank(self) -> u8 {
+        match self {
+            PrivacyTracking::None => 0,
+            PrivacyTracking::Limited => 1,
+            PrivacyTracking::Unspecified => 2,
+            PrivacyTracking::Yes => 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RpcEntry {
     pub url: String,
     #[serde(default)]
-    pub tracking: Option<String>,
+    pub tracking: PrivacyTracking,
     // chainlist.org sometimes includes `isOpenSource`, `trackingDetails`,
     // etc. Not modeled here; serde drops unknown fields silently.
 }
@@ -178,7 +198,7 @@ impl ChainResolver {
             .rpc
             .iter()
             .filter(|r| r.url.starts_with("https://") && !r.url.contains("${"))
-            .min_by_key(|r| privacy_rank(r.tracking.as_deref()))
+            .min_by_key(|r| r.tracking.rank())
             .map(|r| r.url.clone())
     }
 
@@ -349,7 +369,7 @@ mod tests {
         assert_eq!(entry.chain_slug.as_deref(), Some("binance"));
         assert_eq!(entry.rpc.len(), 1);
         assert_eq!(entry.rpc[0].url, "https://bsc-rpc.example");
-        assert_eq!(entry.rpc[0].tracking.as_deref(), Some("none"));
+        assert_eq!(entry.rpc[0].tracking, PrivacyTracking::None);
     }
 
     fn fixture_entries() -> Vec<ChainlistEntry> {
@@ -425,14 +445,48 @@ mod tests {
         let entry: ChainlistEntry = serde_json::from_str(RPC_HEAVY_ENTRY).expect("deserialize");
         assert_eq!(entry.rpc.len(), 5);
         assert_eq!(entry.rpc[0].url, "https://a.example");
-        assert_eq!(entry.rpc[0].tracking.as_deref(), Some("none"));
+        assert_eq!(entry.rpc[0].tracking, PrivacyTracking::None);
         assert_eq!(entry.rpc[2].url, "https://c.example");
-        assert!(
-            entry.rpc[2].tracking.is_none(),
-            "missing tracking deserializes to None"
+        assert_eq!(
+            entry.rpc[2].tracking,
+            PrivacyTracking::Unspecified,
+            "missing tracking deserializes to Unspecified"
         );
         assert_eq!(entry.rpc[3].url, "wss://d.example/ws");
         assert_eq!(entry.rpc[4].url, "http://e.example");
+    }
+
+    #[test]
+    fn tracking_enum_maps_known_and_unknown_values() {
+        let parse = |json: &str| -> PrivacyTracking {
+            serde_json::from_str::<RpcEntry>(json)
+                .expect("deserialize")
+                .tracking
+        };
+        assert_eq!(
+            parse(r#"{"url":"x","tracking":"none"}"#),
+            PrivacyTracking::None
+        );
+        assert_eq!(
+            parse(r#"{"url":"x","tracking":"limited"}"#),
+            PrivacyTracking::Limited
+        );
+        assert_eq!(
+            parse(r#"{"url":"x","tracking":"yes"}"#),
+            PrivacyTracking::Yes
+        );
+        // Unrecognized string and absent field both fall back to Unspecified.
+        assert_eq!(
+            parse(r#"{"url":"x","tracking":"weird"}"#),
+            PrivacyTracking::Unspecified
+        );
+        assert_eq!(parse(r#"{"url":"x"}"#), PrivacyTracking::Unspecified);
+        // Rank order: none < limited < unspecified < yes.
+        assert!(
+            PrivacyTracking::None.rank() < PrivacyTracking::Limited.rank()
+                && PrivacyTracking::Limited.rank() < PrivacyTracking::Unspecified.rank()
+                && PrivacyTracking::Unspecified.rank() < PrivacyTracking::Yes.rank()
+        );
     }
 
     #[test]
