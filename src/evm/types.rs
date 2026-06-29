@@ -38,7 +38,11 @@ impl ChainId {
 
 impl std::fmt::Display for ChainId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        // Forward to the inner u64's Display so formatter flags (width, fill,
+        // alignment) are honored. `write!(f, "{}", self.0)` would silently drop
+        // a `{:>12}` width — e.g. the right-aligned chainId column in
+        // `chains list`.
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -247,7 +251,9 @@ impl Sub<u64> for BlockNumber {
 
 impl std::fmt::Display for BlockNumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        // Forward to the inner Display so formatter flags (width, alignment)
+        // survive — see the note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -334,7 +340,9 @@ impl From<u32> for LogIdx {
 
 impl std::fmt::Display for LogIdx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        // Forward to the inner Display so formatter flags survive — see the
+        // note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
