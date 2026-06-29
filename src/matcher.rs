@@ -837,7 +837,7 @@ mod tests {
             bridge_match_fn(),
             store.clone() as Arc<dyn AnchorStore>,
             key,
-            0,
+            Timestamp::new(0),
         );
 
         // current_state respects the persisted anchors → empty output.
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(cs.output.pending.len(), 0);
 
         // get_history(0) ignores persistence → sees all items.
-        let hs = m.base().get_history(0).await.unwrap();
+        let hs = m.base().get_history(Timestamp::new(0)).await.unwrap();
         assert_eq!(hs.output.matched.len(), 1);
     }
 
@@ -881,7 +881,7 @@ mod tests {
             bridge_match_fn(),
             store.clone() as Arc<dyn AnchorStore>,
             "k",
-            0,
+            Timestamp::new(0),
         );
 
         // First load: from store (empty) → time_anchors(0) = (default, default).
@@ -939,7 +939,7 @@ mod tests {
             bridge_match_fn(),
             store as Arc<dyn AnchorStore>,
             "k",
-            0,
+            Timestamp::new(0),
         ));
 
         let mut stream = m.iter();

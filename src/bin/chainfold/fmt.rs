@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use alloy::primitives::{Address, B256, U256};
-use chainfold::arch::Positioned;
+use chainfold::arch::{Positioned, Timestamp};
 use chainfold::evm::{Erc20Metadata, EvmEvent, EvmPosition, decode_transfer};
 
 pub fn explorer_base_url(chain_id: u64) -> &'static str {
@@ -42,8 +42,8 @@ fn linked_tx_hash(hash: &B256, base_url: &str) -> String {
     osc8_link(&url, &abbrev_tx_hash(hash))
 }
 
-pub fn format_timestamp(ts: u64) -> String {
-    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(
+pub fn format_timestamp(ts: Timestamp) -> String {
+    chrono::DateTime::from_timestamp(ts.get() as i64, 0).map_or_else(
         || "----------T--:--:--Z".into(),
         |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     )

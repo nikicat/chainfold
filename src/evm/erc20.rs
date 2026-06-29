@@ -331,6 +331,7 @@ pub fn cached_balance_floor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arch::Timestamp;
     use crate::evm::types::{BlockNumber, LogIdx};
     use alloy::primitives::B256;
     use std::sync::Arc;
@@ -346,7 +347,7 @@ mod tests {
         EvmEvent {
             contract_address: Address::repeat_byte(0x42),
             block_number: BlockNumber::new(100),
-            timestamp: 1000,
+            timestamp: Timestamp::new(1000),
             block_hash: B256::ZERO,
             log_index: LogIdx::ZERO,
             tx_hash: B256::ZERO,
@@ -391,7 +392,7 @@ mod tests {
         let event = EvmEvent {
             contract_address: Address::repeat_byte(0x42),
             block_number: BlockNumber::new(100),
-            timestamp: 1000,
+            timestamp: Timestamp::new(1000),
             block_hash: B256::ZERO,
             log_index: LogIdx::ZERO,
             tx_hash: B256::ZERO,

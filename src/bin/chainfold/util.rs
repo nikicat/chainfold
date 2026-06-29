@@ -1,5 +1,5 @@
 use alloy::primitives::Address;
-use chainfold::arch::HistStore;
+use chainfold::arch::{HistStore, Timestamp};
 use chainfold::evm::{EvmEvent, EvmPosition};
 use chrono::NaiveDate;
 
@@ -9,12 +9,12 @@ pub fn parse_hex_address(s: &str) -> Result<Address, String> {
     s.parse().map_err(|e| format!("invalid address: {e}"))
 }
 
-pub fn parse_datetime(s: &str) -> Result<u64, String> {
+pub fn parse_datetime(s: &str) -> Result<Timestamp, String> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| {
             NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap())
         })
-        .map(|dt| dt.and_utc().timestamp() as u64)
+        .map(|dt| Timestamp::new(dt.and_utc().timestamp() as u64))
         .map_err(|e| format!("invalid date: {e}"))
 }
 

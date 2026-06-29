@@ -437,7 +437,7 @@ async fn merge_time_pos_aggregates_per_source() {
     sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
     let merged = merge_hist_stores(sources, cmp_by_time);
 
-    let tp = merged.time_pos(42).await.expect("time_pos");
+    let tp = merged.time_pos(Timestamp::new(42)).await.expect("time_pos");
     // Both source stubs return P::default() — verify marshalled bytes
     // match each source's default.
     assert_eq!(tp.get("alpha"), Some(&MockPosU64::default().marshal()[..]));

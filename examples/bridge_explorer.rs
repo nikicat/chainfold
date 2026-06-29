@@ -173,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || "(none)".into(),
             |t| format!("0x{}", hex::encode(&t.as_slice()[..4])),
         );
-        let ts = chrono::DateTime::from_timestamp(m.value.timestamp as i64, 0).map_or_else(
+        let ts = chrono::DateTime::from_timestamp(m.value.timestamp.get() as i64, 0).map_or_else(
             || "----------T--:--:--Z".into(),
             |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         );

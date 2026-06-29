@@ -31,7 +31,7 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::{Position, watch_hist};
+use chainfold::arch::{Position, Timestamp, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainId, ChainProvider, Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY,
     OUT_KEY, OwnedErc20, SubscribeTransport, apply_transfer, decode_transfer, fetch_erc20_metadata,
@@ -85,12 +85,12 @@ struct Args {
     follow: bool,
 }
 
-fn parse_datetime(s: &str) -> Result<u64, String> {
+fn parse_datetime(s: &str) -> Result<Timestamp, String> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| {
             NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap())
         })
-        .map(|dt| dt.and_utc().timestamp() as u64)
+        .map(|dt| Timestamp::new(dt.and_utc().timestamp() as u64))
         .map_err(|e| format!("invalid date: {e}"))
 }
 
@@ -173,8 +173,8 @@ fn linked_tx_hash(hash: &B256, base_url: &str) -> String {
     osc8_link(&url, &abbrev_tx_hash(hash))
 }
 
-fn format_timestamp(ts: u64) -> String {
-    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(
+fn format_timestamp(ts: Timestamp) -> String {
+    chrono::DateTime::from_timestamp(ts.get() as i64, 0).map_or_else(
         || "----------T--:--:--Z".into(),
         |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     )

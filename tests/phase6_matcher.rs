@@ -244,7 +244,7 @@ async fn anchored_matcher_persists_across_restart() {
             bridge_match_fn(),
             store as Arc<dyn AnchorStore>,
             "matcher-test",
-            0,
+            Timestamp::new(0),
         );
         let s0 = m.current_state().await.unwrap();
         assert_eq!(s0.output.matched.len(), 2);
@@ -267,7 +267,7 @@ async fn anchored_matcher_persists_across_restart() {
             bridge_match_fn(),
             store as Arc<dyn AnchorStore>,
             "matcher-test",
-            0,
+            Timestamp::new(0),
         );
         // Should load the persisted (1, 1) anchors — only burn2/mint2 left.
         let anchors = m.get_anchors().await.unwrap();
@@ -293,7 +293,7 @@ async fn iter_advances_on_either_side_append() {
         bridge_match_fn(),
         store as Arc<dyn AnchorStore>,
         "matcher-test",
-        0,
+        Timestamp::new(0),
     ));
     let mut stream = m.iter();
 
@@ -338,7 +338,7 @@ async fn pure_recompute_does_not_mutate_store() {
         bridge_match_fn(),
         store.clone() as Arc<dyn AnchorStore>,
         "matcher-test",
-        0,
+        Timestamp::new(0),
     );
 
     // First load. The store starts empty, so get_anchors falls back to
@@ -375,7 +375,7 @@ async fn get_history_returns_full_window_regardless_of_persisted_anchors() {
         bridge_match_fn(),
         store as Arc<dyn AnchorStore>,
         key,
-        0,
+        Timestamp::new(0),
     );
 
     // current_state respects persisted anchors → empty.
@@ -383,7 +383,7 @@ async fn get_history_returns_full_window_regardless_of_persisted_anchors() {
     assert!(cs.output.matched.is_empty());
 
     // get_history uses time-anchors → sees everything.
-    let hs = m.base().get_history(0).await.unwrap();
+    let hs = m.base().get_history(Timestamp::new(0)).await.unwrap();
     assert_eq!(hs.output.matched.len(), 1);
 }
 
@@ -398,7 +398,7 @@ async fn missing_anchor_key_falls_back_to_time_anchors() {
         bridge_match_fn(),
         store as Arc<dyn AnchorStore>,
         "fresh-key",
-        0,
+        Timestamp::new(0),
     );
     // No persisted anchors → time_anchors(0) → default = (0, 0) → sees
     // burn1 ↔ mint1 matched.

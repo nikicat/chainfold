@@ -340,6 +340,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmLogHistory<P> {
     }
 
     fn estimate_block_from_time(&self, time: Timestamp) -> u64 {
+        // Drop to the raw seconds for the block-time arithmetic; the anchor
+        // timestamp and block_time are u64 internals on the same scale.
+        let time = time.get();
         if time >= self.anchor_timestamp {
             let delta_secs = time - self.anchor_timestamp;
             self.anchor_block + delta_secs / self.block_time
@@ -407,9 +410,11 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistBackend<EvmEvent
                         // already carry its timestamp.
                         if log.block_timestamp.is_none() {
                             let bn = log.block_number.unwrap_or(0);
-                            event.timestamp = ensure_block_header_via(&provider, &store, bn)
-                                .await?
-                                .timestamp;
+                            event.timestamp = Timestamp::new(
+                                ensure_block_header_via(&provider, &store, bn)
+                                    .await?
+                                    .timestamp,
+                            );
                         }
                         let pos = event.position();
                         Ok(Positioned::new(event, pos))
@@ -519,7 +524,7 @@ fn log_to_evm_event(log: &Log) -> EvmEvent {
         block_number: BlockNumber::new(log.block_number.unwrap_or(0)),
         // Provider-supplied per-log timestamp when present; otherwise 0, and
         // the caller fills it from the (cached) block header.
-        timestamp: log.block_timestamp.unwrap_or(0),
+        timestamp: Timestamp::new(log.block_timestamp.unwrap_or(0)),
         block_hash: log.block_hash.unwrap_or(B256::ZERO),
         log_index: LogIdx::new(log.log_index.unwrap_or(0) as u32),
         tx_hash: log.transaction_hash.unwrap_or(B256::ZERO),
@@ -782,8 +787,8 @@ mod tests {
         let hist = Hist::new(backend, EvmPosition::earliest(), end);
         let items = collect(hist).await;
         // block 100 header inserted with GENESIS_TS + 1200
-        assert_eq!(items[0].item.timestamp, GENESIS_TS + 1200);
-        assert_eq!(items[2].item.timestamp, GENESIS_TS + 1212);
+        assert_eq!(items[0].item.timestamp, Timestamp::new(GENESIS_TS + 1200));
+        assert_eq!(items[2].item.timestamp, Timestamp::new(GENESIS_TS + 1212));
     }
 
     /// When a log carries its own `block_timestamp`, the walk stamps the event
@@ -816,7 +821,7 @@ mod tests {
         );
         let items = collect(hist).await;
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].item.timestamp, GENESIS_TS + 1800);
+        assert_eq!(items[0].item.timestamp, Timestamp::new(GENESIS_TS + 1800));
     }
 
     #[tokio::test]
@@ -834,7 +839,10 @@ mod tests {
         let hs = history.hist_store();
         // anchor block 200 @ GENESIS_TS + 2400; block_time = 12
         // 100 blocks before anchor → block 100 → time_pos returns cut "just before 100"
-        let pos = hs.time_pos(GENESIS_TS + 1200).await.unwrap();
+        let pos = hs
+            .time_pos(Timestamp::new(GENESIS_TS + 1200))
+            .await
+            .unwrap();
         assert_eq!(pos.block, BlockNumber::new(99));
         assert_eq!(pos.log_index, LogIdx::MAX);
     }

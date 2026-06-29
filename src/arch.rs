@@ -38,8 +38,33 @@ use tokio_util::sync::CancellationToken;
 // Core type aliases
 // ============================================================
 
-/// Unix timestamp in seconds.
-pub type Timestamp = u64;
+/// A Unix timestamp in seconds.
+///
+/// A source-agnostic wall-clock instant — the unit [`HistStore::time_pos`],
+/// [`act_and_wait`], and the matcher time-anchors speak. A newtype rather than
+/// a bare `u64` so a timestamp can't be silently swapped with a block number or
+/// any other count. Convert to/from `u64` at the chrono / RPC / `SQLite`
+/// boundary via [`Timestamp::new`] / [`Timestamp::get`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Timestamp(u64);
+
+impl Timestamp {
+    /// Wrap seconds-since-epoch.
+    pub const fn new(secs: u64) -> Self {
+        Self(secs)
+    }
+
+    /// The inner seconds-since-epoch, for the chrono / RPC / `SQLite` boundary.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for Timestamp {
+    fn from(secs: u64) -> Self {
+        Self(secs)
+    }
+}
 
 /// Boxed async stream.
 pub type Subscription<T> = Pin<Box<dyn Stream<Item = T> + Send>>;

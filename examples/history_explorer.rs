@@ -21,7 +21,9 @@ use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::{Hist, HistBackend, HistStore, HistoryError, Positioned, watch_hist};
+use chainfold::arch::{
+    Hist, HistBackend, HistStore, HistoryError, Positioned, Timestamp, watch_hist,
+};
 use chainfold::evm::{
     ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, SubscribeTransport, Topic,
     rpc_retry_layer, versioned_path,
@@ -76,12 +78,12 @@ struct Args {
     measure: bool,
 }
 
-fn parse_datetime(s: &str) -> Result<u64, String> {
+fn parse_datetime(s: &str) -> Result<Timestamp, String> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| {
             NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap())
         })
-        .map(|dt| dt.and_utc().timestamp() as u64)
+        .map(|dt| Timestamp::new(dt.and_utc().timestamp() as u64))
         .map_err(|e| format!("invalid date: {e}"))
 }
 

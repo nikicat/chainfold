@@ -31,6 +31,7 @@ use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
+use chainfold::arch::Timestamp;
 use chainfold::evm::{
     ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, Topic,
     rpc_retry_layer, versioned_path,
@@ -253,10 +254,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.anchor_key.clone(),
             // start = "now - num_blocks * ~12s" as an initial fallback;
             // EVM time_pos rounds to block boundaries.
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs()
-                .saturating_sub(args.num_blocks * 12),
+            Timestamp::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs()
+                    .saturating_sub(args.num_blocks * 12),
+            ),
         ));
 
     println!();
@@ -276,10 +279,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         // One-shot: compute over the time window starting num_blocks back.
-        let since = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .saturating_sub(args.num_blocks * 12);
+        let since = Timestamp::new(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs()
+                .saturating_sub(args.num_blocks * 12),
+        );
         let state = m.base().get_history(since).await?;
         print_state(&state.output);
     }
