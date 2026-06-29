@@ -34,7 +34,7 @@ use alloy::providers::Provider;
 
 use crate::arch::{HistStore, HistoryError};
 use crate::evm::{ChainProvider, EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC, Topic};
-use crate::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
+use crate::merge::{ErasedHistStore, MergedItem, MergedPos, SourceKey, merge_hist_stores};
 
 /// Direction of an owned-ERC20 transfer relative to the tracked owner.
 ///
@@ -191,7 +191,7 @@ where
     /// ties are impossible (a single log only has one `from` and one
     /// `to`), so ordering is total.
     pub fn transfers(&self) -> HistStore<MergedItem<EvmEvent>, MergedPos> {
-        let mut sources: BTreeMap<String, ErasedHistStore<EvmEvent>> = BTreeMap::new();
+        let mut sources: BTreeMap<SourceKey, ErasedHistStore<EvmEvent>> = BTreeMap::new();
         sources.insert(
             OUT_KEY.into(),
             ErasedHistStore::new(self.out_history.hist_store()),

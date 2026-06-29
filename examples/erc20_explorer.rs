@@ -366,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 balance = apply_transfer(owner, balance, &mi.value);
                 print_transfer(
                     &mi.value,
-                    &mi.source_key,
+                    mi.source_key.as_str(),
                     balance,
                     count,
                     &owner,
@@ -400,7 +400,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 print_transfer(
                     &mi.value,
-                    &mi.source_key,
+                    mi.source_key.as_str(),
                     balance,
                     count,
                     &owner,

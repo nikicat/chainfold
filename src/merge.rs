@@ -19,7 +19,7 @@
 //! ## Position trait gotcha
 //!
 //! [`Position`]'s required [`Ord`] is derived on [`MergedPos`] from
-//! [`BTreeMap<String, Vec<u8>>`], which is byte-lex over sorted keys. This
+//! [`BTreeMap<SourceKey, Vec<u8>>`], which is byte-lex over sorted keys. This
 //! is a total order suitable for [`Position`] but *does not* match
 //! component-wise containment (the marshalled bytes of e.g. an
 //! `EvmPosition` are postcard leb128 and do not preserve numeric order
@@ -54,6 +54,69 @@ use crate::arch::{
 };
 
 // ============================================================
+// SourceKey
+// ============================================================
+
+/// Identifies one input source within a [`merge_hist_stores`] product.
+///
+/// A newtype over the source-name `String` so a source key can't be confused
+/// with the other strings flowing through the merge. It is the key type of
+/// [`MergedPos::positions`] and the `source_key` of [`MergedItem`].
+///
+/// `#[serde(transparent)]` so it serializes as a bare string — a [`MergedPos`]
+/// marshalled before this newtype existed is byte-identical and still
+/// round-trips, keeping saved resume anchors valid. `Borrow<str>` lets the
+/// keyed [`BTreeMap`] be probed with a plain `&str`.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct SourceKey(pub String);
+
+impl SourceKey {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SourceKey {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SourceKey {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl std::borrow::Borrow<str> for SourceKey {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SourceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// ============================================================
 // MergedPos
 // ============================================================
 
@@ -66,11 +129,11 @@ use crate::arch::{
     Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
 )]
 pub struct MergedPos {
-    pub positions: BTreeMap<String, Vec<u8>>,
+    pub positions: BTreeMap<SourceKey, Vec<u8>>,
 }
 
 impl MergedPos {
-    pub fn new(positions: BTreeMap<String, Vec<u8>>) -> Self {
+    pub fn new(positions: BTreeMap<SourceKey, Vec<u8>>) -> Self {
         Self { positions }
     }
 
@@ -99,7 +162,7 @@ impl Position for MergedPos {
 #[derive(Clone, Debug)]
 pub struct MergedItem<T> {
     pub value: T,
-    pub source_key: String,
+    pub source_key: SourceKey,
     pub source_pos: Vec<u8>,
 }
 
@@ -309,13 +372,13 @@ impl Drop for AbortAll {
 /// (for the given [`TipKind`]) via background tasks. Tasks abort when
 /// the returned [`AbortAll`] drops.
 fn build_tip_store<T>(
-    sources: &BTreeMap<String, Arc<dyn ErasedSource<T>>>,
+    sources: &BTreeMap<SourceKey, Arc<dyn ErasedSource<T>>>,
     kind: TipKind,
 ) -> (Store<MergedPos>, AbortAll)
 where
     T: Send + Sync + 'static,
 {
-    let initial_positions: BTreeMap<String, Vec<u8>> = sources
+    let initial_positions: BTreeMap<SourceKey, Vec<u8>> = sources
         .iter()
         .map(|(k, s)| (k.clone(), s.tip_pos(kind)))
         .collect();
@@ -361,7 +424,7 @@ where
 /// [`MergedPos`] that survives marshal/unmarshal and is a valid
 /// [`Hist::split`] anchor for resume.
 pub fn merge_hist_stores<T, F>(
-    sources: BTreeMap<String, ErasedHistStore<T>>,
+    sources: BTreeMap<SourceKey, ErasedHistStore<T>>,
     cmp: F,
 ) -> HistStore<MergedItem<T>, MergedPos>
 where
@@ -375,7 +438,7 @@ where
 }
 
 struct MergedHistStoreBackend<T> {
-    sources: BTreeMap<String, Arc<dyn ErasedSource<T>>>,
+    sources: BTreeMap<SourceKey, Arc<dyn ErasedSource<T>>>,
     cmp: MergedCmp<T>,
     latest_store: Store<MergedPos>,
     best_store: Store<MergedPos>,
@@ -384,8 +447,8 @@ struct MergedHistStoreBackend<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> MergedHistStoreBackend<T> {
-    fn new(stores: BTreeMap<String, ErasedHistStore<T>>, cmp: MergedCmp<T>) -> Self {
-        let sources: BTreeMap<String, Arc<dyn ErasedSource<T>>> =
+    fn new(stores: BTreeMap<SourceKey, ErasedHistStore<T>>, cmp: MergedCmp<T>) -> Self {
+        let sources: BTreeMap<SourceKey, Arc<dyn ErasedSource<T>>> =
             stores.into_iter().map(|(k, s)| (k, s.inner)).collect();
 
         let (latest_store, latest_task) = build_tip_store(&sources, TipKind::Latest);
@@ -403,7 +466,7 @@ impl<T: Clone + Send + Sync + 'static> MergedHistStoreBackend<T> {
     }
 
     fn make_hist(&self, end: MergedPos) -> Hist<MergedItem<T>, MergedPos> {
-        let earliest: BTreeMap<String, Vec<u8>> = self
+        let earliest: BTreeMap<SourceKey, Vec<u8>> = self
             .sources
             .iter()
             .map(|(k, s)| (k.clone(), s.earliest_pos()))
@@ -431,7 +494,7 @@ where
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Ready(Some(tip)) => {
-                    let earliest: BTreeMap<String, Vec<u8>> = sources
+                    let earliest: BTreeMap<SourceKey, Vec<u8>> = sources
                         .iter()
                         .map(|(k, s)| (k.clone(), s.earliest_pos()))
                         .collect();
@@ -497,7 +560,7 @@ where
 // ============================================================
 
 struct MergedHistBackend<T> {
-    sources: BTreeMap<String, Arc<dyn ErasedSource<T>>>,
+    sources: BTreeMap<SourceKey, Arc<dyn ErasedSource<T>>>,
     cmp: MergedCmp<T>,
 }
 
@@ -516,7 +579,7 @@ impl<T: Clone + Send + Sync + 'static> HistBackend<MergedItem<T>, MergedPos>
     /// `[start[k], end[k]]`. Missing keys substitute the source's
     /// [`Default`] (so saved [`MergedPos`] from older snapshots survive).
     fn clamp_pos(&self, p: MergedPos, start: &MergedPos, end: &MergedPos) -> MergedPos {
-        let mut clamped: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut clamped: BTreeMap<SourceKey, Vec<u8>> = BTreeMap::new();
         for (key, source) in &self.sources {
             let earliest = source.earliest_pos();
             let start_bytes = start
@@ -544,7 +607,7 @@ impl<T: Clone + Send + Sync + 'static> HistBackend<MergedItem<T>, MergedPos>
 // ============================================================
 
 struct MergeStream<T> {
-    key: String,
+    key: SourceKey,
     stream: Subscription<Result<(T, Vec<u8>), HistoryError>>,
     head: Option<Result<(T, Vec<u8>), HistoryError>>,
     exhausted: bool,
@@ -553,18 +616,18 @@ struct MergeStream<T> {
 
 struct MergeState<T> {
     streams: Vec<MergeStream<T>>,
-    vector_clock: BTreeMap<String, Vec<u8>>,
+    vector_clock: BTreeMap<SourceKey, Vec<u8>>,
     cmp: MergedCmp<T>,
 }
 
 impl<T: Clone + Send + Sync + 'static> MergeState<T> {
     fn init(
-        sources: &BTreeMap<String, Arc<dyn ErasedSource<T>>>,
+        sources: &BTreeMap<SourceKey, Arc<dyn ErasedSource<T>>>,
         cmp: MergedCmp<T>,
         start: &MergedPos,
         end: &MergedPos,
     ) -> Self {
-        let mut vector_clock: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut vector_clock: BTreeMap<SourceKey, Vec<u8>> = BTreeMap::new();
         let mut streams = Vec::with_capacity(sources.len());
         for (key, source) in sources {
             let earliest = source.earliest_pos();

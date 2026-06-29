@@ -29,7 +29,7 @@ use chainfold::evm::{
     ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, Topic,
     rpc_retry_layer, versioned_path,
 };
-use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
+use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, SourceKey, merge_hist_stores};
 use clap::Parser;
 use futures_util::StreamExt;
 
@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => TRANSFER_TOPIC,
     };
 
-    let mut sources: BTreeMap<String, ErasedHistStore<EvmEvent>> = BTreeMap::new();
+    let mut sources: BTreeMap<SourceKey, ErasedHistStore<EvmEvent>> = BTreeMap::new();
 
     for (i, key) in args.chain.iter().enumerate() {
         println!("Setting up '{}' from {}...", key, args.rpc_url[i]);
@@ -138,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (_, _tail) = hist.split(from_pos);
 
         let erased = ErasedHistStore::new(history.hist_store());
-        sources.insert(key.clone(), erased);
+        sources.insert(key.clone().into(), erased);
     }
 
     let merged: HistStore<MergedItem<EvmEvent>, MergedPos> =
@@ -156,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pos = EvmPosition::unmarshal(&key_bytes)
             .ok_or_else(|| format!("could not unmarshal position for {key}"))?;
         let from = EvmPosition::new(pos.block.saturating_sub(args.num_blocks).get(), u32::MAX);
-        start_positions.insert(key.clone(), from.marshal());
+        start_positions.insert(key.clone().into(), from.marshal());
     }
     let start = MergedPos::new(start_positions);
 
