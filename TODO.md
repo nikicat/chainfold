@@ -2,35 +2,64 @@
 
 Latent follow-ups from the `--chain` + RPC-resolution work (commits `7dca4ab..e36d4c1`). None block shipping; each is a self-contained improvement.
 
-## CLI error rendering uses Debug, not Display
+## CLI error rendering uses Debug, not Display — done (2026-06-29)
 
-`src/bin/chainfold/main.rs` returns `Result<(), Box<dyn std::error::Error>>`, so unhandled errors print via `Debug`. The nice `#[error(...)]` Display strings on `ChainResolveError`, `ConfigError::NoRpcAvailable`, `SignatureError`, etc. never reach the user.
+`main` now returns `std::process::ExitCode` and renders an `Err` via its
+`Display` (`eprintln!("Error: {err}")`), then exits non-zero. No `anyhow` dep —
+the project's error types already embed their `source` in the `#[error(...)]`
+string, so the top-level Display line is the full message; walking `.source()`
+would just repeat it. Verified: `--chain notarealchain` now prints the
+`UnknownName` sentence instead of its `Debug`.
 
-Example today:
-```
-Error: NoRpcAvailable { chain_id: 314159265358, tried: [...] }
-```
+## `chainfold chains list` subcommand — done (2026-06-29)
 
-Should be:
-```
-Error: no RPC URL available for chain 314159265358 (tried: ...).
-Pass --rpc-url <url>, set ALCHEMY_KEY in the environment for a supported chain, or ...
-```
+`Command::Chains { ChainsCommand::List }` prints `chainId · shortName ·
+chainSlug · name` from the cached chainlist, sorted by chain id. Flags
+`--testnet` and `--alchemy-supported` filter via `ChainResolver::list(ListFilter)`
+(testnet → `isTestnet:true`; alchemy → an `alchemy_chain_slug` exists). Filtering
+is unit-tested; printing is a thin `print_chain_list` in `main.rs` (see the
+table-consolidation item below).
 
-Fix: switch `main`'s return type to `anyhow::Result<()>` (or write a manual print loop in `main` that walks the error chain via `Display`). Affects every error type uniformly — single-line change in `main`, possibly one new dep.
+## Surface `is_testnet` and `red_flags` to the user — done (2026-06-29)
 
-## `chainfold chains list` subcommand
+`evm::run` emits advisories for the resolved chain when the resolver is loaded
+(name lookup or public-RPC fallback): a `note:` for testnets and a loud
+`warning:` listing `red_flags` (we warn, not refuse). Backed by
+`ChainlistEntry::is_testnet()` / `red_flags()` accessors (unit-tested) and
+`ChainResolver::entry(chain_id)`. The fields are now read in non-test code, but
+the struct keeps `#[allow(dead_code)]` for the still-unread schema-fidelity
+fields (`chain`, `network_id`, `info_url`, `native_currency`) — reason text
+updated to say so. (Follow-up, same session: `from_entries` now resolves
+shortName/chainSlug collisions to the **lowest** chain id, so `--chain kub` →
+96 — the red-flagged Bitkub mainnet — deterministically; the resolver/config/evm
+path was also typed end-to-end with `ChainId` + a `ChainHandle` key newtype, and
+resolved RPC URLs are now `Url` not `String`.)
 
-No way to discover which `--chain <name>` values resolve without consulting `chainlist.org` manually. A `chains list` subcommand could print `(chainId, shortName, chainSlug, name)` from the cached chainlist — optional `--testnet` / `--alchemy-supported` filters.
+## Reevaluate CLI table/column printing and consolidate
 
-## Surface `is_testnet` and `red_flags` to the user
+Tabular and width-aligned output is hand-rolled with ad-hoc `format!`/`println!`
+width specifiers, scattered across several modules with no shared helper:
 
-`ChainlistEntry` already captures both fields (with `#[allow(dead_code, reason = ...)]` documenting the intent). Ideas:
+- `main.rs::print_chain_list` — the `chains list` table (`{:>12} {:<14} …`).
+- `stats.rs` — the `--stats` session summary (column-aligned RPC/cache rows).
+- `fmt.rs::format_amount` — `whole_width`/`frac_width` numeric padding.
+- `evm/erc20.rs`, `evm/events.rs` — per-row transfer/event renderers.
+- `config.rs::show` — key/value listing.
 
-- Warn on stderr when the resolved chain has `is_testnet == true`. (`note: chain 'sepolia' is a testnet`.)
-- Refuse to proceed (or warn loudly) when `red_flags` is non-empty — DefiLlama flags chains with known scam/spam issues.
+Each picks its own widths and alignment by hand, so columns don't line up
+across commands and changing the look means editing N call sites. Worth a pass
+to:
 
-When either is wired up, the field stops being dead and the corresponding `#[allow]` can be removed.
+- Decide on one approach — a tiny internal `Table`/row helper (compute column
+  widths from the rows, then render), or pull in a small dep (`tabled`,
+  `comfy-table`) if the surface grows.
+- Route the existing renderers through it so alignment/escaping/colour live in
+  one place.
+- Keep stdout pipeable (data to stdout, notes/warnings to stderr — already the
+  convention) and don't ANSI-decorate when not a TTY.
+
+Low priority; purely presentational. Do it before adding the *next* table
+command, not as urgent debt.
 
 ## Remaining domain newtypes — done
 

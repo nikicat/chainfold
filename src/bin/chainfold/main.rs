@@ -7,10 +7,12 @@ mod signature_cache;
 mod stats;
 mod util;
 
+use std::process::ExitCode;
 use std::time::Instant;
 
+use chains::{ChainResolver, ChainlistEntry, ListFilter};
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand, Direction, FollowMode};
+use cli::{ChainsCommand, Cli, Command, ConfigCommand, Direction, FollowMode};
 use config::Config;
 use stats::Stats;
 use tracing_subscriber::EnvFilter;
@@ -18,7 +20,7 @@ use tracing_subscriber::fmt::layer as fmt_layer;
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> ExitCode {
     let started = Instant::now();
     let cli = Cli::parse();
 
@@ -37,7 +39,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(stats) = &stats {
         stats.print_summary(started.elapsed());
     }
-    result
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            // Render via `Display` (the `#[error(...)]` strings), not the
+            // derived `Debug`. Our error types embed their `source` into their
+            // Display message, so the top-level line is the full, readable
+            // report — walking `.source()` here would only repeat that text.
+            eprintln!("Error: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `CHAINFOLD_STATS` is truthy when set to any value other than empty or `0`.
@@ -62,6 +75,16 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::Chains { action } => match action {
+            ChainsCommand::List(list_args) => {
+                let resolver = ChainResolver::load_or_fetch().await?;
+                let filter = ListFilter {
+                    testnet_only: list_args.testnet,
+                    alchemy_only: list_args.alchemy_supported,
+                };
+                print_chain_list(&resolver.list(filter));
+            }
+        },
         Command::Evm(evm_args) => {
             let config = Config::load_optional(cli.config.as_deref().map(std::path::Path::new))?;
             evm::run(
@@ -75,4 +98,26 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Print the `chains list` table to stdout: `chainId · shortName · chainSlug ·
+/// name`, one row per resolvable chain. A missing `chainSlug` renders as `-`.
+fn print_chain_list(entries: &[&ChainlistEntry]) {
+    if entries.is_empty() {
+        eprintln!("no chains match the given filters.");
+        return;
+    }
+    println!(
+        "{:>12}  {:<14}  {:<18}  name",
+        "chainId", "shortName", "chainSlug"
+    );
+    for e in entries {
+        println!(
+            "{:>12}  {:<14}  {:<18}  {}",
+            e.chain_id,
+            e.short_name,
+            e.chain_slug.as_deref().unwrap_or("-"),
+            e.name,
+        );
+    }
 }

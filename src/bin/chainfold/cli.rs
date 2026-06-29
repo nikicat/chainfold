@@ -77,6 +77,11 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigCommand,
     },
+    /// Chain registry queries (cached chainlist.org data)
+    Chains {
+        #[command(subcommand)]
+        action: ChainsCommand,
+    },
     /// EVM chain commands
     Evm(EvmArgs),
 }
@@ -87,6 +92,24 @@ pub enum ConfigCommand {
     Show,
     /// Validate config and test RPC connectivity
     Check,
+}
+
+#[derive(Subcommand)]
+pub enum ChainsCommand {
+    /// List resolvable `--chain` names from the cached chainlist.org data
+    /// (chainId, shortName, chainSlug, name).
+    List(ChainsListArgs),
+}
+
+#[derive(Parser)]
+pub struct ChainsListArgs {
+    /// Show only chains flagged as testnets.
+    #[arg(long)]
+    pub testnet: bool,
+
+    /// Show only chains Alchemy hosts (those with an Alchemy URL slug).
+    #[arg(long)]
+    pub alchemy_supported: bool,
 }
 
 #[derive(Parser)]

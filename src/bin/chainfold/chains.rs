@@ -10,6 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use alloy::transports::http::reqwest::Url;
+use chainfold::evm::ChainId;
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -18,9 +20,10 @@ const CHAINLIST_URL: &str = "https://chainlist.org/rpcs.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Map a chain ID to Alchemy's subdomain slug, e.g. `1 → "eth-mainnet"`.
-/// `None` means Alchemy doesn't host that chain.
-pub fn alchemy_chain_slug(chain_id: u64) -> Option<&'static str> {
-    match chain_id {
+/// `None` means Alchemy doesn't host that chain. Matches on the raw id at the
+/// literal table — the one place `ChainId` unwraps to `u64`.
+pub fn alchemy_chain_slug(chain_id: ChainId) -> Option<&'static str> {
+    match chain_id.get() {
         1 => Some("eth-mainnet"),
         10 => Some("opt-mainnet"),
         56 => Some("bnb-mainnet"),
@@ -34,11 +37,13 @@ pub fn alchemy_chain_slug(chain_id: u64) -> Option<&'static str> {
 }
 
 /// Build the Alchemy RPC URL for `chain_id`. `None` if Alchemy doesn't
-/// support the chain. Empty / placeholder API keys are the caller's
-/// concern — pass the key only when it's real.
-pub fn alchemy_url(chain_id: u64, api_key: &str) -> Option<String> {
+/// support the chain, or the formatted URL doesn't parse (e.g. an `api_key`
+/// with stray characters) — either way there's no usable Alchemy endpoint.
+pub fn alchemy_url(chain_id: ChainId, api_key: &str) -> Option<Url> {
     let slug = alchemy_chain_slug(chain_id)?;
-    Some(format!("https://{slug}.g.alchemy.com/v2/{api_key}"))
+    format!("https://{slug}.g.alchemy.com/v2/{api_key}")
+        .parse()
+        .ok()
 }
 
 fn default_cache_path() -> PathBuf {
@@ -52,13 +57,13 @@ fn default_cache_path() -> PathBuf {
 #[serde(rename_all = "camelCase")]
 #[allow(
     dead_code,
-    reason = "fields captured per design spec for future use (e.g. testnet warning, redFlags display); \
-              tested and used in tests but bin-target dead_code analysis ignores test context. \
-              #[allow] (not #[expect]) because tests do read these fields — the lint wouldn't fire \
-              in the test target, which would make #[expect] itself complain."
+    reason = "ChainlistEntry mirrors the chainlist.org schema; the remaining unread fields \
+              (`chain`, `network_id`, `info_url`, `native_currency`) are deserialized for \
+              fidelity and exercised only by tests. bin-target dead_code analysis ignores \
+              test usage, so #[allow] (not #[expect]) keeps the test target's lint quiet too."
 )]
 pub struct ChainlistEntry {
-    pub chain_id: u64,
+    pub chain_id: ChainId,
     pub name: String,
     pub short_name: String,
     pub chain: String,
@@ -75,6 +80,18 @@ pub struct ChainlistEntry {
     #[serde(default)]
     pub rpc: Vec<RpcEntry>,
     pub native_currency: NativeCurrency,
+}
+
+impl ChainlistEntry {
+    /// Whether chainlist.org flags this chain as a testnet. Absent → `false`.
+    pub fn is_testnet(&self) -> bool {
+        self.is_testnet == Some(true)
+    }
+
+    /// `DefiLlama` red flags (known scam/spam advisories); empty when none.
+    pub fn red_flags(&self) -> &[String] {
+        self.red_flags.as_deref().unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,32 +171,87 @@ pub enum ChainResolveError {
     },
 }
 
+/// Filters for [`ChainResolver::list`] (the `chains list` subcommand). Both
+/// default to `false`, i.e. "no filter — list everything."
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ListFilter {
+    /// Keep only chains flagged `isTestnet: true`.
+    pub testnet_only: bool,
+    /// Keep only chains Alchemy hosts (an [`alchemy_chain_slug`] exists).
+    pub alchemy_only: bool,
+}
+
+/// A user-typeable handle for a chain — a chainlist `shortName` *or*
+/// `chainSlug` (both feed the same lookup space, so `--chain eth` and
+/// `--chain ethereum` resolve alike). Construction lowercases, so a handle is
+/// always normalized and case-insensitive matching can't be bypassed by a
+/// stray mixed-case key. Not `ChainName` — that's the full display `name`
+/// field; not `ChainSlug` — slug is only one of the two sources.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChainHandle(String);
+
+impl ChainHandle {
+    /// Normalize a raw `shortName` / `chainSlug` / user `--chain` value into a
+    /// lookup handle. Lowercasing here is the single source of normalization.
+    pub fn new(raw: &str) -> Self {
+        Self(raw.to_ascii_lowercase())
+    }
+}
+
 #[derive(Debug)]
 pub struct ChainResolver {
     entries: Vec<ChainlistEntry>,
-    by_name: HashMap<String, u64>,
+    by_name: HashMap<ChainHandle, ChainId>,
 }
 
 impl ChainResolver {
     /// Build a resolver from an already-deserialized list of entries.
+    ///
+    /// `shortName` / `chainSlug` are **not** unique across chainlist (e.g.
+    /// `"kub"` is the shortName of both chain 96 and chain 259251). On a key
+    /// collision we keep the **lowest** chain id as the canonical target: it's
+    /// deterministic regardless of chainlist ordering, and the lowest id is the
+    /// original/most-canonical chain. Ambiguous names that need the other chain
+    /// must use `--chain-id`.
     pub fn from_entries(entries: Vec<ChainlistEntry>) -> Self {
-        let mut by_name = HashMap::with_capacity(entries.len() * 2);
+        let mut by_name: HashMap<ChainHandle, ChainId> = HashMap::with_capacity(entries.len() * 2);
         for e in &entries {
-            by_name.insert(e.short_name.to_ascii_lowercase(), e.chain_id);
-            if let Some(slug) = &e.chain_slug {
-                by_name.insert(slug.to_ascii_lowercase(), e.chain_id);
+            let slug_key = e.chain_slug.as_deref().map(ChainHandle::new);
+            let keys = std::iter::once(ChainHandle::new(&e.short_name)).chain(slug_key);
+            for key in keys {
+                by_name
+                    .entry(key)
+                    .and_modify(|id| *id = (*id).min(e.chain_id))
+                    .or_insert(e.chain_id);
             }
         }
         Self { entries, by_name }
     }
 
-    pub fn resolve(&self, name: &str) -> Result<u64, ChainResolveError> {
+    pub fn resolve(&self, name: &str) -> Result<ChainId, ChainResolveError> {
         self.by_name
-            .get(&name.to_ascii_lowercase())
+            .get(&ChainHandle::new(name))
             .copied()
             .ok_or_else(|| ChainResolveError::UnknownName {
                 name: name.to_owned(),
             })
+    }
+
+    /// The cached chainlist entry for `chain_id`, if present.
+    pub fn entry(&self, chain_id: ChainId) -> Option<&ChainlistEntry> {
+        self.entries.iter().find(|e| e.chain_id == chain_id)
+    }
+
+    /// Entries matching `filter`, sorted by chain id — backs `chains list`.
+    pub fn list(&self, filter: ListFilter) -> Vec<&ChainlistEntry> {
+        let mut out: Vec<&ChainlistEntry> = self
+            .entries
+            .iter()
+            .filter(|e| !filter.testnet_only || e.is_testnet())
+            .filter(|e| !filter.alchemy_only || alchemy_chain_slug(e.chain_id).is_some())
+            .collect();
+        out.sort_by_key(|e| e.chain_id);
+        out
     }
 
     /// Pick a usable public RPC URL for `chain_id` from the cached chainlist
@@ -192,14 +264,17 @@ impl ChainResolver {
     /// 3. Rank by privacy:
     ///    tracking=none (0) > limited (1) > unspecified/None (2) > yes (3).
     /// 4. Stable within tier — first-listed in chainlist wins.
-    pub fn public_rpc_for(&self, chain_id: u64) -> Option<String> {
-        let entry = self.entries.iter().find(|e| e.chain_id == chain_id)?;
-        entry
+    ///
+    /// Steps 1–2 are string-level checks on the raw chainlist value, run before
+    /// parsing; the chosen entry is parsed into a [`Url`] at the end (a winner
+    /// that somehow fails to parse yields `None`).
+    pub fn public_rpc_for(&self, chain_id: ChainId) -> Option<Url> {
+        self.entry(chain_id)?
             .rpc
             .iter()
             .filter(|r| r.url.starts_with("https://") && !r.url.contains("${"))
             .min_by_key(|r| r.tracking.rank())
-            .map(|r| r.url.clone())
+            .and_then(|r| r.url.parse().ok())
     }
 
     /// Load the resolver from a JSON file on disk. The path is captured into
@@ -271,27 +346,29 @@ mod tests {
 
     #[test]
     fn alchemy_chain_slug_returns_some_for_known_chains() {
-        assert_eq!(alchemy_chain_slug(1), Some("eth-mainnet"));
-        assert_eq!(alchemy_chain_slug(56), Some("bnb-mainnet"));
-        assert_eq!(alchemy_chain_slug(42161), Some("arb-mainnet"));
+        assert_eq!(alchemy_chain_slug(ChainId::new(1)), Some("eth-mainnet"));
+        assert_eq!(alchemy_chain_slug(ChainId::new(56)), Some("bnb-mainnet"));
+        assert_eq!(alchemy_chain_slug(ChainId::new(42161)), Some("arb-mainnet"));
     }
 
     #[test]
     fn alchemy_chain_slug_returns_none_for_unknown_chains() {
-        assert!(alchemy_chain_slug(99_999).is_none());
+        assert!(alchemy_chain_slug(ChainId::new(99_999)).is_none());
     }
 
     #[test]
     fn alchemy_url_known_chain() {
         assert_eq!(
-            alchemy_url(1, "abc").as_deref(),
+            alchemy_url(ChainId::new(1), "abc")
+                .as_ref()
+                .map(Url::as_str),
             Some("https://eth-mainnet.g.alchemy.com/v2/abc"),
         );
     }
 
     #[test]
     fn alchemy_url_unknown_chain_is_none() {
-        assert!(alchemy_url(99_999, "abc").is_none());
+        assert!(alchemy_url(ChainId::new(99_999), "abc").is_none());
     }
 
     const ETH_ENTRY: &str = r#"{
@@ -310,7 +387,7 @@ mod tests {
     #[test]
     fn parses_ethereum_entry() {
         let entry: ChainlistEntry = serde_json::from_str(ETH_ENTRY).expect("deserialize");
-        assert_eq!(entry.chain_id, 1);
+        assert_eq!(entry.chain_id, ChainId::new(1));
         assert_eq!(entry.name, "Ethereum Mainnet");
         assert_eq!(entry.short_name, "eth");
         assert_eq!(entry.chain_slug.as_deref(), Some("ethereum"));
@@ -335,7 +412,7 @@ mod tests {
     #[test]
     fn parses_entry_without_optional_fields() {
         let entry: ChainlistEntry = serde_json::from_str(MINIMAL_ENTRY).expect("deserialize");
-        assert_eq!(entry.chain_id, 10);
+        assert_eq!(entry.chain_id, ChainId::new(10));
         assert!(entry.chain_slug.is_none());
         assert!(entry.network_id.is_none());
         assert!(entry.info_url.is_none());
@@ -364,7 +441,7 @@ mod tests {
     #[test]
     fn parses_unknown_fields_silently() {
         let entry: ChainlistEntry = serde_json::from_str(ENRICHED_ENTRY).expect("deserialize");
-        assert_eq!(entry.chain_id, 56);
+        assert_eq!(entry.chain_id, ChainId::new(56));
         assert_eq!(entry.short_name, "bnb");
         assert_eq!(entry.chain_slug.as_deref(), Some("binance"));
         assert_eq!(entry.rpc.len(), 1);
@@ -380,24 +457,60 @@ mod tests {
     #[test]
     fn resolver_matches_short_name() {
         let r = ChainResolver::from_entries(fixture_entries());
-        assert_eq!(r.resolve("eth").expect("eth resolves"), 1);
-        assert_eq!(r.resolve("bnb").expect("bnb resolves"), 56);
-        assert_eq!(r.resolve("oeth").expect("oeth resolves"), 10);
+        assert_eq!(r.resolve("eth").expect("eth resolves"), ChainId::new(1));
+        assert_eq!(r.resolve("bnb").expect("bnb resolves"), ChainId::new(56));
+        assert_eq!(r.resolve("oeth").expect("oeth resolves"), ChainId::new(10));
     }
 
     #[test]
     fn resolver_matches_chain_slug() {
         let r = ChainResolver::from_entries(fixture_entries());
-        assert_eq!(r.resolve("ethereum").expect("slug resolves"), 1);
-        assert_eq!(r.resolve("binance").expect("slug resolves"), 56);
+        assert_eq!(
+            r.resolve("ethereum").expect("slug resolves"),
+            ChainId::new(1)
+        );
+        assert_eq!(
+            r.resolve("binance").expect("slug resolves"),
+            ChainId::new(56)
+        );
     }
 
     #[test]
     fn resolver_match_is_case_insensitive() {
         let r = ChainResolver::from_entries(fixture_entries());
-        assert_eq!(r.resolve("Ethereum").expect("mixed case"), 1);
-        assert_eq!(r.resolve("BNB").expect("upper"), 56);
-        assert_eq!(r.resolve("Binance").expect("slug mixed"), 56);
+        assert_eq!(r.resolve("Ethereum").expect("mixed case"), ChainId::new(1));
+        assert_eq!(r.resolve("BNB").expect("upper"), ChainId::new(56));
+        assert_eq!(r.resolve("Binance").expect("slug mixed"), ChainId::new(56));
+    }
+
+    #[test]
+    fn resolve_prefers_lowest_chain_id_on_collision_regardless_of_order() {
+        // Two chains share shortName "kub" (chainlist really has this: 96 and
+        // 259251). The lowest id must win whichever order they're listed in —
+        // last-wins would instead depend on chainlist ordering.
+        const KUB_LOW: &str = r#"{
+            "name": "Bitkub Chain", "chain": "KUB", "chainId": 96,
+            "shortName": "kub", "chainSlug": "bitkub",
+            "nativeCurrency": { "name": "KUB", "symbol": "KUB", "decimals": 18 }
+        }"#;
+        const KUB_HIGH: &str = r#"{
+            "name": "KUB Testnet", "chain": "KUB", "chainId": 259251,
+            "shortName": "kub",
+            "nativeCurrency": { "name": "tKUB", "symbol": "tKUB", "decimals": 18 }
+        }"#;
+        for listing in [
+            format!("[{KUB_HIGH},{KUB_LOW}]"),
+            format!("[{KUB_LOW},{KUB_HIGH}]"),
+        ] {
+            let entries: Vec<ChainlistEntry> =
+                serde_json::from_str(&listing).expect("fixture parse");
+            let r = ChainResolver::from_entries(entries);
+            assert_eq!(
+                r.resolve("kub").expect("kub resolves"),
+                ChainId::new(96),
+                "lowest chain id must win the collision ({listing})"
+            );
+        }
     }
 
     #[test]
@@ -420,9 +533,9 @@ mod tests {
         std::fs::write(&path, json).expect("write fixture");
 
         let r = ChainResolver::load_from_path(&path).expect("load");
-        assert_eq!(r.resolve("ethereum").expect("eth"), 1);
-        assert_eq!(r.resolve("binance").expect("bnb"), 56);
-        assert_eq!(r.resolve("oeth").expect("op"), 10);
+        assert_eq!(r.resolve("ethereum").expect("eth"), ChainId::new(1));
+        assert_eq!(r.resolve("binance").expect("bnb"), ChainId::new(56));
+        assert_eq!(r.resolve("oeth").expect("op"), ChainId::new(10));
     }
 
     const RPC_HEAVY_ENTRY: &str = r#"{
@@ -525,8 +638,10 @@ mod tests {
     fn public_rpc_for_prefers_tracking_none() {
         let r = ChainResolver::from_entries(entries_with_rpc());
         assert_eq!(
-            r.public_rpc_for(99999).as_deref(),
-            Some("https://none.example"),
+            r.public_rpc_for(ChainId::new(99999))
+                .as_ref()
+                .map(Url::as_str),
+            Some("https://none.example/"),
             "tracking=none must win over limited/yes/unspecified"
         );
     }
@@ -547,8 +662,10 @@ mod tests {
         let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
         let r = ChainResolver::from_entries(vec![entry]);
         assert_eq!(
-            r.public_rpc_for(88888).as_deref(),
-            Some("https://plain.example"),
+            r.public_rpc_for(ChainId::new(88888))
+                .as_ref()
+                .map(Url::as_str),
+            Some("https://plain.example/"),
             "URL with ${{...}} placeholder must be skipped even if tracking=none"
         );
     }
@@ -570,8 +687,10 @@ mod tests {
         let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
         let r = ChainResolver::from_entries(vec![entry]);
         assert_eq!(
-            r.public_rpc_for(77777).as_deref(),
-            Some("https://ok.example"),
+            r.public_rpc_for(ChainId::new(77777))
+                .as_ref()
+                .map(Url::as_str),
+            Some("https://ok.example/"),
             "http:// and wss:// must be skipped, leaving the https one even if tracking=yes"
         );
     }
@@ -592,14 +711,14 @@ mod tests {
         }"#;
         let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
         let r = ChainResolver::from_entries(vec![entry]);
-        assert!(r.public_rpc_for(66666).is_none());
+        assert!(r.public_rpc_for(ChainId::new(66666)).is_none());
     }
 
     #[test]
     fn public_rpc_for_unknown_chain_id_returns_none() {
         let r = ChainResolver::from_entries(entries_with_rpc());
         assert!(
-            r.public_rpc_for(12345).is_none(),
+            r.public_rpc_for(ChainId::new(12345)).is_none(),
             "no matching chain → None"
         );
     }
@@ -622,9 +741,103 @@ mod tests {
         let entry: ChainlistEntry = serde_json::from_str(json).expect("parse");
         let r = ChainResolver::from_entries(vec![entry]);
         assert_eq!(
-            r.public_rpc_for(55555).as_deref(),
-            Some("https://first.example"),
+            r.public_rpc_for(ChainId::new(55555))
+                .as_ref()
+                .map(Url::as_str),
+            Some("https://first.example/"),
             "stable rank → first-listed wins"
         );
+    }
+
+    // -- entry / list / advisories (chains list + testnet/red-flag warnings) --
+
+    const TESTNET_ENTRY: &str = r#"{
+        "name": "Sepolia",
+        "chain": "ETH",
+        "chainId": 11155111,
+        "shortName": "sep",
+        "chainSlug": "sepolia",
+        "isTestnet": true,
+        "nativeCurrency": { "name": "Sepolia Ether", "symbol": "ETH", "decimals": 18 }
+    }"#;
+
+    const RED_FLAG_ENTRY: &str = r#"{
+        "name": "Sketchy Chain",
+        "chain": "SKETCH",
+        "chainId": 424242,
+        "shortName": "sketch",
+        "redFlags": ["scam", "reusedChainId"],
+        "nativeCurrency": { "name": "S", "symbol": "S", "decimals": 18 }
+    }"#;
+
+    // 1 (eth, alchemy-hosted, mainnet), 11155111 (sepolia testnet, alchemy-hosted),
+    // 99999 (test, not alchemy-hosted, no testnet flag).
+    fn list_fixture() -> Vec<ChainlistEntry> {
+        serde_json::from_str(&format!("[{ETH_ENTRY},{TESTNET_ENTRY},{RPC_HEAVY_ENTRY}]"))
+            .expect("fixture parse")
+    }
+
+    fn ids(entries: &[&ChainlistEntry]) -> Vec<ChainId> {
+        entries.iter().map(|e| e.chain_id).collect()
+    }
+
+    #[test]
+    fn list_unfiltered_returns_all_sorted_by_chain_id() {
+        let r = ChainResolver::from_entries(list_fixture());
+        assert_eq!(
+            ids(&r.list(ListFilter::default())),
+            [1, 99999, 11_155_111].map(ChainId::new)
+        );
+    }
+
+    #[test]
+    fn list_testnet_only_keeps_flagged_chains() {
+        let r = ChainResolver::from_entries(list_fixture());
+        let filter = ListFilter {
+            testnet_only: true,
+            alchemy_only: false,
+        };
+        assert_eq!(ids(&r.list(filter)), [ChainId::new(11_155_111)]);
+    }
+
+    #[test]
+    fn list_alchemy_only_keeps_alchemy_hosted_chains() {
+        let r = ChainResolver::from_entries(list_fixture());
+        let filter = ListFilter {
+            testnet_only: false,
+            alchemy_only: true,
+        };
+        // eth (1) and sepolia (11155111) have Alchemy slugs; 99999 does not.
+        assert_eq!(ids(&r.list(filter)), [1, 11_155_111].map(ChainId::new));
+    }
+
+    #[test]
+    fn entry_finds_by_chain_id() {
+        let r = ChainResolver::from_entries(list_fixture());
+        assert_eq!(
+            r.entry(ChainId::new(1)).expect("eth present").short_name,
+            "eth"
+        );
+        assert!(r.entry(ChainId::new(123_456)).is_none());
+    }
+
+    #[test]
+    fn testnet_and_red_flag_accessors() {
+        let testnet: ChainlistEntry = serde_json::from_str(TESTNET_ENTRY).expect("parse");
+        assert!(testnet.is_testnet());
+        assert!(testnet.red_flags().is_empty());
+
+        let eth: ChainlistEntry = serde_json::from_str(ETH_ENTRY).expect("parse");
+        assert!(!eth.is_testnet(), "isTestnet:false → not a testnet");
+        assert!(eth.red_flags().is_empty(), "redFlags:[] → empty");
+
+        let minimal: ChainlistEntry = serde_json::from_str(MINIMAL_ENTRY).expect("parse");
+        assert!(!minimal.is_testnet(), "absent isTestnet → not a testnet");
+        assert!(minimal.red_flags().is_empty(), "absent redFlags → empty");
+
+        let flagged: ChainlistEntry = serde_json::from_str(RED_FLAG_ENTRY).expect("parse");
+        assert!(!flagged.is_testnet());
+        let flags: Vec<&str> = flagged.red_flags().iter().map(String::as_str).collect();
+        assert_eq!(flags, ["scam", "reusedChainId"]);
     }
 }

@@ -13,7 +13,7 @@ use tracing::Instrument;
 
 use crate::chains::ChainResolver;
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
-use crate::config::{ChainIdCheck, Config, ConfigError};
+use crate::config::{ChainIdCheck, Config, ConfigError, RpcSource};
 
 /// Default cache DB location: `$XDG_CACHE_HOME/chainfold/chainfold.db`.
 /// Falls back to `./chainfold.db` if no XDG cache dir is resolvable.
@@ -39,7 +39,7 @@ pub async fn run(
     };
 
     let chain_id = match (args.chain_id, args.chain.as_deref()) {
-        (Some(id), _) => id,
+        (Some(id), _) => ChainId::new(id),
         (None, Some(name)) => resolver
             .as_ref()
             .expect("resolver loaded when args.chain is set")
@@ -47,13 +47,34 @@ pub async fn run(
         (None, None) => unreachable!("clap enforces required_unless_present"),
     };
 
+    // Surface chainlist advisories for the resolved chain, when the chainlist
+    // data is already loaded (resolver present — i.e. a name lookup or the
+    // public-RPC fallback path). Testnet is an FYI note; DefiLlama red flags
+    // (known scam/spam chains) are a loud warning.
+    if let Some(entry) = resolver.as_ref().and_then(|r| r.entry(chain_id)) {
+        if entry.is_testnet() {
+            eprintln!(
+                "note: chain '{}' (id {chain_id}) is a testnet",
+                entry.short_name
+            );
+        }
+        let flags = entry.red_flags();
+        if !flags.is_empty() {
+            eprintln!(
+                "warning: chain '{}' (id {chain_id}) is flagged by chainlist.org: {}",
+                entry.short_name,
+                flags.join(", "),
+            );
+        }
+    }
+
     // RPC URL resolution order:
-    // 1. explicit --rpc-url
+    // 1. explicit --rpc-url (raw user string — parsed at this seam)
     // 2. Alchemy from config (file or default-via-env)
     // 3. public RPC from chainlist.org
     // 4. NoRpcAvailable error
-    let rpc_url = if let Some(url) = args.rpc_url.as_deref() {
-        url.to_string()
+    let url: Url = if let Some(raw) = args.rpc_url.as_deref() {
+        raw.parse()?
     } else if let Some(url) = config.alchemy_url(chain_id) {
         url
     } else if let Some(url) = resolver.as_ref().and_then(|r| r.public_rpc_for(chain_id)) {
@@ -63,19 +84,18 @@ pub async fn run(
         return Err(ConfigError::NoRpcAvailable {
             chain_id,
             tried: vec![
-                "--rpc-url (not provided)".into(),
-                "Alchemy (no api_key or unsupported chain)".into(),
-                "chainlist.org public RPCs (none usable)".into(),
+                RpcSource::CliFlag,
+                RpcSource::Alchemy,
+                RpcSource::ChainlistPublic,
             ],
         }
         .into());
     };
 
-    let url: Url = rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    // The chain id is already resolved from args — bundle it into the provider
-    // so the EVM layer reads it for free instead of re-fetching eth_chainId.
-    let chain_id = ChainId::new(chain_id);
+    // The chain id is already resolved (and typed) from args — bundle it into
+    // the provider so the EVM layer reads it for free instead of re-fetching
+    // eth_chainId.
     let provider = ChainProvider::new(ProviderBuilder::new().connect_client(client), chain_id);
 
     let db_path_buf = args.db.clone().unwrap_or_else(default_db_path);

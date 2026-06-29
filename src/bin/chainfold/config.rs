@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use alloy::transports::http::reqwest::Url;
+use chainfold::evm::ChainId;
 use toml::de::Error as TomlError;
 
 use crate::chains;
@@ -28,11 +30,38 @@ pub enum ConfigError {
     #[error("env var ${var} referenced in config is not set")]
     MissingEnvVar { var: String },
     #[error(
-        "no RPC URL available for chain {chain_id} (tried: {tried:?}). \
+        "no RPC URL available for chain {chain_id} (tried: {}). \
          Pass --rpc-url <url>, set ALCHEMY_KEY in the environment for a supported \
-         chain, or add chainlist.org data for this chain id."
+         chain, or add chainlist.org data for this chain id.",
+        .tried.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
     )]
-    NoRpcAvailable { chain_id: u64, tried: Vec<String> },
+    NoRpcAvailable {
+        chain_id: ChainId,
+        tried: Vec<RpcSource>,
+    },
+}
+
+/// A source the CLI consults for an RPC URL, in priority order. Carried by
+/// [`ConfigError::NoRpcAvailable`] to report which sources were exhausted —
+/// a closed vocabulary rather than free-text strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcSource {
+    /// The explicit `--rpc-url` flag.
+    CliFlag,
+    /// An Alchemy endpoint built from a configured API key.
+    Alchemy,
+    /// A public endpoint from chainlist.org.
+    ChainlistPublic,
+}
+
+impl std::fmt::Display for RpcSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RpcSource::CliFlag => "--rpc-url",
+            RpcSource::Alchemy => "Alchemy",
+            RpcSource::ChainlistPublic => "chainlist.org public RPCs",
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -169,7 +198,7 @@ impl Config {
     /// is configured and the chain has an Alchemy slug. Returns `None`
     /// otherwise (caller decides on fallback). URL shape lives in
     /// [`chains::alchemy_url`].
-    pub fn alchemy_url(&self, chain_id: u64) -> Option<String> {
+    pub fn alchemy_url(&self, chain_id: ChainId) -> Option<Url> {
         chains::alchemy_url(chain_id, self.alchemy_api_key()?)
     }
 
@@ -376,11 +405,11 @@ mod tests {
     fn alchemy_url_returns_some_for_supported_chain_with_key() {
         let c = alchemy_config("test-key-123");
         assert_eq!(
-            c.alchemy_url(1).as_deref(),
+            c.alchemy_url(ChainId::new(1)).as_ref().map(Url::as_str),
             Some("https://eth-mainnet.g.alchemy.com/v2/test-key-123")
         );
         assert_eq!(
-            c.alchemy_url(56).as_deref(),
+            c.alchemy_url(ChainId::new(56)).as_ref().map(Url::as_str),
             Some("https://bnb-mainnet.g.alchemy.com/v2/test-key-123")
         );
     }
@@ -388,7 +417,7 @@ mod tests {
     #[test]
     fn alchemy_url_returns_none_for_unsupported_chain() {
         let c = alchemy_config("test-key");
-        assert!(c.alchemy_url(99_999).is_none());
+        assert!(c.alchemy_url(ChainId::new(99_999)).is_none());
     }
 
     #[test]
@@ -398,7 +427,7 @@ mod tests {
             etherscan: None,
             evm: None,
         };
-        assert!(c.alchemy_url(1).is_none());
+        assert!(c.alchemy_url(ChainId::new(1)).is_none());
     }
 
     #[test]
@@ -408,7 +437,7 @@ mod tests {
             etherscan: None,
             evm: None,
         };
-        assert!(c.alchemy_url(1).is_none());
+        assert!(c.alchemy_url(ChainId::new(1)).is_none());
     }
 
     #[test]
@@ -416,7 +445,7 @@ mod tests {
         // Important for the `${ALCHEMY_KEY:-}` default config path:
         // empty key means "no Alchemy effectively", fall through to public RPC.
         let c = alchemy_config("");
-        assert!(c.alchemy_url(1).is_none());
+        assert!(c.alchemy_url(ChainId::new(1)).is_none());
     }
 
     #[test]
@@ -527,16 +556,26 @@ mod tests {
     #[test]
     fn no_rpc_available_error_message_lists_attempts() {
         // Smoke test that the error formats reasonably and includes the
-        // chain id + the "tried" list. Pure formatting check, no I/O.
+        // chain id + the "tried" sources. Pure formatting check, no I/O.
         let err = ConfigError::NoRpcAvailable {
-            chain_id: 56,
-            tried: vec!["foo".into(), "bar".into()],
+            chain_id: ChainId::new(56),
+            tried: vec![RpcSource::CliFlag, RpcSource::ChainlistPublic],
         };
         let msg = format!("{err}");
         assert!(msg.contains("56"), "expected chain id in message");
         assert!(
-            msg.contains("foo") && msg.contains("bar"),
-            "expected `tried` list in message"
+            msg.contains("--rpc-url") && msg.contains("chainlist.org"),
+            "expected the tried sources, comma-joined, in the message: {msg}"
+        );
+    }
+
+    #[test]
+    fn rpc_source_display_is_human_readable() {
+        assert_eq!(RpcSource::CliFlag.to_string(), "--rpc-url");
+        assert_eq!(RpcSource::Alchemy.to_string(), "Alchemy");
+        assert_eq!(
+            RpcSource::ChainlistPublic.to_string(),
+            "chainlist.org public RPCs"
         );
     }
 
