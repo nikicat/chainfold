@@ -4,7 +4,7 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::evm::ChainId;
 use toml::de::Error as TomlError;
 
-use crate::chains;
+use crate::chains::{self, ChainSelector};
 
 /// Hardcoded fallback used when no config file is present, or to fill in
 /// fields missing from a partial user config. Env-interpolated on load via
@@ -76,6 +76,15 @@ pub struct EvmConfig {
     /// What to do about the RPC's chain id on startup. Defaults to
     /// [`ChainIdCheck::Verify`]. In TOML: `chain_id_check = "verify"` | `"trust"`.
     pub chain_id_check: Option<ChainIdCheck>,
+
+    /// Chain used when neither `--chain` nor `--chain-id` is passed, parsed into
+    /// a [`ChainSelector`]. A chainlist shortName/chainSlug (e.g. `"arbitrum"`)
+    /// or a numeric chain id as a string (e.g. `"56"`). In TOML:
+    /// `default_chain = "..."`. Overridden by the `CHAINFOLD_CHAIN` env var; if
+    /// all are unset the built-in default is `ethereum`. An empty value is
+    /// treated as unset.
+    #[serde(default, deserialize_with = "de_optional_chain_selector")]
+    pub default_chain: Option<ChainSelector>,
 }
 
 /// Whether to confirm the RPC serves the requested chain. A closed choice
@@ -217,6 +226,12 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// The configured default chain, used when neither `--chain` nor
+    /// `--chain-id` is passed. `[evm] default_chain` in TOML.
+    pub fn default_chain(&self) -> Option<&ChainSelector> {
+        self.evm.as_ref()?.default_chain.as_ref()
+    }
+
     /// Print resolved config with API key masked.
     pub fn show(&self) {
         println!("[provider]");
@@ -236,7 +251,22 @@ impl Config {
         }
         println!("[evm]");
         println!("  chain_id_check = {:?}", self.chain_id_check());
+        match self.default_chain() {
+            Some(sel) => println!("  default_chain  = {sel}"),
+            None => println!("  default_chain  = (unset → ethereum)"),
+        }
     }
+}
+
+/// Deserialize `[evm] default_chain` into an optional [`ChainSelector`], mapping
+/// an empty string to `None` so a blank or `${VAR:-}`-interpolated value falls
+/// through to the env var / built-in default rather than erroring.
+fn de_optional_chain_selector<'de, D>(d: D) -> Result<Option<ChainSelector>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = <String as serde::Deserialize>::deserialize(d)?;
+    Ok(ChainSelector::parse(&raw))
 }
 
 fn mask(key: &str) -> String {

@@ -196,6 +196,68 @@ impl ChainHandle {
     pub fn new(raw: &str) -> Self {
         Self(raw.to_ascii_lowercase())
     }
+
+    /// The normalized (lowercased) handle string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A chain selected by id or by name, *before* name→id resolution. Parsed from
+/// a free-form string (a `CHAINFOLD_CHAIN` env value or a `[evm] default_chain`
+/// config value): an all-digits value is a [`ChainId`] (so chains absent from
+/// chainlist still work via env/config), anything else a [`ChainHandle`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainSelector {
+    Id(ChainId),
+    Name(ChainHandle),
+}
+
+impl ChainSelector {
+    /// Parse a selector string. Empty input is treated as unset (`None`), so a
+    /// blank env var or config value falls through to the next source.
+    pub fn parse(raw: &str) -> Option<Self> {
+        if raw.is_empty() {
+            return None;
+        }
+        Some(match raw.parse::<u64>() {
+            Ok(n) => Self::Id(ChainId::new(n)),
+            Err(_) => Self::Name(ChainHandle::new(raw)),
+        })
+    }
+}
+
+impl std::fmt::Display for ChainSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Id(id) => std::fmt::Display::fmt(id, f),
+            Self::Name(handle) => f.write_str(handle.as_str()),
+        }
+    }
+}
+
+/// Built-in default chain name, used when nothing else selects one.
+pub const DEFAULT_CHAIN: &str = "ethereum";
+
+/// Resolve the target chain with precedence:
+/// `--chain-id` > `--chain` > `$CHAINFOLD_CHAIN` > `[evm] default_chain` >
+/// built-in [`DEFAULT_CHAIN`]. `--chain` and `--chain-id` are mutually exclusive
+/// at the clap layer, so their relative order here is moot.
+pub fn select_chain(
+    chain_id: Option<ChainId>,
+    chain: Option<ChainHandle>,
+    env_default: Option<ChainSelector>,
+    config_default: Option<ChainSelector>,
+) -> ChainSelector {
+    if let Some(id) = chain_id {
+        return ChainSelector::Id(id);
+    }
+    if let Some(handle) = chain {
+        return ChainSelector::Name(handle);
+    }
+    env_default
+        .or(config_default)
+        .unwrap_or_else(|| ChainSelector::Name(ChainHandle::new(DEFAULT_CHAIN)))
 }
 
 #[derive(Debug)]
@@ -228,12 +290,13 @@ impl ChainResolver {
         Self { entries, by_name }
     }
 
-    pub fn resolve(&self, name: &str) -> Result<ChainId, ChainResolveError> {
+    /// Resolve a [`ChainHandle`] (already case-normalized) to its chain id.
+    pub fn resolve(&self, handle: &ChainHandle) -> Result<ChainId, ChainResolveError> {
         self.by_name
-            .get(&ChainHandle::new(name))
+            .get(handle)
             .copied()
             .ok_or_else(|| ChainResolveError::UnknownName {
-                name: name.to_owned(),
+                name: handle.as_str().to_owned(),
             })
     }
 
@@ -454,23 +517,89 @@ mod tests {
             .expect("fixture parse")
     }
 
+    /// Resolve a raw name through a [`ChainHandle`], the way production does.
+    fn resolve(resolver: &ChainResolver, name: &str) -> Result<ChainId, ChainResolveError> {
+        resolver.resolve(&ChainHandle::new(name))
+    }
+
+    fn sel_name(s: &str) -> ChainSelector {
+        ChainSelector::Name(ChainHandle::new(s))
+    }
+    fn sel_id(n: u64) -> ChainSelector {
+        ChainSelector::Id(ChainId::new(n))
+    }
+
+    #[test]
+    fn selector_parses_numeric_as_id() {
+        assert_eq!(ChainSelector::parse("56"), Some(sel_id(56)));
+    }
+
+    #[test]
+    fn selector_parses_name_lowercased() {
+        assert_eq!(ChainSelector::parse("Arbitrum"), Some(sel_name("arbitrum")));
+    }
+
+    #[test]
+    fn selector_empty_is_none() {
+        assert_eq!(ChainSelector::parse(""), None);
+    }
+
+    #[test]
+    fn select_chain_precedence() {
+        // explicit --chain-id wins over everything
+        assert_eq!(
+            select_chain(
+                Some(ChainId::new(56)),
+                None,
+                Some(sel_name("base")),
+                Some(sel_name("op")),
+            ),
+            sel_id(56)
+        );
+        // explicit --chain beats env and config
+        assert_eq!(
+            select_chain(
+                None,
+                Some(ChainHandle::new("arbitrum")),
+                Some(sel_name("base")),
+                Some(sel_name("op")),
+            ),
+            sel_name("arbitrum")
+        );
+        // env beats config
+        assert_eq!(
+            select_chain(None, None, Some(sel_name("base")), Some(sel_name("op"))),
+            sel_name("base")
+        );
+        // config beats the built-in default
+        assert_eq!(
+            select_chain(None, None, None, Some(sel_name("op"))),
+            sel_name("op")
+        );
+        // built-in fallback is ethereum
+        assert_eq!(select_chain(None, None, None, None), sel_name("ethereum"));
+    }
+
     #[test]
     fn resolver_matches_short_name() {
         let r = ChainResolver::from_entries(fixture_entries());
-        assert_eq!(r.resolve("eth").expect("eth resolves"), ChainId::new(1));
-        assert_eq!(r.resolve("bnb").expect("bnb resolves"), ChainId::new(56));
-        assert_eq!(r.resolve("oeth").expect("oeth resolves"), ChainId::new(10));
+        assert_eq!(resolve(&r, "eth").expect("eth resolves"), ChainId::new(1));
+        assert_eq!(resolve(&r, "bnb").expect("bnb resolves"), ChainId::new(56));
+        assert_eq!(
+            resolve(&r, "oeth").expect("oeth resolves"),
+            ChainId::new(10)
+        );
     }
 
     #[test]
     fn resolver_matches_chain_slug() {
         let r = ChainResolver::from_entries(fixture_entries());
         assert_eq!(
-            r.resolve("ethereum").expect("slug resolves"),
+            resolve(&r, "ethereum").expect("slug resolves"),
             ChainId::new(1)
         );
         assert_eq!(
-            r.resolve("binance").expect("slug resolves"),
+            resolve(&r, "binance").expect("slug resolves"),
             ChainId::new(56)
         );
     }
@@ -478,9 +607,15 @@ mod tests {
     #[test]
     fn resolver_match_is_case_insensitive() {
         let r = ChainResolver::from_entries(fixture_entries());
-        assert_eq!(r.resolve("Ethereum").expect("mixed case"), ChainId::new(1));
-        assert_eq!(r.resolve("BNB").expect("upper"), ChainId::new(56));
-        assert_eq!(r.resolve("Binance").expect("slug mixed"), ChainId::new(56));
+        assert_eq!(
+            resolve(&r, "Ethereum").expect("mixed case"),
+            ChainId::new(1)
+        );
+        assert_eq!(resolve(&r, "BNB").expect("upper"), ChainId::new(56));
+        assert_eq!(
+            resolve(&r, "Binance").expect("slug mixed"),
+            ChainId::new(56)
+        );
     }
 
     #[test]
@@ -506,7 +641,7 @@ mod tests {
                 serde_json::from_str(&listing).expect("fixture parse");
             let r = ChainResolver::from_entries(entries);
             assert_eq!(
-                r.resolve("kub").expect("kub resolves"),
+                resolve(&r, "kub").expect("kub resolves"),
                 ChainId::new(96),
                 "lowest chain id must win the collision ({listing})"
             );
@@ -518,7 +653,7 @@ mod tests {
         let r = ChainResolver::from_entries(fixture_entries());
         // "bsc" isn't a shortName (it's "bnb") or a chainSlug (it's "binance"),
         // so it must error per the design (no alias overlay).
-        let err = r.resolve("bsc").expect_err("bsc should not resolve");
+        let err = resolve(&r, "bsc").expect_err("bsc should not resolve");
         match err {
             ChainResolveError::UnknownName { name } => assert_eq!(name, "bsc"),
             other => panic!("expected UnknownName, got {other:?}"),
@@ -533,9 +668,9 @@ mod tests {
         std::fs::write(&path, json).expect("write fixture");
 
         let r = ChainResolver::load_from_path(&path).expect("load");
-        assert_eq!(r.resolve("ethereum").expect("eth"), ChainId::new(1));
-        assert_eq!(r.resolve("binance").expect("bnb"), ChainId::new(56));
-        assert_eq!(r.resolve("oeth").expect("op"), ChainId::new(10));
+        assert_eq!(resolve(&r, "ethereum").expect("eth"), ChainId::new(1));
+        assert_eq!(resolve(&r, "binance").expect("bnb"), ChainId::new(56));
+        assert_eq!(resolve(&r, "oeth").expect("op"), ChainId::new(10));
     }
 
     const RPC_HEAVY_ENTRY: &str = r#"{

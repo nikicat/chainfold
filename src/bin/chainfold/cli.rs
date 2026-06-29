@@ -115,17 +115,15 @@ pub struct ChainsListArgs {
 #[derive(Parser)]
 pub struct EvmArgs {
     /// Chain name. Matched against chainlist.org's shortName or chainSlug.
-    /// Example: --chain ethereum, --chain arbitrum, --chain bnb
-    #[arg(
-        long,
-        required_unless_present = "chain_id",
-        conflicts_with = "chain_id"
-    )]
+    /// Example: --chain ethereum, --chain arbitrum, --chain bnb. When neither
+    /// --chain nor --chain-id is given, falls back to `$CHAINFOLD_CHAIN`, then
+    /// the config `[evm] default_chain`, then `ethereum`.
+    #[arg(long, conflicts_with = "chain_id")]
     pub chain: Option<String>,
 
     /// Numeric chain ID. Use for chains not listed in chainlist.org.
     /// Example: --chain-id 56
-    #[arg(long, required_unless_present = "chain", conflicts_with = "chain")]
+    #[arg(long, conflicts_with = "chain")]
     pub chain_id: Option<u64>,
 
     /// RPC endpoint URL (overrides config)
