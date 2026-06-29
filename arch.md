@@ -4,7 +4,7 @@
 
 ## What chainfold is
 
-A Rust library that lets a process work with blockchain (and CEX) event histories like a local full node — without ever downloading the chain. Concretely it gives clients:
+Chainfold is a caching access layer for blockchain (and CEX) event histories — it lets you work against a chain like a local full node without ever downloading it. One engine (caching backfill + in-memory range index + reactive core) is exposed through **three surfaces**: an embeddable Rust **library**, a `cast`-like **CLI**, and a transparent caching-RPC **daemon** (`chainfoldd`). Whichever surface you use, the engine gives:
 
 - **Caching backfill.** Ask for a time/block range once; subsequent reads of the same range hit local SQLite, never the RPC. Partial overlaps fetch only the missing slice.
 - **Incremental, lazy iteration.** A request for `(2020-01-01, 2026-01-01)` does not block for a month. It returns a snapshot object; the consumer iterates and pulls items on demand.
@@ -12,6 +12,16 @@ A Rust library that lets a process work with blockchain (and CEX) event historie
 - **Live subscriptions.** New events surface in <10 ms (measured ~3 ms on local anvil over WebSocket) from the in-memory range index — never blocked on SQLite writes.
 - **Subscribe-from-the-past.** Iterate from an old position, transparently fall through into the live tip, never see network errors. Reconnect gap-fill is invisible to the consumer.
 - **Cross-source merge + correlation.** Combine events from different chains (or different filters on the same chain) into one chronological stream; correlate src ⇄ dst tails into a matched/pending/orphan view.
+
+### Product surfaces
+
+| Surface | Binary / crate | What it is |
+|---|---|---|
+| **Library** | `chainfold` crate (`features = ["evm"]`) | Embed the engine in your own process. The `Hist` / `HistStore` / `Store` / `Matcher` API this document describes. The other two surfaces are thin front-ends over it. |
+| **CLI** | `chainfold` (`features = ["cli"]`) | A command-line chain explorer whose distinguishing idea is **histories-first**: where `cast` returns a point-in-time value, chainfold returns the *history* it's a slice of — a balance read is a *history of balances*, a block read a slice of *block history*, and `value at tip` is just `hist.at(tip)`. This maps every CLI read onto the library's `HistStore`. Every read is cached (repeats are instant and offline-capable). Ships today as `erc20` / `events` / `chains`; growing toward a `blocks` history command and `call` / `storage` / `code` accessors. |
+| **Daemon** | `chainfoldd` (planned) | A transparent JSON-RPC endpoint that fronts an upstream node. Point any existing tool — `cast`, viem, ethers, a wallet — at it and inherit chainfold's at-most-once fetching, range dedup, reorg handling, and live `eth_subscribe` push, with no code changes. EVM first; later backends expose their native RPC dialects the same way. |
+
+The library is the source of truth; the CLI and daemon are deliberately thin so the caching and correctness guarantees live in one place.
 
 This document describes the **shipped** architecture (commit `f661955` and later). For the vision-document version with not-yet-built bits like `Reducer` and reorg-aware `lca()`, scroll to [Future work](#future-work).
 
@@ -428,6 +438,8 @@ Tracked in [refactor.md](./refactor.md) and `MEMORY.md`. The biggest unbuilt pie
 * **Same-`P` typed merge alias.** `merge_hist_stores` always returns `HistStore<MergedItem<T>, MergedPos>`. When all sources share one `P` (the OwnedErc20 case) a typed `merge<T, P>` returning `HistStore<T, P>` would skip the `MergedPos` overhead. Not load-bearing today because the `MergedItem.source_key` is genuinely useful for direction reporting.
 * **Reorg-aware `lca()` and `is_equiv()`.** The pre-refactor `arch.md` envisioned `HistStore::lca(a, b)` for rolling back a stale anchor to the canonical chain's latest common ancestor. Currently consumer-side via `EvmEvent.block_hash` comparison. Centralizing into the API is a Phase 7 candidate.
 * **Other source backends.** Solana logs / Bitcoin scripthash subscriptions / CEX (Binance, Lighter, …) websockets all fit the `HistStoreBackend` shape. Each gets its own `Position` type; cross-source merge already supports it.
+* **`chainfoldd` — transparent caching RPC daemon.** A JSON-RPC server that fronts an upstream node and answers from the same cache the library fills. Drop-in: existing tooling (`cast`, viem, ethers, wallets) points at `chainfoldd` and inherits at-most-once `eth_getLogs`/block/receipt fetching, singleflight dedup, reorg-aware results, and live `eth_subscribe` push — no app changes. EVM first; the source-agnostic core lets later backends (Solana, Bitcoin, CEX) expose their native RPC dialects through the same daemon. Benefits from Phase 7's finality wiring (it must serve `safe`/`finalized` views and `eth_subscribe` correctly).
+* **`cast`-like CLI depth, histories-first.** The CLI's distinguishing idea: where `cast` returns a point-in-time value, chainfold returns the **history** it's a slice of. A balance is a *history of balances*; a block read is a slice of *block history*; `value at tip` is just `hist.at(tip)`. Every CLI read maps onto the library's `HistStore`, so it inherits caching/resume/follow for free. **Near-term:** a **`blocks`** command (cached block history) and a default chain (`ethereum`) when `--chain` is omitted, configurable via config/env. **Then:** `call`/`storage`/`code`/account-state and block/tx/receipt accessors — each a cacheable history you can slice at a block or follow live. Differentiator over `cast`: histories + a durable cache, not one-shot point reads.
 
 ## Examples that exist today
 
@@ -440,20 +452,20 @@ All four examples require `--features evm`.
 
 ## Tests
 
-| Suite | Count | Notes |
-|---|---|---|
-| Lib unit | 95 | Runs without external deps. Mock sources for the source-agnostic surface. |
-| `tests/phase3_hist_store.rs` | 9 | Source-agnostic `Hist` / `HistStore` shape tests. |
-| `tests/phase4_combinators.rs` | 6 | map/filter/since composition. |
-| `tests/phase5_merge.rs` | 8 | Heterogeneous merge with two mock `Position` types. |
-| `tests/phase6_matcher.rs` | 6 | Includes SQLite persistence across restart (tempfile). |
-| `tests/anvil_smoke.rs` | 1 (+1 ignored) | Local anvil + fork-mainnet harness check. |
-| `tests/mock_provider_smoke.rs` | 1 | alloy `Asserter` wrapper. |
-| `tests/phase1_layering.rs` | (1 ignored) | Fork-mainnet warm-cache speedup measurement. |
-| `tests/phase2_push.rs` | (3 ignored) | Anvil live-event latency tests. |
-| `tests/owned_erc20.rs` | (2 ignored) | Fork-mainnet OwnedErc20 correctness vs broad-filter baseline. |
+| Suite | Notes |
+|---|---|
+| Lib unit | Runs without external deps. Mock sources for the source-agnostic surface. |
+| `tests/phase3_hist_store.rs` | Source-agnostic `Hist` / `HistStore` shape tests. |
+| `tests/phase4_combinators.rs` | map/filter/since composition. |
+| `tests/phase5_merge.rs` | Heterogeneous merge with two mock `Position` types. |
+| `tests/phase6_matcher.rs` | Includes SQLite persistence across restart (tempfile). |
+| `tests/anvil_smoke.rs` | Local anvil + fork-mainnet harness check (the fork case is `#[ignore]`-gated). |
+| `tests/mock_provider_smoke.rs` | alloy `Asserter` wrapper. |
+| `tests/phase1_layering.rs` | Fork-mainnet warm-cache speedup measurement (`#[ignore]`). |
+| `tests/phase2_push.rs` | Anvil live-event latency tests (`#[ignore]`). |
+| `tests/owned_erc20.rs` | Fork-mainnet OwnedErc20 correctness vs broad-filter baseline (`#[ignore]`). |
 
-Total: **194 active, 8 ignored** (anvil/fork-only — gated behind `--ignored` and the `anvil` binary). Run ignored tests with:
+The `#[ignore]`-gated suites are anvil/fork-only — they need the `anvil` binary (and usually `MAINNET_RPC_URL`) and run under `--ignored`. Run the live suite with `cargo test --all-features` (and append `-- --ignored` for the fork tests):
 
 ```bash
 MAINNET_RPC_URL=https://your-rpc cargo test --features evm -- --ignored

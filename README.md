@@ -3,17 +3,20 @@
 [![CI](https://github.com/nikicat/chainfold/actions/workflows/ci.yml/badge.svg)](https://github.com/nikicat/chainfold/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/nikicat/chainfold/branch/main/graph/badge.svg)](https://codecov.io/gh/nikicat/chainfold)
 
-Treat blockchain event histories like local data. Chainfold gives a Rust
-process the illusion of working against a local full node — caching
-backfill, in-memory range index, sub-10ms live push, resumable
-positions, and cross-source merge / correlation — without ever
-downloading a chain.
+Treat blockchain event histories like local data. Chainfold gives you
+the illusion of working against a local full node — caching backfill,
+in-memory range index, sub-10ms live push, resumable positions, and
+cross-source merge / correlation — without ever downloading a chain. It
+comes as three surfaces over one engine: an embeddable **Rust library**,
+a `cast`-like **CLI**, and a transparent caching-RPC **daemon**
+(`chainfoldd`, planned).
 
 > **Status:** under active development. Phases 0–6 of the
 > [refactor plan](./refactor.md) and the OwnedErc20 follow-up shipped.
-> 194 active tests + 8 anvil/fork-only tests pass. EVM source is the
-> first concrete backend; the source-agnostic core is shaped to take
-> Solana, Bitcoin, CEX, etc.
+> The test suite (lib + CLI + integration, plus anvil/fork-only tests)
+> passes. The **library** and **CLI** ship today; the **daemon**
+> (`chainfoldd`) is planned. EVM source is the first concrete backend;
+> the source-agnostic core is shaped to take Solana, Bitcoin, CEX, etc.
 >
 > See [`arch.md`](./arch.md) for the architecture overview (with
 > Mermaid diagrams), [`refactor.md`](./refactor.md) for phase
@@ -80,7 +83,7 @@ on the same counts. See [Observability](#observability---stats).
 git clone <repo> chainfold
 cd chainfold
 cargo build --features evm
-cargo test --all-features   # 194 tests, ~1s
+cargo test --all-features   # full suite, ~1s
 ```
 
 If you plan to commit changes, install the pre-commit hooks once per
@@ -220,10 +223,10 @@ for that source. All combinators, merge, and matcher work automatically.
 ## Running integration tests
 
 ```bash
-# Quick lib + source-agnostic suite (194 tests, ~1s):
+# Quick lib + source-agnostic suite (~1s):
 cargo test --features evm
 
-# Anvil + fork-mainnet tests (8 tests, slower; needs `anvil` on PATH
+# Anvil + fork-mainnet tests (slower; needs `anvil` on PATH
 # and optionally MAINNET_RPC_URL in .env):
 cargo test --features evm -- --ignored
 ```

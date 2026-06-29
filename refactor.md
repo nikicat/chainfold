@@ -24,11 +24,11 @@
 > | Same-`P` merge alias | ⏳ Deferred | Not load-bearing; `MergedItem.source_key` is useful as-is. |
 > | Reducer | ⏳ Deferred (Phase 6 spec) | Sibling of Matcher; `Erc20Balance` rebuild gates on it. |
 >
-> **Test totals (2026-06-28, `cargo test --all-features`):** 113 lib + 50
-> CLI-bin unit + 31 active integration (anvil_smoke + mock_provider_smoke +
-> 9 phase3 + 6 phase4 + 8 phase5 + 6 phase6) = **194 active**, 8 ignored
-> (anvil/fork-only: owned_erc20, phase1_layering, phase2_push, 1 anvil_smoke,
-> + 1 ignored `rpc_span` doctest).
+> **Test suite (`cargo test --all-features`):** lib + CLI-bin unit + active
+> integration (anvil_smoke + mock_provider_smoke + phase3–6 suites), plus
+> anvil/fork-only ignored tests (owned_erc20, phase1_layering, phase2_push,
+> anvil_smoke) and an ignored `rpc_span` doctest. Run the command for the live
+> count — this file deliberately doesn't pin a number that goes stale.
 >
 > **2026-06 follow-up work (shipped, not a numbered phase):** an
 > observability contract + CLI `--stats` summary (`src/evm/observe.rs`;
@@ -97,7 +97,7 @@ layering. Built on three locked-in structural shifts:
   `erc20.rs`, `owned_erc20.rs`, `subscriber.rs`, `types.rs`, `retry.rs`,
   `aligned_ranges.rs`, `signatures.rs`.
 - **Product CLI:** `src/bin/chainfold/` (behind the `cli` feature) — the real
-  binary, carrying 49 unit tests. This is distinct from the per-feature **demo
+  binary, carrying its own unit tests. This is distinct from the per-feature **demo
   binaries** in `examples/` (`history_explorer`, `erc20_explorer`,
   `bridge_explorer`, `bridge_matcher`), which exist to validate each phase
   end-to-end against real RPC. When a section below says "CLI deliverable," it
@@ -233,6 +233,59 @@ of `Matcher`. The `Erc20Balance` rebuild gates on it. Spec in
 `../reference/src/store.ts` (`storeFromGen`) + arch.md's Reducer section.
 
 ---
+
+## Product surfaces beyond the library (planned)
+
+Chainfold is scoped as three surfaces over one caching engine (see
+[`arch.md`](./arch.md#product-surfaces)). The library is shipped; the other two
+are forward tracks, not yet sized into numbered phases:
+
+- **`cast`-like CLI depth, histories-first.** The CLI's distinguishing idea:
+  where `cast` returns a point-in-time value, chainfold returns the **history**
+  it's a slice of — a balance read is a *history of balances*, a block read a
+  slice of *block history*, and `value at tip` is just `hist.at(tip)`. Every CLI
+  read maps onto the library's `HistStore`, inheriting caching/resume/follow.
+  Grows from today's `erc20`/`events`/`chains` toward `call`/`storage`/`code` +
+  account-state and block/tx/receipt accessors — each a cacheable history you can
+  slice or follow. See the near-term plan below.
+- **`chainfoldd` — transparent caching RPC daemon.** A JSON-RPC endpoint that
+  fronts an upstream node and serves from the library's cache. Drop-in for
+  existing tooling (`cast`, viem, ethers, wallets): point them at `chainfoldd`
+  and inherit at-most-once fetching, singleflight dedup, reorg-aware results, and
+  live `eth_subscribe` push with no code changes. EVM first; later blockchains'
+  RPC dialects follow as their backends land.
+
+Both ride the same `Hist`/`HistStore`/`LogCache`/`LogIndex` machinery — they are
+front-ends, not forks. Sequencing relative to Phase 7 is open; the daemon in
+particular benefits from Phase 7's finality wiring (it must answer
+`eth_subscribe` and serve `safe`/`finalized` views correctly).
+
+### Near-term CLI plan
+
+The first concrete steps toward the histories-first CLI:
+
+1. **`blocks` command — cached block history.** A new `EvmBlockHistory` (a
+   concrete `HistStoreBackend<EvmBlock, BlockNumber>` in `src/evm/`, positioned
+   by block number) reusing the block-header cache; the CLI `chainfold evm …
+   blocks` drives it with the same window flags
+   (`--from`/`--to`/`--from-block`/`--num-blocks`) and `--follow`. The reference
+   instance of histories-first: default output is the block *history* over the
+   window; a single block is a slice. Concrete impl first — no `Block` trait
+   until a second source needs one. Milestones:
+   - **M1** — v1 fields only (`number`/`hash`/`parent_hash`/`timestamp`, what the
+     existing `cached_block_headers` table already holds); cached range walk.
+   - **M2** — `--follow` (live tip via `eth_subscribe newHeads`, a new subscriber
+     path distinct from the log subscriber).
+   - **M3** — extend `cached_block_headers` with richer fields (gas used/limit,
+     base fee, tx count, miner) for a `cast block`-like view (schema migration).
+2. **Default chain = `ethereum` when `--chain`/`--chain-id` omitted — DONE
+   (2026-06-30).** Both clap flags are now optional; resolution precedence is
+   `--chain-id` > `--chain` > env `CHAINFOLD_CHAIN` > config `[evm] default_chain`
+   > built-in `ethereum`, via a `ChainSelector` domain enum (`Id(ChainId)` /
+   `Name(ChainHandle)`) in `chains.rs`. `EvmConfig.default_chain` deserializes
+   straight into `Option<ChainSelector>` (empty → unset); `ChainResolver::resolve`
+   now takes `&ChainHandle`. A one-line stderr `note:` fires when fully
+   defaulting. Unit-tested (`select_chain` precedence + `ChainSelector::parse`).
 
 ## What success looks like (north star)
 
