@@ -34,8 +34,8 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::arch::{Position, Timestamp, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainId, ChainProvider, Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY,
-    OUT_KEY, OwnedErc20, SubscribeTransport, apply_transfer, decode_transfer, fetch_erc20_metadata,
-    rpc_retry_layer, versioned_path,
+    OUT_KEY, OwnedErc20, SubscribeTransport, TransferDirection, apply_transfer, decode_transfer,
+    fetch_erc20_metadata, rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use chrono::NaiveDate;
@@ -217,10 +217,10 @@ fn print_transfer(
     let Some(t) = decode_transfer(event) else {
         return;
     };
-    let direction = match direction_key {
-        IN_KEY => " IN",
-        OUT_KEY => "OUT",
-        _ => "  ?",
+    let direction = match TransferDirection::from_key(direction_key) {
+        Some(TransferDirection::In) => " IN",
+        Some(TransferDirection::Out) => "OUT",
+        None => "  ?",
     };
     let counterparty = if &t.to == owner { &t.from } else { &t.to };
     let amount = format_amount(t.amount, meta.decimals, AMOUNT_WHOLE_WIDTH, max_decimals);

@@ -44,6 +44,6 @@ pub use observe::{
     CACHE_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, RpcMethod, SQLITE_TARGET, SqliteOp,
     cache_event, rpc_span, sqlite_span,
 };
-pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20};
+pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use retry::rpc_retry_layer;
 pub use subscriber::{AsyncCallback, EvmLogSubscriber, SubscribeTransport, SubscriberCallbacks};

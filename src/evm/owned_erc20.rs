@@ -36,10 +36,44 @@ use crate::arch::{HistStore, HistoryError};
 use crate::evm::{ChainProvider, EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC, Topic};
 use crate::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
 
+/// Direction of an owned-ERC20 transfer relative to the tracked owner.
+///
+/// Surfaces downstream as the merge `source_key` ([`MergedItem::source_key`]).
+/// The merge layer is generically keyed on `String`, so this is the typed
+/// source of truth that converts at that boundary via
+/// [`as_str`](Self::as_str) / [`from_key`](Self::from_key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    /// Outgoing — `owner == from`.
+    Out,
+    /// Incoming — `owner == to`.
+    In,
+}
+
+impl TransferDirection {
+    /// The merge `source_key` wire string for this direction.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Out => "out",
+            Self::In => "in",
+        }
+    }
+
+    /// Parse a merge `source_key` back into a direction. `None` for any key
+    /// not produced by [`OwnedErc20::transfers`].
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            _ if key == Self::Out.as_str() => Some(Self::Out),
+            _ if key == Self::In.as_str() => Some(Self::In),
+            _ => None,
+        }
+    }
+}
+
 /// Source key for outgoing transfers (`owner == from`).
-pub const OUT_KEY: &str = "out";
+pub const OUT_KEY: &str = TransferDirection::Out.as_str();
 /// Source key for incoming transfers (`owner == to`).
-pub const IN_KEY: &str = "in";
+pub const IN_KEY: &str = TransferDirection::In.as_str();
 
 /// The topic for an indexed `address` event parameter — the address
 /// left-padded with 12 zero bytes (see [`Topic::from`]`(Address)`).
@@ -197,5 +231,16 @@ mod tests {
         assert_eq!(OUT_KEY, "out");
         assert_eq!(IN_KEY, "in");
         assert_ne!(OUT_KEY, IN_KEY);
+    }
+
+    #[test]
+    fn direction_key_round_trips() {
+        for dir in [TransferDirection::Out, TransferDirection::In] {
+            assert_eq!(TransferDirection::from_key(dir.as_str()), Some(dir));
+        }
+        assert_eq!(TransferDirection::from_key("sideways"), None);
+        // The exported consts agree with the enum's wire form.
+        assert_eq!(TransferDirection::Out.as_str(), OUT_KEY);
+        assert_eq!(TransferDirection::In.as_str(), IN_KEY);
     }
 }
