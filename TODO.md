@@ -84,25 +84,32 @@ items, landed:
   wire format is unchanged).
 - The magic **`12`** block-time literal is now `DEFAULT_BLOCK_TIME`.
 
+**Shipped (2026-06-29, second batch):**
+
+- **`SourceKey(String)`** (Tier 2) — the key type of `MergedPos.positions` and
+  `MergedItem.source_key`. Only the *key* is newtyped; the value bytes stay
+  `Vec<u8>` (the deliberately-generic erased positions). `#[serde(transparent)]`
+  keeps the `MergedPos` marshal byte-identical; `Borrow<str>` keeps
+  `MergedPos::get(&str)` ergonomic.
+- **`BlockRange { from, to: BlockNumber }`** (Tier 3) — replaced the unnamed
+  `(u64, u64)` in `compute_gaps`, `align_window`, and `loaded_windows`. The
+  set/alignment arithmetic stays raw `u64` internally (BlockRange wraps only the
+  signature); `get_scanned_ranges` keeps returning raw rows and
+  `ensure_window_loaded` converts at the one consumption point — honoring the
+  "SQLite seam stays u64" principle. `chunk_size`/`block_time` left as scalar
+  config (not range tuples; low value).
+
 ### Not done — deliberate
 
 - **`decode: bool`** (`cli.rs` `EventsArgs`) is left a bool: unlike `reverse`/
   `follow` it's a named field read once (`if events_args.decode`), not a
   positional arg, so it never had the swap/ambiguity problem the audit targeted.
-
-### Remaining backlog
-
-- **`SourceKey(String)`** (Tier 2; `src/merge.rs` `positions: BTreeMap<String,
-  Vec<u8>>`, `source_key: String`). Source-agnostic, but pervasive and
-  serialized into `MergedPos`. Moderate value, medium friction — and it lives
-  right next to the deliberately-generic boundary below.
-- **`ChunkSize` / block-range tuples** (Tier 3). `chunk_size`/`block_time`
-  fields (`history.rs`) and the `(u64, u64)` block ranges in `compute_gaps`,
-  `loaded_windows`, `align_window` → a `BlockRange { from, to: BlockNumber }`.
-  Lower value now that `BlockNumber` exists.
-- **Chain identifier strings** (Tier 3). `chains.rs` `name`/`short_name`/
-  `chain_slug` are distinct identifier kinds all typed `String`; newtypes are
-  high-friction (chainlist JSON + `by_name` lookups) and low value.
+- **Chain identifier strings** (Tier 3; `chains.rs` `name`/`short_name`/`chain`/
+  `chain_slug`). Skipped as low-value/high-friction: the load-bearing ones
+  (`short_name`/`chain_slug`) get `.to_ascii_lowercase()`'d into `String`
+  lookup keys one line later (a newtype would unwrap immediately), and
+  `name`/`chain` are display-only/near-dead fields. Newtyping here would be
+  churn without enforcement value.
 
 ### Don't touch (intentionally generic)
 
