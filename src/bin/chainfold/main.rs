@@ -10,7 +10,7 @@ mod util;
 use std::time::Instant;
 
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand};
+use cli::{Cli, Command, ConfigCommand, Direction, FollowMode};
 use config::Config;
 use stats::Stats;
 use tracing_subscriber::EnvFilter;
@@ -64,7 +64,13 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Evm(evm_args) => {
             let config = Config::load_optional(cli.config.as_deref().map(std::path::Path::new))?;
-            evm::run(&config, evm_args, cli.reverse, cli.follow).await?;
+            evm::run(
+                &config,
+                evm_args,
+                Direction::from_reverse(cli.reverse),
+                FollowMode::from_follow(cli.follow),
+            )
+            .await?;
         }
     }
 

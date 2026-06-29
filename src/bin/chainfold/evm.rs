@@ -12,7 +12,7 @@ use chainfold::evm::{
 use tracing::Instrument;
 
 use crate::chains::ChainResolver;
-use crate::cli::{EvmArgs, EvmCommand};
+use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
 use crate::config::{ChainIdCheck, Config, ConfigError};
 
 /// Default cache DB location: `$XDG_CACHE_HOME/chainfold/chainfold.db`.
@@ -27,8 +27,8 @@ fn default_db_path() -> PathBuf {
 pub async fn run(
     config: &Config,
     args: &EvmArgs,
-    reverse: bool,
-    follow: bool,
+    direction: Direction,
+    follow: FollowMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Eagerly load the chainlist resolver if we'll need it: name resolution
     // OR public-RPC fallback (i.e. no explicit --rpc-url).
@@ -105,7 +105,7 @@ pub async fn run(
     match &args.command {
         EvmCommand::Erc20(erc20_args) => {
             erc20::run(
-                &provider, &cache, &db_path, args, erc20_args, chain_id, reverse, follow,
+                &provider, &cache, &db_path, args, erc20_args, chain_id, direction, follow,
             )
             .await
         }
@@ -118,7 +118,7 @@ pub async fn run(
                 args,
                 events_args,
                 chain_id,
-                reverse,
+                direction,
                 follow,
             )
             .await

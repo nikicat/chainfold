@@ -14,7 +14,7 @@ use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 
-use crate::cli::{Erc20Args, Erc20Command, EvmArgs};
+use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode};
 use crate::fmt::{self, FmtContext};
 use crate::util::{parse_hex_address, resolve_range};
 
@@ -25,8 +25,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     evm_args: &EvmArgs,
     erc20_args: &Erc20Args,
     chain_id: ChainId,
-    _reverse: bool,
-    follow: bool,
+    _direction: Direction,
+    follow: FollowMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addresses: Vec<Address> = erc20_args
         .address
@@ -103,7 +103,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         let mut balance = U256::ZERO;
         let mut last_pos: Option<EvmPosition> = None;
 
-        if follow {
+        if follow.is_follow() {
             let _sub_out = owned
                 .out_history()
                 .subscribe(SubscribeTransport::Poll {

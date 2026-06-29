@@ -2,6 +2,49 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+/// Iteration direction — funneled from the global `--reverse` flag, so the two
+/// run-fn plumbing args (`Direction`, [`FollowMode`]) can't be silently swapped
+/// the way two adjacent `bool`s could.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Oldest → newest (default).
+    Forward,
+    /// Newest → oldest (`--reverse`).
+    Backward,
+}
+
+impl Direction {
+    /// From the `--reverse` flag: `true` → [`Self::Backward`].
+    pub fn from_reverse(reverse: bool) -> Self {
+        if reverse {
+            Self::Backward
+        } else {
+            Self::Forward
+        }
+    }
+}
+
+/// Whether to block at the tip for live events — funneled from the global
+/// `--follow` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowMode {
+    /// Walk the requested range once and stop (default).
+    Once,
+    /// After the range, block at the tip and stream new events (`--follow`).
+    Follow,
+}
+
+impl FollowMode {
+    /// From the `--follow` flag: `true` → [`Self::Follow`].
+    pub fn from_follow(follow: bool) -> Self {
+        if follow { Self::Follow } else { Self::Once }
+    }
+
+    pub fn is_follow(self) -> bool {
+        matches!(self, Self::Follow)
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "chainfold", about = "Blockchain history explorer")]
 pub struct Cli {

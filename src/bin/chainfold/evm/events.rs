@@ -14,7 +14,7 @@ use chainfold::evm::{
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 
-use crate::cli::{EventsArgs, EvmArgs};
+use crate::cli::{Direction, EventsArgs, EvmArgs, FollowMode};
 use crate::config::Config;
 use crate::fmt::format_timestamp;
 use crate::signature_cache::SqliteSignatureCache;
@@ -53,8 +53,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     evm_args: &EvmArgs,
     events_args: &EventsArgs,
     chain_id: ChainId,
-    _reverse: bool,
-    follow: bool,
+    _direction: Direction,
+    follow: FollowMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let address = parse_hex_address(&events_args.address)?;
     let resolved = resolve_lookup(cache, config, chain_id, address, events_args).await?;
@@ -92,7 +92,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     println!("  DB:       {db_path}");
     println!();
 
-    if follow {
+    if follow.is_follow() {
         println!("Following new events (Ctrl+C to stop)...\n");
         let _subscriber = backend
             .subscribe(SubscribeTransport::Poll {
