@@ -13,7 +13,7 @@ use alloy::rpc::types::Log;
 
 use super::{CacheError, SharedConn};
 use crate::evm::observe::{SqliteOp, sqlite_span};
-use crate::evm::types::{FilterHash, LogIdx, Topic};
+use crate::evm::types::{BlockRange, FilterHash, LogIdx, Topic};
 
 // ============================================================
 // Helpers
@@ -38,27 +38,30 @@ pub fn compute_filter_hash(address: &Address, topics: &[Option<Topic>; 4]) -> Fi
 
 /// Compute uncovered sub-ranges within `requested` given sorted, non-overlapping `scanned` ranges.
 ///
-/// Both `requested` and each entry in `scanned` are inclusive `[start, end]` ranges.
-pub fn compute_gaps(requested: (u64, u64), scanned: &[(u64, u64)]) -> Vec<(u64, u64)> {
+/// Both `requested` and each entry in `scanned` are inclusive block ranges.
+/// The set arithmetic stays in raw `u64` internally; only the boundary is typed.
+pub fn compute_gaps(requested: BlockRange, scanned: &[BlockRange]) -> Vec<BlockRange> {
+    let (req_from, req_to) = requested.as_u64();
     let mut gaps = Vec::new();
-    let mut cursor = requested.0;
-    for &(start, end) in scanned {
-        if start > requested.1 {
+    let mut cursor = req_from;
+    for &range in scanned {
+        let (start, end) = range.as_u64();
+        if start > req_to {
             break;
         }
         if end < cursor {
             continue;
         }
         if start > cursor {
-            gaps.push((cursor, start - 1));
+            gaps.push(BlockRange::from_u64(cursor, start - 1));
         }
         cursor = cursor.max(end + 1);
-        if cursor > requested.1 {
+        if cursor > req_to {
             break;
         }
     }
-    if cursor <= requested.1 {
-        gaps.push((cursor, requested.1));
+    if cursor <= req_to {
+        gaps.push(BlockRange::from_u64(cursor, req_to));
     }
     gaps
 }
@@ -689,24 +692,28 @@ mod tests {
 
     // -- compute_gaps --
 
+    fn br(from: u64, to: u64) -> BlockRange {
+        BlockRange::from_u64(from, to)
+    }
+
     #[test]
     fn gaps_no_scanned_returns_full_range() {
-        assert_eq!(compute_gaps((100, 200), &[]), vec![(100, 200)]);
+        assert_eq!(compute_gaps(br(100, 200), &[]), vec![br(100, 200)]);
     }
 
     #[test]
     fn gaps_fully_covered_returns_empty() {
         assert_eq!(
-            compute_gaps((100, 200), &[(50, 250)]),
-            Vec::<(u64, u64)>::new()
+            compute_gaps(br(100, 200), &[br(50, 250)]),
+            Vec::<BlockRange>::new()
         );
     }
 
     #[test]
     fn gaps_partial_coverage() {
         assert_eq!(
-            compute_gaps((100, 300), &[(150, 200)]),
-            vec![(100, 149), (201, 300)]
+            compute_gaps(br(100, 300), &[br(150, 200)]),
+            vec![br(100, 149), br(201, 300)]
         );
     }
 

@@ -251,6 +251,37 @@ impl std::fmt::Display for BlockNumber {
     }
 }
 
+/// An inclusive block range `[from, to]`.
+///
+/// Names the two ends of what was an unnamed `(u64, u64)` in the scanned-range
+/// and gap-fill bookkeeping. The `SQLite` layer and the alloy RPC boundary still
+/// speak raw `u64`; convert at the seam with [`from_u64`](Self::from_u64) /
+/// [`as_u64`](Self::as_u64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRange {
+    pub from: BlockNumber,
+    pub to: BlockNumber,
+}
+
+impl BlockRange {
+    pub const fn new(from: BlockNumber, to: BlockNumber) -> Self {
+        Self { from, to }
+    }
+
+    /// From raw block heights (`SQLite` rows, RPC bounds, aligned windows).
+    pub const fn from_u64(from: u64, to: u64) -> Self {
+        Self {
+            from: BlockNumber::new(from),
+            to: BlockNumber::new(to),
+        }
+    }
+
+    /// Raw `(from, to)` heights for the `SQLite` / RPC / arithmetic boundary.
+    pub const fn as_u64(self) -> (u64, u64) {
+        (self.from.get(), self.to.get())
+    }
+}
+
 // ============================================================
 // LogIdx
 // ============================================================

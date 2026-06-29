@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 use super::LogIndex;
 use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
 use crate::arch::HistoryError;
+use crate::evm::types::BlockRange;
 
 // ============================================================
 // Range — one entry in the tree
@@ -213,18 +214,20 @@ impl LogIndex {
     /// processes observing the same filter at the same chunk granularity
     /// see the same tree shape.
     pub fn ensure_window_loaded(&self, from_block: u64, to_block: u64) -> Result<(), HistoryError> {
-        let (aligned_from, aligned_to) = align_window(from_block, to_block, self.chunk_size);
+        let window = align_window(from_block, to_block, self.chunk_size);
+        let (aligned_from, aligned_to) = window.as_u64();
 
         {
             let loaded = self.loaded_windows.lock().unwrap();
             if loaded
                 .iter()
-                .any(|&(a, b)| a <= aligned_from && b >= aligned_to)
+                .any(|w| w.from <= window.from && w.to >= window.to)
             {
                 return Ok(());
             }
         }
 
+        // Scanned ranges come straight off SQLite as raw `(u64, u64)` rows.
         let scanned = self
             .store
             .get_scanned_ranges(&self.filter_hash)
@@ -267,10 +270,7 @@ impl LogIndex {
         }
         drop(tree);
 
-        self.loaded_windows
-            .lock()
-            .unwrap()
-            .push((aligned_from, aligned_to));
+        self.loaded_windows.lock().unwrap().push(window);
         Ok(())
     }
 }
@@ -299,10 +299,10 @@ pub(super) fn install_gap_placeholder(
 /// Align `[from, to]` outward to a multiple of `chunk` so peer processes
 /// scanning the same filter at the same chunk size hit identical
 /// scanned-range boundaries.
-pub(super) fn align_window(from: u64, to: u64, chunk: u64) -> (u64, u64) {
+pub(super) fn align_window(from: u64, to: u64, chunk: u64) -> BlockRange {
     let aligned_from = (from / chunk) * chunk;
     let aligned_to = (to / chunk + 1) * chunk - 1;
-    (aligned_from, aligned_to)
+    BlockRange::from_u64(aligned_from, aligned_to)
 }
 
 fn assert_increasing(logs: &[Log]) {

@@ -32,7 +32,7 @@ use std::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::cache::LogCache;
-use crate::evm::types::FilterHash;
+use crate::evm::types::{BlockRange, FilterHash};
 use std::sync::Arc;
 
 mod block_pos;
@@ -66,7 +66,7 @@ pub struct LogIndex {
     /// Block-level windows already materialized into the tree from
     /// `LogCache::get_scanned_ranges`. Tracked so a second visit to the
     /// same window does not re-slurp.
-    loaded_windows: Mutex<Vec<(u64, u64)>>,
+    loaded_windows: Mutex<Vec<BlockRange>>,
     /// Optional async drain. When attached, every page passed to
     /// [`Self::insert_page`] is cloned onto the channel and persisted to
     /// [`LogCache`] by a background task. None means the index is purely
@@ -168,7 +168,7 @@ impl LogIndex {
             .lock()
             .unwrap()
             .iter()
-            .any(|&(a, b)| a <= from && b >= to)
+            .any(|w| w.from.get() <= from && w.to.get() >= to)
     }
 }
 
@@ -423,9 +423,12 @@ mod tests {
 
     #[test]
     fn align_window_rounds_outward() {
-        assert_eq!(align_window(100, 200, 1000), (0, 999));
-        assert_eq!(align_window(1500, 2500, 1000), (1000, 2999));
-        assert_eq!(align_window(0, 0, 1000), (0, 999));
+        assert_eq!(align_window(100, 200, 1000), BlockRange::from_u64(0, 999));
+        assert_eq!(
+            align_window(1500, 2500, 1000),
+            BlockRange::from_u64(1000, 2999)
+        );
+        assert_eq!(align_window(0, 0, 1000), BlockRange::from_u64(0, 999));
     }
 
     // -- prune tombstone forward-compat --
