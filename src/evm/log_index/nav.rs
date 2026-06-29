@@ -10,6 +10,23 @@ use super::LogIndex;
 use super::block_pos::{BlockPos, LogRef};
 use crate::arch::HistoryError;
 
+/// Whether the pivot position itself counts as a candidate during cached
+/// navigation — replaces a bare `inclusive: bool` at the four entry points.
+/// (Named to avoid colliding with [`std::ops::Bound`], used just below.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Inclusivity {
+    /// The pivot is a candidate (`first_at_or_after` / `last_at_or_before`).
+    Inclusive,
+    /// Only positions strictly past the pivot (`first_after` / `last_before`).
+    Exclusive,
+}
+
+impl Inclusivity {
+    fn is_inclusive(self) -> bool {
+        matches!(self, Self::Inclusive)
+    }
+}
+
 impl LogIndex {
     // --------------------------------------------------------
     // Cached-only navigation (no fetching)
@@ -25,12 +42,12 @@ impl LogIndex {
         block: u64,
         log_index: u32,
     ) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_forward(BlockPos::at(block, log_index), true)
+        self.cached_navigate_forward(BlockPos::at(block, log_index), Inclusivity::Inclusive)
     }
 
     /// First cached log strictly after `(block, log_index)`.
     pub fn first_after(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_forward(BlockPos::at(block, log_index), false)
+        self.cached_navigate_forward(BlockPos::at(block, log_index), Inclusivity::Exclusive)
     }
 
     /// Last cached log at or before `(block, log_index)`.
@@ -39,15 +56,15 @@ impl LogIndex {
         block: u64,
         log_index: u32,
     ) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_backward(BlockPos::at(block, log_index), true)
+        self.cached_navigate_backward(BlockPos::at(block, log_index), Inclusivity::Inclusive)
     }
 
     /// Last cached log strictly before `(block, log_index)`.
     pub fn last_before(&self, block: u64, log_index: u32) -> Result<Option<Log>, HistoryError> {
-        self.cached_navigate_backward(BlockPos::at(block, log_index), false)
+        self.cached_navigate_backward(BlockPos::at(block, log_index), Inclusivity::Exclusive)
     }
 
-    /// Forward variant of cached navigation. `inclusive` controls whether
+    /// Forward variant of cached navigation. `inclusivity` controls whether
     /// the pivot itself is a candidate.
     ///
     /// Tombstone ranges are skipped but participate in contiguity tracking
@@ -57,9 +74,9 @@ impl LogIndex {
     fn cached_navigate_forward(
         &self,
         pivot: BlockPos,
-        inclusive: bool,
+        inclusivity: Inclusivity,
     ) -> Result<Option<Log>, HistoryError> {
-        let lower = if inclusive {
+        let lower = if inclusivity.is_inclusive() {
             Bound::Included(pivot)
         } else {
             Bound::Excluded(pivot)
@@ -80,7 +97,7 @@ impl LogIndex {
                     last_end = Some(r.end);
                     continue;
                 }
-                let satisfies = if inclusive {
+                let satisfies = if inclusivity.is_inclusive() {
                     r.end >= pivot
                 } else {
                     r.end > pivot
@@ -112,9 +129,9 @@ impl LogIndex {
     fn cached_navigate_backward(
         &self,
         pivot: BlockPos,
-        inclusive: bool,
+        inclusivity: Inclusivity,
     ) -> Result<Option<Log>, HistoryError> {
-        let upper = if inclusive {
+        let upper = if inclusivity.is_inclusive() {
             Bound::Included(pivot)
         } else {
             Bound::Excluded(pivot)
@@ -135,7 +152,7 @@ impl LogIndex {
                     last_start = Some(r.start);
                     continue;
                 }
-                let satisfies = if inclusive {
+                let satisfies = if inclusivity.is_inclusive() {
                     r.end <= pivot
                 } else {
                     r.end < pivot
