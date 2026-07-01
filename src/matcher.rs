@@ -10,9 +10,10 @@
 //! ## Two layers
 //!
 //! * [`BaseMatcher`] is the pure compute kernel. It owns nothing mutable and
-//!   no background loop other than the [`changes`](BaseMatcher::changes)
-//!   aggregator. Tests and ad-hoc callers drive it via
-//!   [`compute_state`](BaseMatcher::compute_state).
+//!   runs no background task. Tests and ad-hoc callers drive it via
+//!   [`compute_state`](BaseMatcher::compute_state); the reactive
+//!   [`iter`](AnchoredMatcher::iter) drives directly off both sources'
+//!   `snapshots()` and folds the `Hist` that triggered each recompute.
 //! * [`AnchoredMatcher`] wraps a [`BaseMatcher`] with persistence over an
 //!   [`AnchorStore`] plus an in-memory anchor cache. Production callers
 //!   typically use this — `current_state` / `set_anchors` / `iter` provide
@@ -47,12 +48,9 @@ use std::sync::Arc;
 use futures_core::Stream;
 use futures_util::stream::unfold;
 use futures_util::{StreamExt, TryStreamExt};
-use tokio::sync::{Mutex, watch};
-use tokio::task::JoinHandle;
+use tokio::sync::Mutex;
 
-use crate::arch::{
-    Hist, HistStore, HistoryError, Position, Positioned, Store, Subscription, Timestamp,
-};
+use crate::arch::{Hist, HistStore, HistoryError, Position, Positioned, Timestamp};
 
 mod anchor_store_sqlite;
 pub use anchor_store_sqlite::SqliteAnchorStore;
@@ -248,24 +246,12 @@ where
 }
 
 // ============================================================
-// AbortOnDrop
-// ============================================================
-
-struct AbortOnDrop(JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-// ============================================================
 // BaseMatcher
 // ============================================================
 
 /// Pure compute kernel. Construct once, call
-/// [`compute_state`](Self::compute_state) per snapshot. No mutable state
-/// other than a background task that drives [`changes`](Self::changes).
+/// [`compute_state`](Self::compute_state) per snapshot. Holds no mutable
+/// state and runs no background task.
 pub struct BaseMatcher<Src, Dst, Output, SP, DP>
 where
     Src: Clone + Send + Sync + 'static,
@@ -277,8 +263,6 @@ where
     src_store: HistStore<Src, SP>,
     dst_store: HistStore<Dst, DP>,
     match_fn: Arc<dyn MatchFn<Src, Dst, Output, SP, DP>>,
-    changes_store: Store<()>,
-    _changes_task: AbortOnDrop,
 }
 
 impl<Src, Dst, Output, SP, DP> BaseMatcher<Src, Dst, Output, SP, DP>
@@ -294,16 +278,10 @@ where
         dst_store: HistStore<Dst, DP>,
         match_fn: Arc<dyn MatchFn<Src, Dst, Output, SP, DP>>,
     ) -> Self {
-        let (changes_store, task) = build_changes_store::<SP, DP>(
-            src_store.latest().subscribe(),
-            dst_store.latest().subscribe(),
-        );
         Self {
             src_store,
             dst_store,
             match_fn,
-            changes_store,
-            _changes_task: task,
         }
     }
 
@@ -315,6 +293,21 @@ where
     ) -> Result<BaseMatcherState<Src, Dst, Output, SP, DP>, HistoryError> {
         let src = self.src_store.next().await;
         let dst = self.dst_store.next().await;
+        self.compute_with(src, dst, anchors).await
+    }
+
+    /// Pure kernel: correlate the post-`anchors` tails of a given snapshot
+    /// pair. The `Hist`s are the caller's — from a `snapshots()` stream (the
+    /// reactive [`iter`](AnchoredMatcher::iter) path) or from `next()`
+    /// ([`compute_state`](Self::compute_state)). Splits each at its anchor and
+    /// folds; no store access, no re-fetch — so the `Hist` that triggered a
+    /// recompute is exactly the one folded.
+    pub async fn compute_with(
+        &self,
+        src: Hist<Src, SP>,
+        dst: Hist<Dst, DP>,
+        anchors: MatcherAnchors<SP, DP>,
+    ) -> Result<BaseMatcherState<Src, Dst, Output, SP, DP>, HistoryError> {
         let (_, src_hist) = src.split(anchors.src.clone());
         let (_, dst_hist) = dst.split(anchors.dst.clone());
         let src_items: Vec<Positioned<Src, SP>> = src_hist.iter().try_collect().await?;
@@ -333,12 +326,6 @@ where
             dst_items,
             anchors,
         })
-    }
-
-    /// Wake-up signal: emits `()` whenever either src or dst tip advances.
-    /// First emission is the current value (per [`Store::subscribe`]).
-    pub fn changes(&self) -> Store<()> {
-        self.changes_store.clone()
     }
 
     /// Build matcher anchors at wall-clock time `since` by delegating to
@@ -361,38 +348,6 @@ where
         let anchors = self.time_anchors(since).await?;
         self.compute_state(anchors).await
     }
-}
-
-fn build_changes_store<SP, DP>(
-    mut src_sub: Subscription<SP>,
-    mut dst_sub: Subscription<DP>,
-) -> (Store<()>, AbortOnDrop)
-where
-    SP: Position,
-    DP: Position,
-{
-    let (tx, rx) = watch::channel(());
-    let handle = tokio::spawn(async move {
-        // Always propagate every emission. Tokio `watch` channels coalesce
-        // missed updates into the next observable value, so skipping the
-        // first emission to dedupe with the initial `()` of the changes
-        // channel would silently lose any update that arrived between
-        // subscribe-time and task-poll. The extra startup `()` ticks are
-        // harmless — consumers recompute against unchanged state.
-        loop {
-            tokio::select! {
-                pos = src_sub.next() => {
-                    if pos.is_none() { break; }
-                    let _ = tx.send(());
-                }
-                pos = dst_sub.next() => {
-                    if pos.is_none() { break; }
-                    let _ = tx.send(());
-                }
-            }
-        }
-    });
-    (Store::new(rx), AbortOnDrop(handle))
 }
 
 // ============================================================
@@ -526,18 +481,55 @@ where
         self.base.compute_state(anchors).await
     }
 
-    /// Stream of states, one per `changes()` tick. Each yield re-uses the
-    /// cached anchors; consumers advance via [`set_anchors`](Self::set_anchors).
+    /// Stream of states — the initial state immediately, then a fresh one each
+    /// time either source's `snapshots()` advances (new-block production on a
+    /// `Latest` store, finalization on a `Safe` store). Each yield folds the
+    /// `Hist` that triggered it against the currently-cached anchors; consumers
+    /// advance via [`set_anchors`](Self::set_anchors).
     pub fn iter(self: &Arc<Self>) -> MatcherStateStream<Src, Dst, Output, SP, DP> {
         let matcher = self.clone();
-        let sub = self.base.changes().subscribe();
-        Box::pin(unfold((matcher, sub), |(matcher, mut sub)| async move {
-            // Wait for a change tick (first tick is the current value,
-            // delivered immediately).
-            sub.next().await?;
-            let state = matcher.current_state().await;
-            Some((state, (matcher, sub)))
-        }))
+        let src_snaps = matcher.base.src_store.snapshots();
+        let dst_snaps = matcher.base.dst_store.snapshots();
+        Box::pin(unfold(
+            (
+                matcher,
+                src_snaps,
+                dst_snaps,
+                None::<Hist<Src, SP>>,
+                None::<Hist<Dst, DP>>,
+                false,
+            ),
+            |(matcher, mut src_snaps, mut dst_snaps, mut src_hist, mut dst_hist, seeded)| async move {
+                if seeded {
+                    // Wait for either side to advance, keeping the latest of each.
+                    tokio::select! {
+                        s = src_snaps.next() => src_hist = Some(s?),
+                        d = dst_snaps.next() => dst_hist = Some(d?),
+                    }
+                } else {
+                    // Seed: each snapshot stream's first item is the current snapshot.
+                    src_hist = Some(src_snaps.next().await?);
+                    dst_hist = Some(dst_snaps.next().await?);
+                }
+                let result = match matcher.get_anchors().await {
+                    Ok(anchors) => {
+                        matcher
+                            .base
+                            .compute_with(
+                                src_hist.clone().unwrap(),
+                                dst_hist.clone().unwrap(),
+                                anchors,
+                            )
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                Some((
+                    result,
+                    (matcher, src_snaps, dst_snaps, src_hist, dst_hist, true),
+                ))
+            },
+        ))
     }
 }
 
@@ -562,12 +554,13 @@ pub type MatcherStateStream<Src, Dst, Output, SP, DP> = Pin<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arch::{HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream};
+    use crate::arch::{HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream, Store};
     use futures_core::Stream;
     use futures_util::stream::{iter, poll_fn};
     use std::pin::Pin as StdPin;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
+    use tokio::sync::watch;
     use tokio::time::timeout;
 
     // -- Mock source (same-shape across src/dst, parameterised by P) --
@@ -882,28 +875,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changes_fires_on_either_source_advance() {
+    async fn iter_fires_on_either_source_advance() {
         let src = MockSource::new(vec![]);
         let dst = MockSource::new(vec![]);
-        let base = BaseMatcher::new(src.hist_store(), dst.hist_store(), bridge_match_fn());
-        let mut sub = base.changes().subscribe();
+        let store = Arc::new(InMemoryAnchorStore::new());
+        let m: Arc<Matcher<Ev, Ev, MockPos, MockPos>> = Arc::new(AnchoredMatcher::new(
+            src.hist_store(),
+            dst.hist_store(),
+            bridge_match_fn(),
+            store as Arc<dyn AnchorStore>,
+            "k",
+            Timestamp::new(0),
+        ));
+        let mut stream = m.iter();
 
-        // First yield is the current value (immediate).
-        sub.next().await.expect("initial");
+        // Initial state is delivered immediately (both snapshots seeded).
+        timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("initial state within timeout")
+            .expect("stream open")
+            .expect("state ok");
 
-        // Advance src — changes should fire.
+        // Advancing src yields a fresh state.
         src.append(ev(1, "burn1"));
-        timeout(Duration::from_secs(2), sub.next())
+        timeout(Duration::from_secs(2), stream.next())
             .await
-            .expect("src change within timeout")
-            .expect("subscription not closed");
+            .expect("src advance within timeout")
+            .expect("stream open")
+            .expect("state ok");
 
-        // Advance dst — changes should fire too.
+        // Advancing dst yields a fresh state too.
         dst.append(ev(1, "mint1"));
-        timeout(Duration::from_secs(2), sub.next())
+        timeout(Duration::from_secs(2), stream.next())
             .await
-            .expect("dst change within timeout")
-            .expect("subscription not closed");
+            .expect("dst advance within timeout")
+            .expect("stream open")
+            .expect("state ok");
     }
 
     #[tokio::test]

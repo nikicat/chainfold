@@ -118,11 +118,25 @@ Item  ─<  Hist  ─<  HistStore(tier [, filter])  ─<  Chain
   producers (confirmation-depth for best, `finalized` poll for safe) wire into
   `Chain`.
 
-## R4 — Matcher should fold the Hist it was triggered by
+## R4 — Matcher should fold the Hist it was triggered by — DONE (2026-07-01)
 
-The matcher is `f(src_hist, dst_hist)` but its wiring triggers on a `latest()`
-position tick and then *re-materializes* the Hists via `next()`, bypassing
-`snapshots()` entirely.
+**Shipped.** Split a pure `BaseMatcher::compute_with(src_hist, dst_hist,
+anchors)` kernel out of `compute_state` (which now just = `next()` ×2 +
+`compute_with`). Rewrote `AnchoredMatcher::iter()` to drive directly off
+`src.snapshots()` + `dst.snapshots()` via `tokio::select!`, carrying the latest
+`Hist` of each and folding it — so the Hist that triggered a recompute is the
+one folded (no `latest()`-tick, no `next()`-refetch, no T₁/T₂ race). Deleted
+`changes()`, `build_changes_store`, `AbortOnDrop`, and the `changes_store`/
+`_changes_task` fields — the matcher now runs **no background task**, and the
+watch-coalescing footgun code is gone (the `select!` can't mis-seed). Renamed
+the pin `changes_fires_on_either_source_advance` → `iter_fires_on_either_source_
+advance`. This also removes the matcher's last `latest()` use (aligned with R3
+moving finality off HistStore). Clippy clean; full suite green (114 lib + 62 CLI
++ integration). ARCHITECTURE.md §8/§14 synced.
+
+Original analysis (kept for context): the matcher is `f(src_hist, dst_hist)` but
+its wiring triggered on a `latest()` position tick and then *re-materialized*
+the Hists via `next()`, bypassing `snapshots()` entirely.
 
 - **Path today:** `AnchoredMatcher::iter()` (`matcher.rs:531`) → `changes()`
   [merges `src.latest().subscribe()` + `dst.latest().subscribe()` into a bare

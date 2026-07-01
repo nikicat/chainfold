@@ -474,9 +474,10 @@ order across byte-length boundaries). So `MergedHistBackend` overrides
 Pure correlation between two source streams (`src` and `dst`), producing a
 `{ matched, pending, orphans }` view. Two layers:
 
-- **`BaseMatcher`** — the compute kernel. No mutable state beyond a
-  background aggregator task for `changes()`. Driven directly via
-  `compute_state(anchors)`.
+- **`BaseMatcher`** — the pure compute kernel. No mutable state, no background
+  task. Driven via `compute_state(anchors)` (which re-reads the current
+  snapshot via `next()`), or the pure `compute_with(src_hist, dst_hist,
+  anchors)` when you already hold the Hists.
 - **`AnchoredMatcher`** — adds persistence over an `AnchorStore` + an
   in-memory cache. Production callers use this.
 
@@ -798,14 +799,12 @@ flowchart LR
     subgraph OWNED["Consumer-held"]
         OwnedErc20Box["OwnedErc20&lt;P&gt;<br/>owns 2 × Arc&lt;EvmLogHistory&gt;"]
         SubscriberBox["EvmLogSubscriber<br/>(from .subscribe())"]
-        MatcherBox["Arc&lt;AnchoredMatcher&gt;"]
         MergedBox["HistStore from merge<br/>(owns tip-aggregator tasks)"]
     end
     subgraph BG["Background tasks — abort on owner drop"]
         Watcher["WS / Poll watcher"]
         DrainTask["LogIndex drain task"]
         Aggr["merged latest/best/safe aggregators"]
-        Changes["BaseMatcher changes() aggregator"]
     end
     subgraph SHARED["Shared (Arc)"]
         CacheA["Arc&lt;CacheDb&gt; (SQLite conn)"]
@@ -819,23 +818,24 @@ flowchart LR
     IdxA -- attach_drain --> DrainTask
     DrainTask -- writes --> CacheA
     MergedBox -. drop aborts .-> Aggr
-    MatcherBox -. drop aborts .-> Changes
 
     classDef bg fill:#fff4e8,stroke:#cc8844
     classDef shared fill:#e8f5e8,stroke:#44aa44
-    class Watcher,DrainTask,Aggr,Changes bg
+    class Watcher,DrainTask,Aggr bg
     class CacheA,IdxA shared
 ```
 
-**The watch-coalescing footgun (recurring).** Both the merge tip aggregators
-and `BaseMatcher::changes()` fan per-source `Store<P>` subscriptions into a
-synthesized store. The tempting bug: skip each subscription's first emission
-as "already represented." **This loses updates** — tokio `watch` coalesces,
-so an update arriving between subscribe-time and the task's first poll shows
-up *as* the first emission and gets dropped. **The rule: propagate every
-emission** (redundant initial sends are harmless; the consumer-side watch
-coalesces too). Pinned by `snapshots_advance_when_any_source_appends` and
-`changes_fires_on_either_source_advance`.
+**The watch-coalescing footgun.** The merge tip aggregators fan per-source
+`Store<P>` subscriptions into a synthesized store. The tempting bug: skip each
+subscription's first emission as "already represented." **This loses updates**
+— tokio `watch` coalesces, so an update arriving between subscribe-time and the
+task's first poll shows up *as* the first emission and gets dropped. **The rule:
+propagate every emission** (redundant initial sends are harmless; the
+consumer-side watch coalesces too). Pinned by
+`snapshots_advance_when_any_source_appends`. (The matcher used to have the same
+aggregator for `changes()`; **R4 removed it** — the reactive `iter()` now drives
+directly off both `snapshots()` streams via `tokio::select!`, so there's no
+synthesized channel to mis-seed. The merge aggregators go the same way in R3.)
 
 ---
 
