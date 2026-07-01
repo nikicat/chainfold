@@ -18,10 +18,10 @@ a `cast`-like **CLI**, and a transparent caching-RPC **daemon**
 > (`chainfoldd`) is planned. EVM source is the first concrete backend;
 > the source-agnostic core is shaped to take Solana, Bitcoin, CEX, etc.
 >
-> See [`arch.md`](./arch.md) for the architecture overview (with
-> Mermaid diagrams), [`refactor.md`](./refactor.md) for phase
-> status, [`blockchain_storage.md`](./blockchain_storage.md) for the
-> original design brainstorm.
+> See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the architecture
+> overview (with Mermaid diagrams), [`refactor.md`](./refactor.md) for
+> phase status, [`blockchain_storage.md`](./blockchain_storage.md) for
+> the original design brainstorm.
 
 ## Two guarantees
 
@@ -194,7 +194,7 @@ flowchart TB
 ```
 
 Full architecture, data-flow diagrams, and ownership/lifetime model in
-[`arch.md`](./arch.md).
+[`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## Features
 
@@ -282,8 +282,8 @@ issues zero `eth_getLogs`"), so the caching guarantee can't silently
 rot. And because it's plain `tracing`, a server-side daemon embedding
 chainfold routes the identical spans to an OTLP exporter (Tempo/Jaeger)
 for distributed tracing — no separate instrumentation. The contract is
-documented in [`arch.md`](./arch.md#observability-contract) and lives in
-`src/evm/observe.rs`.
+documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md#15-observability-contract)
+and lives in `src/evm/observe.rs`.
 
 ## License
 

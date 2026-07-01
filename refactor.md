@@ -3,7 +3,7 @@
 > **Status as of 2026-05-26.** Phases 0–6 + the OwnedErc20 follow-up + the
 > post-Phase-6 structural cleanup are all shipped on `main`. This file used to
 > carry the full per-phase specs for 0–6; those are now redundant with the
-> *shipped* design in [`arch.md`](./arch.md) and the per-phase notes in
+> *shipped* design in [`ARCHITECTURE.md`](./ARCHITECTURE.md) and the per-phase notes in
 > `~/.claude-personal/projects/-home-nb-src-chainfold/memory/`
 > (`phase5_merge.md`, `phase6_matcher.md`, …). What remains here is the live
 > agenda: **Phase 7** plus the deferred follow-ups.
@@ -230,14 +230,14 @@ string indirection. Not load-bearing — `source_key` is useful as-is.
 cumulative volume), positioned by a **vector of N source positions** (one per
 input — deterministic, resumable, cross-chain; decision #10). It's the sibling
 of `Matcher`. The `Erc20Balance` rebuild gates on it. Spec in
-`../reference/src/store.ts` (`storeFromGen`) + arch.md's Reducer section.
+`../reference/src/store.ts` (`storeFromGen`) + ARCHITECTURE.md's Matcher/Reducer notes.
 
 ---
 
 ## Product surfaces beyond the library (planned)
 
 Chainfold is scoped as three surfaces over one caching engine (see
-[`arch.md`](./arch.md#product-surfaces)). The library is shipped; the other two
+[`ARCHITECTURE.md`](./ARCHITECTURE.md#3-product-surfaces)). The library is shipped; the other two
 are forward tracks, not yet sized into numbered phases:
 
 - **`cast`-like CLI depth, histories-first.** The CLI's distinguishing idea:
@@ -306,7 +306,7 @@ The first concrete steps toward the histories-first CLI:
 ## How to use this plan
 
 - The live work is **Phase 7** + the three deferrals above. Phases 0–6 are
-  shipped; their design rationale lives in `arch.md` and the per-phase memory
+  shipped; their design rationale lives in `ARCHITECTURE.md` and the per-phase memory
   files, not here.
 - **Read the reference sources first** — they contain production-tested
   versions of every pattern. Translate, don't reinvent.
