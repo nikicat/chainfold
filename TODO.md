@@ -2,6 +2,183 @@
 
 Latent follow-ups from the `--chain` + RPC-resolution work (commits `7dca4ab..e36d4c1`). None block shipping; each is a self-contained improvement.
 
+---
+
+# Reactive core redesign (big refactor — planned, collecting points)
+
+> A single interrelated reshape of the source-agnostic reactive core
+> (`HistStore` / `Store` / matcher), surfaced by design review on 2026-07-01.
+> The four points below are **one** change, not four independent ones: they all
+> pull the design toward *`snapshots()` (Hists) as the single reactive
+> primitive, selected per finality*. Decide the shape **before Phase 7**, which
+> is currently specced to wire `best`/`safe` in the shape this refactor
+> replaces. Design-first per standing preference — write it up in
+> `ARCHITECTURE.md` (§5 core abstractions, §13 finality) and revise the Phase 7
+> plan in `refactor.md` before touching code. **More points incoming from the
+> user.**
+
+## R1 — `HistStore::subscribe(cb)` is redundant plumbing
+
+The push/callback variant is derivable from `snapshots()` and has **no external
+consumers**.
+
+- `subscribe(cb)` (trait `arch.rs:418`, facade `arch.rs:358`) is just
+  `snapshots()` pumped into a callback: the EVM impl `history.rs:453` spawns a
+  task draining `latest_store` — the *same* source `snapshots()` uses
+  (`history.rs:437`). Semantics identical (both seed the current tip first via
+  `Store::subscribe`).
+- Only callers are the three combinators forwarding it upstream to satisfy the
+  trait (`mapped.rs:81`, `filtered.rs:80`, `since.rs:77`). No example / CLI /
+  test / `watch_hist` / merge / matcher uses it. (The examples' `.subscribe(
+  SubscribeTransport::…)` is a *different* method — `EvmLogHistory::subscribe`,
+  `history.rs:263` — the live WS/Poll wiring.)
+- **Cost:** ~8 hand-written impls of the same spawn-and-pump boilerplate (EVM,
+  merge, 3 combinators, 3–4 mock backends) for zero callers.
+- **Direction:** make it a provided/default method over `snapshots()`, or demote
+  to a free fn beside `watch_hist`, or drop it. Prefer the default method.
+
+## R2 — `best`/`safe` tip stores are dead on both ends
+
+`latest` is the only live tip; `best`/`safe` have no producer and no consumer.
+
+- **No producer:** EVM stubs them — `history.rs:148-152` builds each from
+  `watch::channel(earliest)` and drops the sender immediately, so `best()/safe()
+  .get()` return `earliest` forever and `subscribe()` ends after one item.
+- **No consumer:** grep for `.best()` / `.safe()` finds only the `arch.rs`
+  delegates, combinator pass-throughs (`mapped.rs:93-97`, filtered, since), and
+  merge's `TipKind` match arms. Nothing in examples / CLI / tests / matcher reads
+  them.
+- **Negative cost:** merge still spins up `build_tip_store(Best)` /
+  `build_tip_store(Safe)` aggregator tasks (`merge.rs:455-456`) over per-source
+  stores that never tick — live background work doing nothing.
+- Folded into R3 (they become views, not accessors), but tracked separately in
+  case R3 slips: at minimum, suppress the dead merge aggregators until a producer
+  exists.
+
+## R3 — Finality as `HistStore` views, not `Store<P>` accessors
+
+Replace `HistStore { snapshots() [latest-driven] + latest()/best()/safe():
+Store<P> }` with `history.at(Finality) -> HistStore` — one HistStore **view** per
+finality level, each with its own tip-driven `snapshots()`/`next()`.
+
+- **Constraint:** the views share **one** `LogIndex`/`LogCache` (one WS sub, one
+  backfill engine); they differ only in the tip cursor bounding
+  `snapshots()`/`next()`. The backend already holds three tip watches
+  (`latest_tx` live; `best`/`safe` channels exist, senders dropped). Cheap facade,
+  not three ingest pipelines.
+- **Removes:** the `latest()/best()/safe()` trait methods + their combinator
+  pass-through; merge's `TipKind` enum + the dead aggregator tasks (R2); most of
+  the `subscribe(cb)` redundancy (R1) since `snapshots()` becomes *the* primitive.
+- **Fixes:** finality-sensitive correlation. The matcher is hardwired to `latest`
+  today; with views you hand it the `safe` views and it correlates finalized
+  tails (reorg-safe bridge matching) — and can mix (src `safe`, dst `latest`),
+  which the current shape can't express.
+- **Superset:** a bare `Store<P>` tip is derivable from a HistStore
+  (`.tip()` / `next().end()`); a snapshot stream is not derivable from a bare
+  position. So today's `best()/safe(): Store<P>` are the weaker form.
+- **Supersedes** Phase 7's plan to populate `best`/`safe` as `Store<P>` positions
+  — build the view shape instead.
+
+## R4 — Matcher should fold the Hist it was triggered by
+
+The matcher is `f(src_hist, dst_hist)` but its wiring triggers on a `latest()`
+position tick and then *re-materializes* the Hists via `next()`, bypassing
+`snapshots()` entirely.
+
+- **Path today:** `AnchoredMatcher::iter()` (`matcher.rs:531`) → `changes()`
+  [merges `src.latest().subscribe()` + `dst.latest().subscribe()` into a bare
+  `()` tick, `matcher.rs:366-396`] → `current_state()` → `compute_state()`
+  rebuilds windows with `src_store.next()` + `split(anchor)` + `iter()`
+  (`matcher.rs:316-321`). `snapshots()` is never used.
+- **Legit reason for the split (keep):** the anchor is caller state supplied at
+  compute time — `get_history(since)` (`matcher.rs:357`) computes at an arbitrary
+  time-derived anchor — so the trigger must be anchor-agnostic.
+- **But** that justifies decoupling *anchor* from trigger, not discarding the
+  *Hist*. Current cost: domain inversion; trigger ≠ data race (tick at tip T₁,
+  `next()` reads current T₂ ≥ T₁, state emitted at T₂); two parallel subscription
+  systems feeding one matcher.
+- **Not a perf bug:** `next()` is `Hist::new(backend, earliest, tip)` — a watch
+  read + Arc clone, no fetch (`history.rs:447`); `Hist` is a lazy handle; the one
+  real fetch (`iter()`) is necessary and cached. This is design clarity, not
+  wasted RPC/SQLite.
+- **Direction:** drive off `src.snapshots()` + `dst.snapshots()` (of the chosen
+  finality, R3); carry `(src_hist, dst_hist)` into
+  `compute_state(src_hist, dst_hist, anchors)` and split at the anchor inside;
+  drop the `latest()`-tick + `next()`-refetch. Collapses the two subscription
+  systems and removes the last `latest()` consumer.
+
+## R5 — `Store<T>`: keep the reactive value, shed the Svelte-ism (post-R3/R4)
+
+`Store<T>` (`arch.rs:155`) is a thin newtype over `tokio::sync::watch::Receiver<T>`
+— a reactive **value**, not a stream. Do **not** "replace it with a `Stream`":
+its load-bearing half is `get()`, the *synchronous* current-value read a `Stream`
+can't provide (used by every backend's `next()` → `Hist::new(_, _, latest.get())`:
+`history.rs:449`, `merge.rs:513`, mocks; `refresh_tip` `history.rs:254`;
+`bridge_explorer.rs:151`). "Current value + change notifications" is exactly
+`watch`, which `Store<T>` already is — so the pattern is idiomatic under the
+hood; only the surface is TS-flavoured.
+
+- **Skin-deep TS-isms worth revisiting:** the *name* `Store` (Svelte; also
+  collides mentally with `LogStore`/`AnchorStore` — consider `Signal`/`Watched`);
+  and `subscribe()` returning a boxed `Subscription<T> = Pin<Box<dyn Stream>>`
+  (`arch.rs:70`) — a per-call alloc + dyn dispatch, justified only where it
+  crosses `dyn HistStoreBackend`; use `impl Stream`/`WatchStream` off the `dyn`
+  paths.
+- **Or** drop the wrapper and expose `watch::Receiver<T>` directly — less code,
+  but leaks `tokio` into the public API, swaps `get()` for `.borrow()` (a `Ref`
+  guard), and pushes `tokio-stream` onto consumers. The wrapper's stable,
+  tokio-hidden surface is a reasonable newtype, not debt to purge.
+- **Sequencing (important):** R3 + R4 delete most public `Store` callers —
+  `changes(): Store<()>` (R4) and `latest()/best()/safe(): &Store<P>` (R3) are
+  the bulk of them. What survives is mostly the *internal* watch channel driving
+  `snapshots()`, possibly a small `.tip() -> Store<P>` on views. **Decide
+  `Store`'s fate after R3/R4**, against whatever public reactive-value remains —
+  renaming/unboxing it now buffs a surface about to shrink ~70%.
+
+## R6 — Shared-index concurrency test coverage
+
+One test exercises concurrent consumers over the same BTree today:
+`concurrent_searches_in_same_gap_fire_one_fetch` (`log_index.rs:586`) — 5
+`tokio::spawn`ed walkers over one `Arc<LogIndex>` and the *same* cold gap,
+asserting all 5 see the item **and** exactly 1 fetch (singleflight coalescing
+via the per-range `Notify`). Good, but narrow. Gaps that matter because R3/R4
+change *who* reads the shared index (per-finality views, Hist-driven matcher all
+walking one backend):
+
+- **Parallel, not just concurrent.** It's `#[tokio::test]` (current-thread), so
+  tasks interleave at await points but never run on two cores at once. The BTree
+  is behind a `Mutex`, so add a `#[tokio::test(flavor = "multi_thread",
+  worker_threads = N)]` variant (plus deterministic scheduling via
+  `tokio::task::yield_now` orchestration or `turmoil`) to catch true data races /
+  lost wakeups, not just cooperative interleaving. A **`loom` model** is the
+  gold standard for the lost-wakeup class but does **not** wrap the async
+  `tokio::sync::Notify` path directly — loom targets sync primitives
+  (`Mutex`/atomics/`loom::thread`). To use it, extract the *coordination
+  protocol* (install-placeholder → fetch → `notify_waiters`, vs. peer
+  register-wait) into a sync analog (`Mutex` + condvar/atomic flag) and
+  `loom::model` that, proving the handshake race-free under all interleavings
+  and weak memory; the async code is then a thin wrapper over the proven core.
+- **Disjoint / overlapping ranges.** Only the *identical-gap* case is covered.
+  Add walkers over different-but-overlapping and fully-disjoint ranges on one
+  BTree — verifies gap computation + placeholder installation don't corrupt the
+  tree or over/under-fetch when concurrent gaps touch adjacent ranges.
+- **Reader vs. writer.** No test drives a walk *in flight* while the subscriber's
+  `insert_page` (live path) mutates the same BTree. This is the real production
+  race (WS watcher writing while consumers walk, per §14 ownership) and is
+  currently unpinned. Add a test that interleaves `items()` iteration with
+  `insert_page`/late-item insertion and asserts no dropped/duplicated items and
+  no panic.
+
+Self-contained (pure test additions, no API change), but sequence *with* R3/R4:
+the reshaped reactive core is what these races run through, so write them against
+the new shape rather than the current one.
+
+## R7+ — (incoming)
+
+_Reserved for the additional points the user will add._
+
+---
+
 ## CLI error rendering uses Debug, not Display — done (2026-06-29)
 
 `main` now returns `std::process::ExitCode` and renders an `Err` via its

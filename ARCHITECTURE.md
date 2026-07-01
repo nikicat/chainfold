@@ -312,17 +312,105 @@ async fn act_and_wait<T,P,R,...>(store, op, predicate)
 `AsyncDisposable` wraps a `CancellationToken` + `JoinHandle`; dropping it
 cancels the background task.
 
-### The backend seam
+### The backend seam — `HistBackend` and `HistStoreBackend`
 
-Consumers hold structs (`Hist`, `HistStore`); sources implement two traits
-behind `Arc<dyn …>`:
+Consumers hold the concrete `Hist` / `HistStore` structs; each is a thin handle
+over an `Arc<dyn …Backend>`. A `Hist` is `{ backend: Arc<dyn HistBackend>,
+start, end }`; a `HistStore` is `{ backend: Arc<dyn HistStoreBackend> }`.
+`snapshots()`/`next()` mint `Hist`s that all share the store's underlying
+`Arc<dyn HistBackend>`, so every snapshot of one source reads through the *same*
+index. Adding a source = implement these two traits; combinators, merge, and
+matcher then compose over them for free.
 
-- **`HistBackend<T, P>`** — `iter(start, end)` + `clamp_pos`. Backs a `Hist`.
-- **`HistStoreBackend<T, P>`** — `snapshots`/`next`/`subscribe`/`time_pos`
-  + the three tip stores. Backs a `HistStore`.
+**`HistBackend<T, P>`** — backs a single `Hist`. Two methods; only `iter` is
+required.
 
-Adding a source = implementing `HistStoreBackend` for it. Combinators,
-merge, and matcher then work automatically.
+```rust
+pub trait HistBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
+    /// Stream items in `(start, end]`, ascending by position. Cached gaps
+    /// return immediately; uncached gaps are filled on demand (for EVM, an
+    /// `eth_getLogs` guarded by the singleflight `Notify`). Dropping the
+    /// stream cancels any in-flight fetch.
+    fn iter(&self, start: P, end: P) -> ItemStream<T, P>;
+
+    /// Clamp `p` into `[start, end]` for `Hist::split`. See below — default
+    /// is the `Ord`-based clamp; override only when `P`'s total `Ord` does
+    /// not equal its window-containment order.
+    fn clamp_pos(&self, p: P, start: &P, end: &P) -> P {
+        if &p < start { start.clone() }
+        else if &p > end { end.clone() }
+        else { p }
+    }
+}
+```
+
+**`HistStoreBackend<T, P>`** — backs a `HistStore`: the reactive tip stream plus
+the finality tip accessors.
+
+```rust
+#[async_trait]
+pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
+    /// Fresh `Hist` per tip advance; first item is the current snapshot.
+    fn snapshots(&self) -> HistStream<T, P>;
+
+    /// The current snapshot (snapped to the latest known tip). Synchronous
+    /// tip read internally — see `EvmLogHistory::next` → `latest_store.get()`.
+    async fn next(&self) -> Hist<T, P>;
+
+    /// Push variant of `snapshots` — invoke `cb` per snapshot; drop the
+    /// returned handle to cancel. (Redundant with `snapshots` — see TODO R1.)
+    fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable;
+
+    /// Estimate a position at a wall-clock time (cut point for time-based
+    /// resume). For EVM: block-time estimation, no per-call RPC.
+    async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;
+
+    /// Reactive finality tips. `latest` is wired; `best`/`safe` are Phase-7
+    /// stubs that mirror `latest` today (see §13 and TODO R2/R3).
+    fn latest(&self) -> &Store<P>;
+    fn best(&self)   -> &Store<P>;
+    fn safe(&self)   -> &Store<P>;
+}
+```
+
+Bounds worth noting: `T: Send + Sync + 'static` (items cross task boundaries and
+live in boxed streams); `P: Position` (so `Clone + Default + Ord + marshal`);
+both traits are `Send + Sync` because they're held as `Arc<dyn …>` and shared
+across the WS watcher, drain task, and consumer walkers concurrently.
+
+#### `clamp_pos` in depth
+
+`Hist::split(p)` (`arch.rs:302`) cuts a snapshot into `(head, tail)` and must
+never widen the window — so it first clamps `p` into `[start, end]`. Rather than
+hardcode `Ord`, it delegates to `backend.clamp_pos(p, start, end)`:
+
+- **Default (`Ord`-based).** `p < start → start`, `p > end → end`, else `p`.
+  Correct whenever a position's `Ord` *is* its containment order — true for
+  `EvmPosition` (lexicographic `(block, log_index)`).
+- **Why it's overridable.** `MergedPos` is a `BTreeMap<SourceKey, Vec<u8>>`
+  ordered **byte-lex** to give the *total* order `Position: Ord` demands — but
+  postcard leb128 doesn't preserve numeric order across byte-length boundaries,
+  so byte-lex ≠ per-source containment. `MergedHistBackend` overrides
+  `clamp_pos` to clamp **each per-source position separately, via that source's
+  own `Ord`** (see [§7](#7-merge--heterogeneous-sources)). Without the override,
+  splitting a merged `Hist` at a saved `MergedPos` could clamp to the wrong cut
+  and drop or duplicate items per source.
+
+In short: `clamp_pos` is the seam that keeps `split` correct for a position whose
+sort order is not its containment order.
+
+#### Concurrency contract
+
+A single backend is read through many `Hist`s at once — snapshots share the
+store's `Arc<dyn HistBackend>`, and the live path has the WS watcher writing
+while consumers walk. Backends must therefore be safe under concurrent `iter`
+and concurrent read/write. The EVM `LogIndex` satisfies this with a `Mutex` over
+the BTree plus per-range singleflight (`Notify`): the first walker into a cold
+gap fetches; peers coalesce onto it. Pinned by
+`concurrent_searches_in_same_gap_fire_one_fetch` (`log_index.rs:586`) — 5
+concurrent walkers over one `Arc<LogIndex>`, 1 fetch. (Coverage gaps — parallel
+`multi_thread`/loom, disjoint-range walkers, reader-vs-`insert_page` — noted in
+§18.)
 
 ---
 
@@ -879,6 +967,16 @@ cargo test --features evm -- --ignored   # anvil / fork tests (needs `anvil`, MA
 Anti-regression: several tests assert RPC counts through the observability
 contract (e.g. a second walk of a cached range issues zero `eth_getLogs`).
 Coverage runs via `cargo-llvm-cov`, uploaded to Codecov (patch ≥ 80%).
+
+**Concurrency coverage.** `concurrent_searches_in_same_gap_fire_one_fetch`
+(`log_index.rs:586`) pins the shared-BTree singleflight: 5 concurrent walkers
+over one `Arc<LogIndex>` and the same cold gap → 1 fetch, all 5 see the item.
+It's `#[tokio::test]` (current-thread), so it covers *concurrent* (interleaved),
+not *parallel* (multi-core), access. Known gaps: no `multi_thread`/loom test for
+true data races; no test for concurrent walkers over *disjoint/overlapping*
+ranges on one BTree; no reader-vs-writer test (a walk in flight while the
+subscriber's `insert_page` mutates the same BTree). These matter more once the
+reactive-core refactor reshapes who reads the shared index.
 
 ---
 
