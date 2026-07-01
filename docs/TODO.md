@@ -226,7 +226,31 @@ Self-contained (pure test additions, no API change), but sequence *with* R3/R4:
 the reshaped reactive core is what these races run through, so write them against
 the new shape rather than the current one.
 
-## R7+ — (incoming)
+## R7 — TS-ism cleanup: `AsyncDisposable` → `AbortOnDropHandle` (rides R3)
+
+`AsyncDisposable` (`arch.rs:200`) is a TS name (`Symbol.asyncDispose`) for a
+cancel-on-drop task guard: it holds a `CancellationToken` + `JoinHandle` and, on
+drop, cancels the token **and** aborts the handle. The idiomatic Rust
+replacement is **`tokio_util::task::AbortOnDropHandle<T>`** — a `JoinHandle`
+wrapper that aborts on drop. We already depend on `tokio-util`; add its `rt`
+feature.
+
+- The token+abort combo is **redundant** for our tasks: they already
+  `select! { _ = cancel.cancelled() => break, … }`, so the token drives clean
+  shutdown and `abort()` is belt-and-suspenders. Pick one per task:
+  - **abort-only** (fire-and-forget: merge tip-aggregators, `LogIndex` drain, WS
+    watcher) → `AbortOnDropHandle` alone.
+  - **graceful** (must flush/close before exit) → `CancellationToken::drop_guard()`
+    (a `DropGuard` that cancels on drop) + `select!` on `cancelled()`.
+- **Folded into R3:** `Source::subscribe` / `HistStore::follow` return
+  `AbortOnDropHandle<()>` (ARCHITECTURE.md §5A). The remaining `AsyncDisposable`
+  call sites (the EVM subscriber path) migrate as R3 rewrites them; then delete
+  `AsyncDisposable`.
+- **Sibling TS-isms** (same shed-the-Svelte/TS-name theme): R5 `Store<T>` →
+  `Signal`/`Watched`. Already shed: `subscribe(cb)` drop (R1), `gen()` →
+  `snapshots()`, `changes()` removal (R4).
+
+## R8+ — (incoming)
 
 _Reserved for the additional points the user will add._
 

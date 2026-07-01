@@ -4,7 +4,7 @@
 > the design, the shipped structure, and the rationale behind both, with
 > diagrams. For the *roadmap and phase status* see
 > [`refactor.md`](./refactor.md); for the *product pitch and quickstart* see
-> [`README.md`](./README.md); for the original pre-refactor design brainstorm
+> [`README.md`](../README.md); for the original pre-refactor design brainstorm
 > see [`blockchain_storage.md`](./blockchain_storage.md).
 >
 > **Status:** Phases 0–6 + the OwnedErc20 follow-up are shipped. The
@@ -21,6 +21,7 @@
 3. [Product surfaces](#3-product-surfaces)
 4. [Module map & layering](#4-module-map--layering)
 5. [Core abstractions](#5-core-abstractions)
+5A. [Client API vs. backend traits (R3 target)](#5a-client-api-vs-backend-traits-r3-target)
 6. [Combinators](#6-combinators)
 7. [Merge — heterogeneous sources](#7-merge--heterogeneous-sources)
 8. [Matcher — correlation](#8-matcher--correlation)
@@ -406,6 +407,143 @@ gap fetches; peers coalesce onto it. Pinned by
 concurrent walkers over one `Arc<LogIndex>`, 1 fetch. (Coverage gaps — parallel
 `multi_thread`/loom, disjoint-range walkers, reader-vs-`insert_page` — noted in
 §18.)
+
+---
+
+## 5A. Client API vs. backend traits (R3 target)
+
+> **Status: R3 target design — under review, not yet shipped.** The shipped
+> abstractions are in [§5](#5-core-abstractions); this is the two-layer reshape
+> R3 (the `Chain` entity) introduces. Tracked in [TODO.md](./TODO.md) R3.
+
+Two layers. A new source (evm / bitcoin / cex / perpdex) implements **one
+`Source` trait** (plus `Position`). Everything reactive — the `HistStore`, its
+index, gap-fill, live wiring — is **generic, written once** by chainfold. This
+mirrors the reference [`FetchSource` / `HistStoreImpl`](../../reference/src/history.ts)
+split.
+
+Boxed stream aliases used below (they cross `dyn` boundaries → nameable boxed
+streams, not `impl Stream`). `Page<T,P> = { from: P, to: P, items: Vec<Positioned<T,P>> }`
+is a fetched/delivered batch carrying its range bounds.
+
+```rust
+type ItemStream<T,P> = Pin<Box<dyn Stream<Item = Result<Positioned<T,P>, HistoryError>> + Send>>;
+type HistStream<T,P> = Pin<Box<dyn Stream<Item = Hist<T,P>> + Send>>;
+type PageStream<T,P> = Pin<Box<dyn Stream<Item = Result<Page<T,P>, HistoryError>> + Send>>;
+type Subscription<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
+```
+
+### Backend — a source author implements `Source` (+ `Position`)
+
+```rust
+/// One source's ordered, serializable cut point (evm: EvmPosition; …).
+trait Position: Clone + Default + Eq + Ord + Debug + Send + Sync + 'static {
+    fn marshal(&self) -> Vec<u8>;                 // Default = the zero / start position
+    fn unmarshal(bytes: &[u8]) -> Option<Self>;
+}
+
+/// The WHOLE per-source contract: two I/O directions + a time anchor. No
+/// reactive glue, no index — those are generic (below). Small: a new backend
+/// is a few hundred lines.
+trait Source<T, P: Position>: Send + Sync {
+    /// PULL — backfill `(from, to]` as pages, oldest-first, no gaps/overlap.
+    /// (evm: chunked `eth_getLogs`.)
+    fn fetch(&self, from: P, to: P) -> PageStream<T, P>;
+
+    /// PUSH — live delivery. The source calls `cb.on_events` / `cb.on_bump`;
+    /// drop the returned handle to stop. THIS is "follow" — not a Chain method.
+    /// (evm: WS `eth_subscribe(logs)` + `newHeads`, or HTTP poll.)
+    /// Returns `tokio_util::task::AbortOnDropHandle` — the idiomatic cancel-on-
+    /// drop task guard that replaces the TS-ism `AsyncDisposable` (TODO R7).
+    fn subscribe(&self, cb: Arc<dyn HistoryCallbacks<T, P>>) -> AbortOnDropHandle<()>;
+
+    /// Wall-clock → position, for time-anchored resume / the matcher.
+    fn time_pos(&self, t: Timestamp) -> Result<P, HistoryError>;
+}
+
+/// The push channel: IMPLEMENTED by the generic store, CALLED by the source.
+trait HistoryCallbacks<T, P: Position>: Send + Sync {
+    fn on_events(&self, page: Page<T, P>);   // live batch, chronological, newest ≥ head
+    fn on_bump(&self, pos: P);               // tip advanced with ZERO events
+                                             //   (new block, no matching logs; or reconnect)
+    fn end(&self) -> Option<P>;              // store's current head — source computes the delta
+}
+```
+
+`on_bump` is the non-obvious piece: it advances the head **without events** (a
+block that matched nothing, or a reconnect), so `snapshots()`/`watch()` wake and
+the gap fills lazily on iterate. Today it's buried in `update_tip_to`; the
+reference makes it a first-class callback, and finality (`best`/`safe`) is just
+more `on_bump` sources.
+
+### Generic reactive layer — chainfold writes this once
+
+```rust
+// Owns the (generic) RangeIndex. Drives Source::fetch on iterate-into-gap and
+// Source::subscribe for live (via a HistoryCallbacks impl it provides). ONE
+// impl for ALL sources — this is where the `range_index/` WIP lands.
+struct HistStore<T, P> {
+    fn snapshots(&self) -> HistStream<T, P>;       // a Hist per head advance (first = current)
+    fn current(&self)   -> Hist<T, P>;
+    fn watch(&self, since: P) -> ItemStream<T, P>; // sugar: snapshots() as an item tail from an anchor
+    fn time_pos(&self, t: Timestamp) -> Result<P, HistoryError>;   // delegates to Source
+    fn follow(&self /* … */) -> AbortOnDropHandle<()>;  // starts Source::subscribe; drop stops
+}
+struct Hist<T, P> { /* iter / split(p) / start / end / is_empty */ }   // reads the store's RangeIndex
+```
+
+The previous `HistBackend` / `HistStoreBackend` (reactive glue re-implemented per
+source, incl. every mock) **collapse into this one generic `HistStore` over a
+`Source`.**
+
+### Client — the `Chain` factory (concrete per source)
+
+```rust
+enum Finality { Latest, Best, Safe }     // Latest wired; Best/Safe = Phase-7 producers
+struct LogFilter { address: Address, topics: [Option<Topic>; 4] }   // the "query" for logs
+
+Chain (EvmChain)   fn head(&self, tier)          -> Store<BlockNumber>
+                   fn logs(&self, filter, tier)  -> HistStore<EvmEvent, EvmPosition>
+                   fn blocks(&self, tier)        -> HistStore<Block, BlockNumber>
+Store<T>           fn get(&self) -> T;   fn subscribe(&self) -> Subscription<T>
+```
+
+`Chain` is concrete because it vends *many* item types (`logs`, `blocks`, later
+traces/state) — no single trait/`dyn` expresses that. Per call it builds a
+`Source` and wraps it in the generic `HistStore`:
+
+```rust
+// EvmChain::logs(filter, tier):
+//   let src = EvmLogSource::new(self.provider, self.cache, filter, self.head(tier));
+//   HistStore::over(src)                    // generic;  src: Source<EvmEvent, EvmPosition>
+```
+
+So the EVM author writes exactly: `impl Position for EvmPosition`; one
+`EvmLogSource: Source<EvmEvent, EvmPosition>` (fetch = `eth_getLogs`; subscribe =
+WS/poll → `on_events`/`on_bump`; time_pos = block estimate); the concrete
+`EvmChain` factory. **No `HistBackend`, no `HistStoreBackend`.** Cross-source
+uniformity (merge over an EVM chain + a CEX) happens at the `HistStore` level; a
+`dyn Chain` is never needed.
+
+### Finality lives on `Chain`
+
+`head(tier): Store<BlockNumber>` is the chain-wide clock (was redundantly on
+every history). R3 holds **one** `watch::Sender<BlockNumber>`; `head(Best/Safe)`
+mirror `Latest` until Phase 7 wires their pollers (each a `newHeads`-style
+`on_bump` at a different depth). A log-`HistStore`'s `snapshots()` widens a
+`head(tier)` block → `EvmPosition(block, u32::MAX)`.
+
+### What changed — three iterations
+
+| | Shipped (§5) | first §5A sketch | **this sketch (`Source` split)** |
+|---|---|---|---|
+| Per-source contract | `HistBackend` + `HistStoreBackend` | same | **one `Source`** (fetch + subscribe + time_pos) |
+| Reactive `HistStore` | per source | per source | **generic, written once** |
+| Live / follow | ad-hoc `EvmLogSubscriber` | `Chain::follow` (guessed) | **`Source::subscribe(callbacks)`** |
+| Tip w/ no events | inline `update_tip_to` | — | **`HistoryCallbacks::on_bump`** |
+| Finality tips | on every backend | `Chain::head(tier)` | `Chain::head(tier)` |
+| Backfill unit | items (`iter`) | items | **pages (`fetch` → `Page`)**, range-bounded |
+| Task guard | `AsyncDisposable` (token + abort) | same | **`AbortOnDropHandle`** (tokio-util `rt`) |
 
 ---
 
