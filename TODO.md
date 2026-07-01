@@ -61,33 +61,62 @@ from `snapshots()` and had **no external consumers**.
 - **Negative cost:** merge still spins up `build_tip_store(Best)` /
   `build_tip_store(Safe)` aggregator tasks (`merge.rs:455-456`) over per-source
   stores that never tick — live background work doing nothing.
-- Folded into R3 (they become views, not accessors), but tracked separately in
-  case R3 slips: at minimum, suppress the dead merge aggregators until a producer
-  exists.
+- **Subsumed by R3** (the `Chain` refactor removes `best`/`safe` accessors from
+  `HistStore` entirely and moves the `head(tier)` clocks onto `Chain`; the dead
+  merge aggregators go with `TipKind` removal). Tracked separately in case R3
+  slips: at minimum, suppress the dead merge aggregators until a producer exists.
 
-## R3 — Finality as `HistStore` views, not `Store<P>` accessors
+## R3 — Extract a `Chain` entity; finality lives on it, not on `HistStore`
 
-Replace `HistStore { snapshots() [latest-driven] + latest()/best()/safe():
-Store<P> }` with `history.at(Finality) -> HistStore` — one HistStore **view** per
-finality level, each with its own tip-driven `snapshots()`/`next()`.
+**Refined 2026-07-01** (supersedes the earlier "finality views on HistStore"
+sketch). Finality (latest/best/safe/finalized) is a **chain-wide fact**, not a
+per-query one — a chain has *one* head at each tier. Today we bolt
+`latest()/best()/safe(): Store<P>` onto *every* `HistStore`, so every filter
+re-carries the same clock (the leak). Hoist it to a new entity **above**
+`HistStore` that represents the blockchain as a whole:
 
-- **Constraint:** the views share **one** `LogIndex`/`LogCache` (one WS sub, one
-  backfill engine); they differ only in the tip cursor bounding
-  `snapshots()`/`next()`. The backend already holds three tip watches
-  (`latest_tx` live; `best`/`safe` channels exist, senders dropped). Cheap facade,
-  not three ingest pipelines.
-- **Removes:** the `latest()/best()/safe()` trait methods + their combinator
-  pass-through; merge's `TipKind` enum + the dead aggregator tasks (R2); most of
-  the `subscribe(cb)` redundancy (R1) since `snapshots()` becomes *the* primitive.
-- **Fixes:** finality-sensitive correlation. The matcher is hardwired to `latest`
-  today; with views you hand it the `safe` views and it correlates finalized
-  tails (reorg-safe bridge matching) — and can mix (src `safe`, dst `latest`),
-  which the current shape can't express.
-- **Superset:** a bare `Store<P>` tip is derivable from a HistStore
-  (`.tip()` / `next().end()`); a snapshot stream is not derivable from a bare
-  position. So today's `best()/safe(): Store<P>` are the weaker form.
+```
+Item  ─<  Hist  ─<  HistStore(tier [, filter])  ─<  Chain
+                    ▲ tip clock = chain.head(tier)   ▲ owns provider + cache
+                                                       + ONE live subscriber
+                                                       + head(tier) clocks;
+                                                       vends HistStores
+```
+
+- **`Chain` owns the chain-wide concerns once:** the provider (absorbs the
+  existing low-level `ChainProvider<P>` = provider+`ChainId`), the `LogCache`, the
+  single live subscriber, and the `head(tier)` clocks. It **vends** HistStores.
+  Today's `EvmLogHistory<P>` is per-*filter* yet owns provider+subscriber+tips —
+  so `OwnedErc20`'s two filters awkwardly share an `Arc<LogCache>`. Under `Chain`
+  that ownership smell goes away: `EvmLogHistory` shrinks to a thin tier-bound
+  backend derived from a `Chain` + filter.
+- **A HistStore is bound to a tier** (and, for logs, a filter); its `snapshots()`
+  tick on *that tier's* head — `Latest` ticks on **block production**, `Safe`
+  ticks on **finalization**. Same underlying `LogIndex`/cache, different tier
+  clock → cheap. A `Hist` needs no finality marker (a safe-store's Hists are all
+  safe).
+- **Two vend shapes** — filter is intrinsic to *logs* (queried), absent for
+  *blocks* (enumerated):
+  ```
+  chain.blocks(tier)        -> HistStore<Block, BlockNumber>     // network + tier
+  chain.logs(filter, tier)  -> HistStore<EvmEvent, EvmPosition>  // network + tier + filter
+  ```
+  Logs must carry the filter because it's pushed to `eth_getLogs` and **is** the
+  cache/index partition (`filter_hash`, decisions #11/#12) — there's no efficient
+  "all logs" stream to post-filter. Blocks need no query.
+- **Removes:** `latest()/best()/safe()` from `HistStoreBackend` + their combinator
+  pass-through; merge's `TipKind` enum + the dead aggregator tasks (**subsumes
+  R2**). `snapshots()` stays the sole reactive primitive (R1).
+- **Fixes:** finality-sensitive correlation — hand the matcher (R4) the `Safe`
+  HistStores and it correlates finalized tails (reorg-safe bridge matching); can
+  even mix (src `Safe`, dst `Latest`).
+- **Concrete-first (project rule):** build a concrete EVM `Chain` now; lift a
+  source-agnostic `Source`/`Network` trait only when a 2nd backend needs it.
+  Finality tiers are source-defined (EVM = 3, CEX = 1 — just a live tip).
 - **Supersedes** Phase 7's plan to populate `best`/`safe` as `Store<P>` positions
-  — build the view shape instead.
+  on the history — the `head(tier)` clocks live on `Chain` instead. Phase 7's
+  producers (confirmation-depth for best, `finalized` poll for safe) wire into
+  `Chain`.
 
 ## R4 — Matcher should fold the Hist it was triggered by
 
