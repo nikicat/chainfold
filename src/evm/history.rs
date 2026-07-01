@@ -37,12 +37,11 @@ use alloy::rpc::types::{Filter, Log};
 use futures_util::StreamExt;
 use futures_util::stream::{empty, once, poll_fn};
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
-    ItemStream, Positioned, Store, Timestamp,
+    Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream,
+    Positioned, Store, Timestamp,
 };
 use crate::evm::cache::{BlockHeader, LogCache, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
@@ -448,29 +447,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> HistStoreBackend<Evm
         let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
         let tip = self.latest_store.get();
         Hist::new(backend, EvmPosition::earliest(), tip)
-    }
-
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<EvmEvent, EvmPosition>) + Send + Sync>,
-    ) -> AsyncDisposable {
-        let backend: Arc<dyn HistBackend<_, _>> = self.arc_self();
-        let mut stream = self.latest_store.subscribe();
-        let cancel = CancellationToken::new();
-        let cancel2 = cancel.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel2.cancelled() => break,
-                    tip = stream.next() => {
-                        let Some(tip) = tip else { break };
-                        let hist = Hist::new(backend.clone(), EvmPosition::earliest(), tip);
-                        cb(hist);
-                    }
-                }
-            }
-        });
-        AsyncDisposable::new(cancel, handle)
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<EvmPosition, HistoryError> {

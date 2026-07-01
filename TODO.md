@@ -17,10 +17,20 @@ Latent follow-ups from the `--chain` + RPC-resolution work (commits `7dca4ab..e3
 > plan in `refactor.md` before touching code. **More points incoming from the
 > user.**
 
-## R1 — `HistStore::subscribe(cb)` is redundant plumbing
+## R1 — `HistStore::subscribe(cb)` is redundant plumbing — DONE (2026-07-01)
 
-The push/callback variant is derivable from `snapshots()` and has **no external
-consumers**.
+**Dropped entirely** (chosen over the default-method option): removed the
+`HistStoreBackend::subscribe` trait method, the `HistStore::subscribe` facade,
+and all 12 concrete impls (EVM + merge + 3 combinators + 7 mock backends).
+`snapshots()` is the sole reactive primitive; `AsyncDisposable` stays (returned
+by the live `EvmLogSubscriber` path). Rationale: zero callers after the
+combinators were converted, and keeping dead public trait surface contradicts
+the project's clean-slate/no-facade stance — re-adding is a ~15-line default if
+the daemon ever needs push delivery. Clippy clean; full suite green (114 lib +
+62 CLI + integration). ARCHITECTURE.md §5 updated.
+
+Original analysis (kept for context): the push/callback variant is derivable
+from `snapshots()` and had **no external consumers**.
 
 - `subscribe(cb)` (trait `arch.rs:418`, facade `arch.rs:358`) is just
   `snapshots()` pumped into a callback: the EVM impl `history.rs:453` spawns a

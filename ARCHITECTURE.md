@@ -281,7 +281,6 @@ tip advances; the first yield is the current snapshot.
 impl<T, P: Position> HistStore<T, P> {
     fn snapshots(&self) -> impl Stream<Item = Hist<T,P>>;
     async fn next(&self) -> Hist<T,P>;
-    fn subscribe(&self, cb) -> AsyncDisposable;             // push variant
     async fn time_pos(&self, t: Timestamp) -> Result<P, _>; // time → position
     fn latest(&self) -> &Store<P>;   // mempool-ish tip (wired)
     fn best(&self)   -> &Store<P>;   // mined tip     (Phase 7 stub → latest)
@@ -356,10 +355,6 @@ pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// The current snapshot (snapped to the latest known tip). Synchronous
     /// tip read internally — see `EvmLogHistory::next` → `latest_store.get()`.
     async fn next(&self) -> Hist<T, P>;
-
-    /// Push variant of `snapshots` — invoke `cb` per snapshot; drop the
-    /// returned handle to cancel. (Redundant with `snapshots` — see TODO R1.)
-    fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable;
 
     /// Estimate a position at a wall-clock time (cut point for time-based
     /// resume). For EVM: block-time estimation, no per-call RPC.

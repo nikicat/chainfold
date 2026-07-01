@@ -196,7 +196,7 @@ impl<T: Clone + Send + Sync + 'static> Store<T> {
 
 /// Handle that cancels a background task on drop.
 ///
-/// Returned by [`HistStore::subscribe`] and similar push-based APIs.
+/// Returned by push-based subscription APIs; dropping it cancels the task.
 pub struct AsyncDisposable {
     cancel: CancellationToken,
     handle: Option<JoinHandle<()>>,
@@ -353,12 +353,6 @@ impl<T: Send + Sync + 'static, P: Position> HistStore<T, P> {
         self.backend.next().await
     }
 
-    /// Push-based variant of [`snapshots`](Self::snapshots) — invokes `cb`
-    /// with each new snapshot. Drop the returned handle to cancel.
-    pub fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable {
-        self.backend.subscribe(cb)
-    }
-
     /// Estimate a position at a wall-clock time. Used as a cut point in
     /// [`Hist::split`] when resuming from a time instead of an anchor.
     pub async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {
@@ -413,9 +407,6 @@ pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
 
     /// Current snapshot.
     async fn next(&self) -> Hist<T, P>;
-
-    /// Push-based variant of [`snapshots`](Self::snapshots).
-    fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable;
 
     /// Estimate a position at a wall-clock time.
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
-    ItemStream, Position, Positioned, Store, Timestamp,
+    Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
+    Positioned, Store, Timestamp,
 };
 
 type Predicate<Item> = Arc<dyn Fn(&Item) -> bool + Send + Sync>;
@@ -70,16 +70,6 @@ where
 
     async fn next(&self) -> Hist<FilteredItem<Item>, P> {
         wrap_hist(&self.upstream.next().await, self.pred.clone())
-    }
-
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<FilteredItem<Item>, P>) + Send + Sync>,
-    ) -> AsyncDisposable {
-        let pred = self.pred.clone();
-        self.upstream.subscribe(Box::new(move |hist| {
-            cb(wrap_hist(&hist, pred.clone()));
-        }))
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {

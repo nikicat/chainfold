@@ -562,16 +562,13 @@ pub type MatcherStateStream<Src, Dst, Output, SP, DP> = Pin<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arch::{
-        AsyncDisposable, HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream,
-    };
+    use crate::arch::{HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream};
     use futures_core::Stream;
     use futures_util::stream::{iter, poll_fn};
     use std::pin::Pin as StdPin;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tokio::time::timeout;
-    use tokio_util::sync::CancellationToken;
 
     // -- Mock source (same-shape across src/dst, parameterised by P) --
 
@@ -678,25 +675,6 @@ mod tests {
         async fn next(&self) -> Hist<Ev, MockPos> {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
             Hist::new(backend, MockPos(0), self.latest_store.get())
-        }
-
-        fn subscribe(&self, cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>) -> AsyncDisposable {
-            let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-            let mut sub = self.latest_store.subscribe();
-            let cancel = CancellationToken::new();
-            let cancel2 = cancel.clone();
-            let handle = tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = cancel2.cancelled() => break,
-                        tip = sub.next() => {
-                            let Some(tip) = tip else { break };
-                            cb(Hist::new(backend.clone(), MockPos(0), tip));
-                        }
-                    }
-                }
-            });
-            AsyncDisposable::new(cancel, handle)
         }
 
         async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {

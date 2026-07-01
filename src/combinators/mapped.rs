@@ -10,8 +10,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
-    ItemStream, Position, Positioned, Store, Timestamp,
+    Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
+    Positioned, Store, Timestamp,
 };
 
 /// Item emitted by a mapped history. Carries both the transformed value and
@@ -71,16 +71,6 @@ where
 
     async fn next(&self) -> Hist<MappedItem<Src, Dst>, P> {
         wrap_hist(&self.upstream.next().await, self.f.clone())
-    }
-
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<MappedItem<Src, Dst>, P>) + Send + Sync>,
-    ) -> AsyncDisposable {
-        let f = self.f.clone();
-        self.upstream.subscribe(Box::new(move |hist| {
-            cb(wrap_hist(&hist, f.clone()));
-        }))
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {

@@ -26,8 +26,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistStore, HistStoreBackend, HistStream, HistoryError, Position, Store,
-    Timestamp,
+    Hist, HistStore, HistStoreBackend, HistStream, HistoryError, Position, Store, Timestamp,
 };
 
 /// Pre-split every snapshot emitted by `upstream` at `cut`. Items strictly
@@ -70,13 +69,6 @@ where
 
     async fn next(&self) -> Hist<Item, P> {
         self.upstream.next().await.split(self.cut.clone()).1
-    }
-
-    fn subscribe(&self, cb: Box<dyn Fn(Hist<Item, P>) + Send + Sync>) -> AsyncDisposable {
-        let cut = self.cut.clone();
-        self.upstream.subscribe(Box::new(move |hist| {
-            cb(hist.split(cut.clone()).1);
-        }))
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {

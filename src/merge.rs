@@ -46,11 +46,10 @@ use futures_util::StreamExt;
 use futures_util::stream::{poll_fn, unfold};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
-    ItemStream, Position, Positioned, Store, Subscription, Timestamp,
+    Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
+    Positioned, Store, Subscription, Timestamp,
 };
 
 // ============================================================
@@ -514,27 +513,6 @@ where
         self.make_hist(tip)
     }
 
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<MergedItem<T>, MergedPos>) + Send + Sync>,
-    ) -> AsyncDisposable {
-        let mut stream = self.snapshots();
-        let cancel = CancellationToken::new();
-        let cancel2 = cancel.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel2.cancelled() => break,
-                    next = stream.next() => match next {
-                        Some(h) => cb(h),
-                        None => break,
-                    }
-                }
-            }
-        });
-        AsyncDisposable::new(cancel, handle)
-    }
-
     async fn time_pos(&self, time: Timestamp) -> Result<MergedPos, HistoryError> {
         let mut positions = BTreeMap::new();
         for (k, s) in &self.sources {
@@ -885,28 +863,6 @@ mod tests {
         async fn next(&self) -> Hist<MockEvent, MockPos> {
             let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
             Hist::new(backend, MockPos(0), self.latest_store.get())
-        }
-
-        fn subscribe(
-            &self,
-            cb: Box<dyn Fn(Hist<MockEvent, MockPos>) + Send + Sync>,
-        ) -> AsyncDisposable {
-            let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
-            let mut sub = self.latest_store.subscribe();
-            let cancel = CancellationToken::new();
-            let cancel2 = cancel.clone();
-            let handle = tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = cancel2.cancelled() => break,
-                        tip = sub.next() => {
-                            let Some(tip) = tip else { break };
-                            cb(Hist::new(backend.clone(), MockPos(0), tip));
-                        }
-                    }
-                }
-            });
-            AsyncDisposable::new(cancel, handle)
         }
 
         async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {
