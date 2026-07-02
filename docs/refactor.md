@@ -237,11 +237,11 @@ chainfold provides the `MatchFn` trait and `AnchoredMatcher` machinery.
 
 Resolved by the merge split, which went further than an alias: the erased
 merge was deleted and same-`P` became the *primary* shape. `merge_hist_stores`
-is now the monomorphic **ordered merge** over one shared position space
-(anchor = `OrderedPos`, no user `cmp`); disjoint position spaces use
-`interleave_hist_stores` (vector-clock `MergedPos<P>`); cross-family position
-types unify via an app enum + the `map_positions` combinator. See
-`ARCHITECTURE.md` §7.
+is now the monomorphic **ordered merge** over one shared position space (no
+user `cmp`; same-position items coalesce, so anchors are plain `P`); disjoint
+position spaces use `interleave_hist_stores` (vector-clock `MergedPos<P>`);
+cross-family position types unify via an app enum + the `map_positions`
+combinator. See `ARCHITECTURE.md` §7.
 
 ### Reducer (Phase 6 spec, not yet built)
 

@@ -312,8 +312,9 @@ feature.
 
 Resolved exactly the way the last paragraph predicted: the merge was split
 into a **monomorphic ordered merge** (`merge_hist_stores` over one position
-space; anchor = `OrderedPos<P>`, and the uniform-lower-bound case is just
-`OrderedPos::from(p)` — infallible, no load round-trip) and a **vector-clock
+space; same-position items coalesce, so anchors are **plain `P`** and the
+uniform-lower-bound case is just the position itself — infallible, no load
+round-trip, no merge-specific position type at all) and a **vector-clock
 interleave** (`interleave_hist_stores`; `MergedPos<P>` now holds typed
 positions and has public `FromIterator`/`From<[(K, P); N]>` construction +
 `get(&SourceKey)`). The `TODO(merge-erasure)` block and the whole

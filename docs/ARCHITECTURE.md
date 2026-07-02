@@ -134,7 +134,7 @@ flowchart TB
         direction LR
         arch["src/arch.rs<br/>Position · Positioned · Hist<br/>HistStore · Store · backend traits"]
         combinators["src/combinators/<br/>map · map_positions · filter · since"]
-        merge["src/merge/<br/>ordered merge · interleave<br/>OrderedPos · MergedPos"]
+        merge["src/merge/<br/>ordered merge (plain-P anchors)<br/>interleave (MergedPos clock)"]
         matcher["src/matcher/<br/>BaseMatcher · AnchoredMatcher<br/>AnchorStore"]
         signatures["src/signatures.rs<br/>event-signature resolution"]
     end
@@ -184,7 +184,7 @@ flowchart TB
 lib.rs                     pub mod {arch, combinators, matcher, merge, shared, signatures}; cfg(evm) evm
 ├─ arch.rs                 Position · Positioned · Hist · HistStore · Store · backend traits
 ├─ combinators/            mapped.rs · map_pos.rs · filtered.rs · since.rs
-├─ merge/                  ordered.rs (merge_hist_stores · OrderedPos) · interleave.rs (interleave_hist_stores · MergedPos) · types.rs · kway.rs
+├─ merge/                  ordered.rs (merge_hist_stores, plain-P anchors) · interleave.rs (interleave_hist_stores · MergedPos) · types.rs · kway.rs
 ├─ matcher/                matcher.rs + anchor_store_sqlite.rs
 ├─ shared.rs               Shared<T> — Arc newtype; .share() names the refcount bump
 ├─ signatures.rs           event-name → signature/topic0 resolution
@@ -615,9 +615,9 @@ are monomorphic over one shared item/position type and yield
 | | `merge_hist_stores` (ordered) | `interleave_hist_stores` (vector clock) |
 |---|---|---|
 | Sources | share **one position space** (N filters on one chain) | **disjoint position spaces** (cross-chain / cross-family) |
-| Order | `P`'s own total order; ties by `SourceKey` | user `cmp` (typically time) — best-effort, ties unresolvable |
-| Anchor | `OrderedPos<P>` = one position + source tag | `MergedPos<P>` = per-source vector clock |
-| Extra bound | `P: DiscretePosition` (`pred()`) | — |
+| Order | `P`'s own total order | user `cmp` (typically time) — best-effort, ties unresolvable |
+| Anchor | plain `P` — the space's own positions | `MergedPos<P>` = per-source vector clock |
+| Same position twice | coalesced: one space ⇒ one item per position | never compared — different spaces |
 | Used by | `OwnedErc20` in/out; a pool's Mint/Burn/Swap/Sync | multi-chain wallet; `bridge_explorer` |
 
 ```mermaid
@@ -625,7 +625,7 @@ flowchart LR
     subgraph ORD["Ordered — one chain's position space"]
         F1["chain.logs(filter A)<br/>HistStore&lt;T, P&gt;"] --> OM["merge_hist_stores"]
         F2["chain.logs(filter B)<br/>HistStore&lt;T, P&gt;"] --> OM
-        OM --> OOut["HistStore&lt;MergedItem&lt;T,P&gt;, OrderedPos&lt;P&gt;&gt;<br/>order = P's; end = min frontier"]
+        OM --> OOut["HistStore&lt;MergedItem&lt;T,P&gt;, P&gt;<br/>order = P's; end = min frontier"]
     end
     subgraph INT["Interleave — disjoint spaces, unified via app enum"]
         E1["eth logs<br/>HistStore&lt;T, EvmPosition&gt;"] --> MP1["map_positions"]
@@ -639,43 +639,44 @@ flowchart LR
 ### Ordered merge (the workhorse)
 
 ```rust
-pub fn merge_hist_stores<T, P: DiscretePosition>(
+pub fn merge_hist_stores<T, P: Position>(
     sources: BTreeMap<SourceKey, HistStore<T, P>>,   // no cmp — order IS P's order
-) -> HistStore<MergedItem<T, P>, OrderedPos<P>>
-
-pub struct OrderedPos<P> { pub pos: P, pub bound: SourceBound }
-pub enum SourceBound { Before, At(SourceKey), After }   // Ord: Before < At(k) < After
+) -> HistStore<MergedItem<T, P>, P>                  // anchors: plain P
 ```
 
-The chain defines a global total order, so **a single position is a valid
-resume anchor for all sources at once** — no vector clock. The tri-state
-bound locates a cut among the items sitting exactly at `pos`:
+The chain defines a global total order, and within one position space a
+position **identifies** an item — `(block, log_index)` names a unique log
+chain-wide. Two consequences fall out of taking that seriously:
 
-- Yielded items carry `At(source_key)` → resume is exact even between the
-  two copies of a self-transfer (the same log at one `EvmPosition` through
-  both the in- and out-filter).
-- `From<P>` builds `After` ("everything at or before `pos`, all sources") —
-  a `--from-block` anchor is one conversion:
-  `OrderedPos::from(EvmPosition::new(b - 1, u32::MAX))`.
-- `Default` is `(P::default(), Before)` — strictly before every real item.
+- **Same-position coalescing.** Sources carrying an item at the identical
+  position (overlapping filters — e.g. a self-transfer, one log matching
+  both `OwnedErc20` filters) are reporting *the same item*. The merged
+  stream yields each position once, from the lowest `SourceKey`, and drops
+  the other copies (pinned by `same_position_coalesces_to_lowest_key`).
+- **Plain-`P` anchors.** With one item per position, a yielded item's own
+  position is an exact resume anchor and `hist.split(saved).1` is the
+  standard core convention — no merge-specific position type, no vector
+  clock. A merged anchor marshals identically to an inner-store anchor
+  (pinned by `anchors_marshal_as_plain_positions`), and a `--from-block`
+  bound is just `EvmPosition::new(b - 1, u32::MAX)`, same as on any store.
 
-**Merged end = min over the sources' ends** (`After`-bounded): the frontier
-where *all* sources are complete — a snapshot must not claim coverage a
-lagging source hasn't reported. `snapshots()` re-emits only when the min
-advances; under one chain head clock the filter stores' ends advance
-together, so the gate is invisible in practice (pinned by
-`snapshots_gate_on_min_frontier`).
+**Merged end = min over the sources' ends**: the frontier where *all*
+sources are complete — a snapshot must not claim coverage a lagging source
+hasn't reported. `snapshots()` re-emits only when the min advances; under
+one chain head clock the filter stores' ends advance together, so the gate
+is invisible in practice (pinned by `snapshots_gate_on_min_frontier`).
 
-**`DiscretePosition`** (`pred()` = immediate predecessor, saturating at
-`Default`): the iteration protocol is strictly exclusive-start
-`(start, end]`, so resuming at an `At(key)` anchor — where later-keyed
-sources still owe their item *at* `start.pos` — needs a fetch window opening
-strictly below it. `pred` names that opening; a per-item bound filter drops
-the overlap exactly, so a conservative (lower) `pred` over-fetches but stays
-correct. EVM: `(b, i) → (b, i-1)` / `(b, 0) → (b-1, u32::MAX)`.
+Default `Ord` clamping is exact (positions are the space's own `P`), so the
+ordered variant needs no `clamp_pos` override — and `load` is any source's
+`load` (all sources share `P`).
 
-Default `Ord` clamping is exact here — `(pos, bound)` *is* the containment
-order — so the ordered variant needs no `clamp_pos` override.
+> An earlier iteration yielded *both* copies of a same-position item with
+> source-tagged anchors (`OrderedPos { pos, bound: Before|At(key)|After }`
+> plus a `DiscretePosition::pred` fetch-widening seam, so a resume *between*
+> the copies was exact). Coalescing replaced it: the duplicate carries no
+> information (it is the same log), consumers all deduped anyway, and the
+> position-identity reading dissolves the extra anchor type, the trait, and
+> the boundary-refetch machinery outright.
 
 ### Interleave (vector clock)
 
@@ -800,7 +801,7 @@ The concrete client for EVM log streams (`feature = "evm"`).
 | **`LogSpec`** | The `RangeSpec` for EVM logs: `LogRef` tree items, sync `resolve` to `EvmEvent` (headers-present invariant), persist/load against `LogCache`, `EvmPosition` load. |
 | **`CacheDb` → `LogCache` / `Erc20Cache` / `EventSignatureCache`** | Durable SQLite over one shared connection. Narrow per-concern views; **never on the live path.** |
 | **chain wiring** (`chain/wiring.rs`) | Per-store tasks driving `on_events`/`on_bump`: mirror-head (one-shot), eager gap-fill (poll follow), or a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session (ws follow). Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
-| **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); self-transfer copies resume exactly via the `At`-tagged `OrderedPos`. Sync constructor, no provider generic. |
+| **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
 | **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Shared<LogCache>`**. Internalizes `rpc_span` instrumentation + error mapping (inherent `get_block_number`/`get_logs`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
 | **`aligned_block_ranges`** | Snaps RPC ranges to `batch_size` boundaries so concurrent consumers hit the same cache entries. |
@@ -1231,8 +1232,8 @@ remaining deliberately-generic boundary is `Position::marshal`'s
 
 (The integration suites carried `phaseN_*` names from the phased refactor
 until 2026-07-02; they're subject-named now. The ordered merge's own pins —
-min-frontier gating, duplicate-position resume, bound-form marshal — live in
-`src/merge/ordered.rs` unit tests.)
+min-frontier gating, same-position coalescing, plain-position anchors — live
+in `src/merge/ordered.rs` unit tests.)
 
 ```bash
 cargo test --features evm             # fast lib + source-agnostic suite (~1s)
