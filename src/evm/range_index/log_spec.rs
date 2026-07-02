@@ -6,26 +6,27 @@
 //! it needs for the timestamp must already be cached (the fetcher and the live
 //! path pre-persist headers; see the headers-present invariant in the R3 plan).
 
-use std::sync::Arc;
-
 use alloy::primitives::B256;
 use alloy::rpc::types::Log;
 
 use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
-use super::spec::{IndexPos, LoadedSpan, RangeSpec};
-use crate::arch::{HistoryError, Position, Positioned, Timestamp};
+use super::spec::{LoadedSpan, RangeSpec};
+use crate::arch::{HistoryError, Positioned, Timestamp};
 use crate::evm::cache::LogCache;
-use crate::evm::types::{BlockNumber, BlockRange, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic};
+use crate::evm::types::{
+    BlockNumber, BlockRange, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic,
+};
+use crate::shared::Shared;
 
 /// [`RangeSpec`] for a single EVM log filter over a [`LogCache`].
 #[derive(Clone)]
 pub struct LogSpec {
-    store: Arc<LogCache>,
+    store: Shared<LogCache>,
     filter_hash: FilterHash,
 }
 
 impl LogSpec {
-    pub fn new(store: Arc<LogCache>, filter_hash: FilterHash) -> Self {
+    pub fn new(store: Shared<LogCache>, filter_hash: FilterHash) -> Self {
         Self { store, filter_hash }
     }
 }
@@ -48,6 +49,12 @@ impl RangeSpec for LogSpec {
 
     fn page_bounds(page: &LogPage) -> BlockRange {
         BlockRange::new(page.from_block, page.to_block)
+    }
+
+    fn page_tip(page: &LogPage) -> EvmPosition {
+        // End-of-block cut: a Hist ending here iterates every log up to and
+        // including the last one in `to_block`.
+        EvmPosition::new(page.to_block.get(), u32::MAX)
     }
 
     fn resolve(&self, item: &LogRef) -> Result<Positioned<EvmEvent, EvmPosition>, HistoryError> {
@@ -121,6 +128,10 @@ impl RangeSpec for LogSpec {
             });
         }
         Ok(spans)
+    }
+
+    fn load_pos(&self, value: serde_json::Value) -> Option<EvmPosition> {
+        EvmPosition::from_value(value)
     }
 
     fn index_pos(p: &EvmPosition) -> BlockPos {

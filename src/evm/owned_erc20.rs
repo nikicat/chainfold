@@ -1,17 +1,16 @@
-//! `OwnedErc20` — Phase 5 follow-up: ERC20 transfers involving a given
-//! owner, fetched **RPC-efficiently** as two narrow per-topic histories
-//! merged in position order.
+//! `OwnedErc20` — ERC20 transfers involving a given owner, fetched
+//! **RPC-efficiently** as two narrow per-topic histories merged in
+//! position order.
 //!
 //! Instead of fetching every Transfer on a token and filtering for the
-//! owner client-side, this opens two [`EvmLogHistory`] instances against
-//! the same [`LogCache`]:
+//! owner client-side, this opens two [`EvmChain::logs`] stores:
 //!
 //! * **out**: `topics = [Transfer, owner_topic, None, None]` — outgoing
 //!   transfers (owner = `from`).
 //! * **in**:  `topics = [Transfer, None, owner_topic, None]` — incoming
 //!   transfers (owner = `to`).
 //!
-//! Each history's `eth_getLogs` calls carry the owner topic, so the node
+//! Each store's `eth_getLogs` calls carry the owner topic, so the node
 //! filters server-side and only the relevant logs come over the wire.
 //! [`OwnedErc20::transfers`] merges them via [`merge_hist_stores`] keyed
 //! by `(block_number, log_index)` and returns a
@@ -20,20 +19,20 @@
 //!
 //! ## Re-entry
 //!
-//! Both inner histories share the same `Arc<LogCache>`, but each writes
-//! into its own filter-hash-scoped slot (logs are keyed by filter, scanned
-//! ranges and reorg state too). Restarting picks up cached state per
-//! filter so cold-start is paid once per `(owner, token, direction)` tuple.
+//! Both inner stores share the chain's [`LogCache`](crate::evm::LogCache),
+//! but each writes into its own filter-hash-scoped slot (logs are keyed by
+//! filter, scanned ranges and reorg state too). Restarting picks up cached
+//! state per filter so cold-start is paid once per
+//! `(owner, token, direction)` tuple.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use alloy::network::Ethereum;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 
-use crate::arch::{HistStore, HistoryError};
-use crate::evm::{ChainProvider, EvmEvent, EvmLogHistory, LogCache, TRANSFER_TOPIC, Topic};
+use crate::arch::HistStore;
+use crate::evm::{EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, TRANSFER_TOPIC, Topic};
 use crate::merge::{ErasedHistStore, MergedItem, MergedPos, SourceKey, merge_hist_stores};
 
 /// Direction of an owned-ERC20 transfer relative to the tracked owner.
@@ -82,69 +81,40 @@ fn address_to_topic(addr: Address) -> Topic {
 }
 
 /// ERC20 transfers from-or-to a fixed owner address on a single token.
-pub struct OwnedErc20<P: Provider<Ethereum> + Clone + Send + Sync + 'static> {
+///
+/// Not generic over the provider: [`EvmChain::logs`] hands back type-erased
+/// [`HistStore`]s, and those (plus their wiring, which lives and dies with
+/// them) are all this needs to hold.
+pub struct OwnedErc20 {
     owner: Address,
     token_address: Address,
-    out_history: Arc<EvmLogHistory<P>>,
-    in_history: Arc<EvmLogHistory<P>>,
+    out_transfers: HistStore<EvmEvent, EvmPosition>,
+    in_transfers: HistStore<EvmEvent, EvmPosition>,
 }
 
-impl<P> OwnedErc20<P>
-where
-    P: Provider<Ethereum> + Clone + Send + Sync + 'static,
-{
-    /// Open both per-topic histories. Each shares `store` but uses its own
-    /// filter (different `topics`), so their scanned-range and log
-    /// bookkeeping stays separate.
-    /// Open both per-topic histories with default chunk size / block time.
-    /// The chain id rides in the [`ChainProvider`]; `OwnedErc20` just forwards
-    /// it to the inner histories and never talks to the RPC itself.
-    pub async fn new(
-        provider: ChainProvider<P>,
-        store: Arc<LogCache>,
-        owner: Address,
-        token_address: Address,
-    ) -> Result<Self, HistoryError> {
-        Self::with_options(provider, store, owner, token_address, 1000, 12).await
-    }
-
-    pub async fn with_options(
-        provider: ChainProvider<P>,
-        store: Arc<LogCache>,
-        owner: Address,
-        token_address: Address,
-        chunk_size: u64,
-        block_time: u64,
-    ) -> Result<Self, HistoryError> {
+impl OwnedErc20 {
+    /// Open both per-topic log stores on `chain`. Synchronous and RPC-free —
+    /// the chain already knows its head; cached state materializes lazily.
+    pub fn new<P>(chain: &EvmChain<P>, owner: Address, token_address: Address) -> Self
+    where
+        P: Provider<Ethereum> + Clone + Send + Sync + 'static,
+    {
         let owner_topic = address_to_topic(owner);
-        let out_topics: [Option<Topic>; 4] = [Some(TRANSFER_TOPIC), Some(owner_topic), None, None];
-        let in_topics: [Option<Topic>; 4] = [Some(TRANSFER_TOPIC), None, Some(owner_topic), None];
-
-        let out_history = EvmLogHistory::with_options(
-            provider.clone(),
-            store.clone(),
+        let out_filter = LogFilter::new(
             token_address,
-            out_topics,
-            chunk_size,
-            block_time,
-        )
-        .await?;
-        let in_history = EvmLogHistory::with_options(
-            provider,
-            store,
+            [Some(TRANSFER_TOPIC), Some(owner_topic), None, None],
+        );
+        let in_filter = LogFilter::new(
             token_address,
-            in_topics,
-            chunk_size,
-            block_time,
-        )
-        .await?;
+            [Some(TRANSFER_TOPIC), None, Some(owner_topic), None],
+        );
 
-        Ok(Self {
+        Self {
             owner,
             token_address,
-            out_history,
-            in_history,
-        })
+            out_transfers: chain.logs(&out_filter, Finality::Latest),
+            in_transfers: chain.logs(&in_filter, Finality::Latest),
+        }
     }
 
     pub fn owner(&self) -> Address {
@@ -155,33 +125,15 @@ where
         self.token_address
     }
 
-    /// Update both inner histories' `latest_store` from the chain. Required
-    /// before iterating [`transfers`](Self::transfers) without an active
-    /// subscription: the merged store's `end` is built from the inner
-    /// stores' tips, which start at [`EvmPosition::earliest`] and only
-    /// advance via [`EvmLogHistory::update_tip`] or
-    /// [`EvmLogHistory::subscribe`].
-    ///
-    /// Returns the new tip block number (same on both sides for a single
-    /// chain). Cheap — one `eth_blockNumber` round-trip per inner history.
-    pub async fn update_tips(&self) -> Result<u64, HistoryError> {
-        let (out_tip, in_tip) =
-            tokio::try_join!(self.out_history.update_tip(), self.in_history.update_tip())?;
-        // Both sides hit the same chain and should agree, but return the
-        // outgoing-side number for callers that just want a single u64.
-        let _ = in_tip;
-        Ok(out_tip)
+    /// Outgoing (`from == owner`) store. Useful if a consumer needs the
+    /// pre-merge stream.
+    pub fn out_transfers(&self) -> &HistStore<EvmEvent, EvmPosition> {
+        &self.out_transfers
     }
 
-    /// Outgoing (`from == owner`) history. Useful if a consumer needs the
-    /// pre-merge stream — e.g. for follow-mode subscription wiring.
-    pub fn out_history(&self) -> &Arc<EvmLogHistory<P>> {
-        &self.out_history
-    }
-
-    /// Incoming (`to == owner`) history.
-    pub fn in_history(&self) -> &Arc<EvmLogHistory<P>> {
-        &self.in_history
+    /// Incoming (`to == owner`) store.
+    pub fn in_transfers(&self) -> &HistStore<EvmEvent, EvmPosition> {
+        &self.in_transfers
     }
 
     /// Merged in/out transfer stream. Yielded items carry the direction
@@ -194,11 +146,11 @@ where
         let mut sources: BTreeMap<SourceKey, ErasedHistStore<EvmEvent>> = BTreeMap::new();
         sources.insert(
             OUT_KEY.into(),
-            ErasedHistStore::new(self.out_history.hist_store()),
+            ErasedHistStore::new(self.out_transfers.clone()),
         );
         sources.insert(
             IN_KEY.into(),
-            ErasedHistStore::new(self.in_history.hist_store()),
+            ErasedHistStore::new(self.in_transfers.clone()),
         );
         merge_hist_stores(sources, |a, b| {
             (a.value.block_number, a.value.log_index)

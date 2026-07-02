@@ -10,9 +10,9 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 use super::RangeIndex;
-use super::spec::{LoadedSpan, RangeSpec};
+use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::HistoryError;
-use crate::evm::types::{BlockNumber, BlockRange};
+use crate::evm::types::{BlockRange, ChunkSize};
 
 // ============================================================
 // Range — one entry in the tree
@@ -48,6 +48,7 @@ impl<S: RangeSpec> Range<S> {
 
     pub(super) fn filled(start: S::Pos, end: S::Pos, item: S::Item) -> Self {
         debug_assert!(start <= end, "filled range with end < start");
+        debug_assert_eq!(S::item_pos(&item), end, "filled item must sit at range end");
         Self {
             start,
             end,
@@ -113,11 +114,7 @@ impl<S: RangeSpec> RangeIndex<S> {
             let beyond_tail = tail_end.is_none_or(|t| page_end > t);
             if beyond_tail {
                 let start = if let Some(t) = tail_end {
-                    if range_start <= t {
-                        t
-                    } else {
-                        range_start
-                    }
+                    if range_start <= t { t } else { range_start }
                 } else {
                     range_start
                 };
@@ -223,14 +220,21 @@ impl<S: RangeSpec> RangeIndex<S> {
 
         {
             let loaded = self.loaded_windows.lock().unwrap();
-            if loaded.iter().any(|w| w.from <= window.from && w.to >= window.to) {
+            if loaded
+                .iter()
+                .any(|w| w.from <= window.from && w.to >= window.to)
+            {
                 return Ok(());
             }
         }
 
         let spans = self.spec.load_window(window)?;
         let mut tree = self.tree.lock().unwrap();
-        for LoadedSpan { range: span_range, items } in spans {
+        for LoadedSpan {
+            range: span_range,
+            items,
+        } in spans
+        {
             let span_start = S::Pos::before_block(span_range.from);
             let span_end = S::Pos::end_of_block(span_range.to);
             // Skip if a range ending at this span's end is already present —
@@ -282,9 +286,9 @@ pub(super) fn install_gap_placeholder<S: RangeSpec>(
 /// processes scanning the same source at the same chunk size hit identical
 /// scanned-range boundaries.
 ///
-/// `chunk` is a count of blocks; the alignment math drops to `u64` at this
-/// seam ([`BlockNumber`]'s affine algebra covers heights, not division).
-pub(super) fn align_window(range: BlockRange, chunk: BlockNumber) -> BlockRange {
+/// The alignment math drops to `u64` at this seam ([`ChunkSize`] and
+/// [`BlockNumber`](crate::evm::types::BlockNumber) don't do division).
+pub(super) fn align_window(range: BlockRange, chunk: ChunkSize) -> BlockRange {
     let (from, to, chunk) = (range.from.get(), range.to.get(), chunk.get());
     let aligned_from = (from / chunk) * chunk;
     let aligned_to = (to / chunk + 1) * chunk - 1;

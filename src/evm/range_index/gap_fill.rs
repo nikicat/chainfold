@@ -5,7 +5,6 @@
 //!
 //! All generic over a [`RangeSpec`](super::spec::RangeSpec) `S`.
 
-use std::future::Future;
 use std::ops::Bound;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,7 +14,7 @@ use tokio::sync::Notify;
 
 use super::RangeIndex;
 use super::range_tree::{Range, install_gap_placeholder};
-use super::spec::{Fetcher, RangeSpec};
+use super::spec::{IndexPos, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
 use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};
 use crate::evm::types::BlockRange;
@@ -265,10 +264,7 @@ enum WalkStep<S: RangeSpec> {
     Done,
     /// A cached range covers `(cursor, end]`. `item` is its boundary item
     /// (`None` for an empty range).
-    Cached {
-        end: S::Pos,
-        item: Option<S::Item>,
-    },
+    Cached { end: S::Pos, item: Option<S::Item> },
     /// A gap `(start_pos, end_pos]` to fill via the fetcher; a placeholder
     /// guarded by `notify` is already installed in the tree.
     FillGap {

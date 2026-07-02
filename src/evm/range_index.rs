@@ -24,22 +24,24 @@
 //! accessors, [`RangeIndex::resolve`], and the async drain to the durable store.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::arch::{HistoryError, Positioned};
-use crate::evm::types::{BlockNumber, BlockRange};
+use crate::evm::types::{BlockRange, ChunkSize};
 
 mod block_pos;
 mod gap_fill;
 mod log_spec;
 mod range_tree;
 mod spec;
+mod store;
 
 pub use block_pos::{BlockPos, LogPage, LogRef};
 pub use log_spec::LogSpec;
 pub use spec::{Fetcher, IndexPos, LoadedSpan, RangeSpec};
+pub use store::{RangeIndexStore, TimePosFn};
 
 use range_tree::Range;
 
@@ -55,9 +57,9 @@ use range_tree::Range;
 pub struct RangeIndex<S: RangeSpec> {
     spec: S,
     fetcher: Fetcher<S::Page>,
-    /// Aligned scanned-range chunk size (blocks). Determines the granularity
-    /// at which gaps get fetched and the alignment of scanned-range rows.
-    chunk_size: BlockNumber,
+    /// Aligned scanned-range chunk size. Determines the granularity at
+    /// which gaps get fetched and the alignment of scanned-range rows.
+    chunk_size: ChunkSize,
     tree: Mutex<BTreeMap<S::Pos, Range<S>>>,
     /// Block windows already materialized into the tree. Tracked so a second
     /// visit to the same window does not re-slurp.
@@ -73,25 +75,24 @@ impl<S: RangeSpec> RangeIndex<S> {
     /// Construct an empty index over `spec`, fetching absent ranges via
     /// `fetcher`. Aligned chunk size defaults to `1000` blocks.
     pub fn new(spec: S, fetcher: Fetcher<S::Page>) -> Self {
-        Self::with_chunk_size(spec, fetcher, 1000)
+        Self::with_chunk_size(spec, fetcher, ChunkSize::new(1000))
     }
 
-    /// Like [`Self::new`] but with an explicit aligned chunk size (blocks).
-    pub fn with_chunk_size(spec: S, fetcher: Fetcher<S::Page>, chunk_size: u64) -> Self {
-        assert!(chunk_size > 0, "chunk_size must be positive");
+    /// Like [`Self::new`] but with an explicit aligned chunk size.
+    pub fn with_chunk_size(spec: S, fetcher: Fetcher<S::Page>, chunk_size: ChunkSize) -> Self {
         Self {
             spec,
             fetcher,
-            chunk_size: BlockNumber::new(chunk_size),
+            chunk_size,
             tree: Mutex::new(BTreeMap::new()),
             loaded_windows: Mutex::new(Vec::new()),
             drain_tx: Mutex::new(None),
         }
     }
 
-    /// Aligned chunk size in blocks.
-    pub(super) fn chunk_size(&self) -> BlockNumber {
-        self.chunk_size
+    /// The spec this index delegates storage/resolution to.
+    pub(super) fn spec(&self) -> &S {
+        &self.spec
     }
 
     /// Resolve a stored [`Item`](RangeSpec::Item) to the public positioned

@@ -68,7 +68,10 @@ pub struct LoadedSpan<I> {
 /// a pure-Rust stub and so the provider-capturing fetch stays separate from
 /// the persistence/interpretation in [`RangeSpec`].
 pub type Fetcher<Page> = Arc<
-    dyn Fn(BlockNumber, BlockNumber) -> Pin<Box<dyn Future<Output = Result<Page, HistoryError>> + Send>>
+    dyn Fn(
+            BlockNumber,
+            BlockNumber,
+        ) -> Pin<Box<dyn Future<Output = Result<Page, HistoryError>> + Send>>
         + Send
         + Sync,
 >;
@@ -105,6 +108,12 @@ pub trait RangeSpec: Clone + Send + Sync + 'static {
     /// The inclusive block range a page covers (its scanned-range bounds).
     fn page_bounds(page: &Self::Page) -> BlockRange;
 
+    /// The public position a delivered page advances the store's `end` to —
+    /// the upper bound of the page's last block (EVM logs: `(to_block,
+    /// LogIdx::MAX)`). Mirrors the reference's `onEvents` calling
+    /// `onBump(page.to)`.
+    fn page_tip(page: &Self::Page) -> Self::PubPos;
+
     /// Resolve a stored [`Item`](Self::Item) to the public positioned value
     /// yielded to consumers, reading the durable store synchronously (never
     /// RPC — see the headers-present invariant). Errors if the referent is
@@ -125,6 +134,13 @@ pub trait RangeSpec: Clone + Send + Sync + 'static {
 
     /// Map a public position to its tree-key position.
     fn index_pos(p: &Self::PubPos) -> Self::Pos;
+
+    /// Deserialize a public position from a
+    /// [`Position::marshal`](crate::arch::Position::marshal) value. The
+    /// store-side seam behind [`HistStore::load`](crate::arch::HistStore::load)
+    /// — deserialization lives here, never on the position itself. Returns
+    /// `None` on invalid input.
+    fn load_pos(&self, value: serde_json::Value) -> Option<Self::PubPos>;
 
     /// The inclusive block window a public `(from, to]` range spans, for
     /// [`ensure_window_loaded`](super::RangeIndex::ensure_window_loaded).

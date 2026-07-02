@@ -6,7 +6,10 @@
 use std::ops::{Add, Sub};
 use std::sync::Arc;
 
-use alloy::primitives::{Address, B256, BlockHash, TxHash};
+use alloy::primitives::{Address, B256};
+// Re-exported so the rest of the crate names hashes through the domain-type
+// module rather than reaching into alloy at each site.
+pub use alloy::primitives::{BlockHash, TxHash};
 
 use crate::arch::{Position, Timestamp};
 
@@ -286,6 +289,48 @@ impl BlockRange {
     /// Raw `(from, to)` heights for the `SQLite` / RPC / arithmetic boundary.
     pub const fn as_u64(self) -> (u64, u64) {
         (self.from.get(), self.to.get())
+    }
+}
+
+// ============================================================
+// ChunkSize
+// ============================================================
+
+/// A gap-fetch / scanned-range alignment granularity — a positive count of
+/// blocks.
+///
+/// A newtype so a chunk size can't be swapped with a block height
+/// ([`BlockNumber`]) or any other bare integer, and so the "must be
+/// positive" invariant is structural (`NonZeroU64` — the alignment math
+/// divides by it). A *count* is a distance in the affine [`BlockNumber`]
+/// algebra, hence not a `BlockNumber`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChunkSize(std::num::NonZeroU64);
+
+impl ChunkSize {
+    /// Wrap a block count.
+    ///
+    /// # Panics
+    /// Panics if `n == 0` — a zero alignment granularity is meaningless.
+    /// `const`-evaluable, so literal misuse fails at compile time.
+    pub const fn new(n: u64) -> Self {
+        match std::num::NonZeroU64::new(n) {
+            Some(v) => Self(v),
+            None => panic!("chunk size must be positive"),
+        }
+    }
+
+    /// The inner block count, for the alignment arithmetic boundary.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Display for ChunkSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward to the inner Display so formatter flags (width, alignment)
+        // survive — see the note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 

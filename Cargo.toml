@@ -28,7 +28,7 @@ async-trait = "0.1"
 thiserror = "2"
 futures-core = "0.3"
 futures-util = "0.3"
-tokio-util = "0.7" # CancellationToken (included by default, no "sync" feature in 0.7)
+tokio-util = { version = "0.7", features = ["rt"] } # CancellationToken + AbortOnDropHandle
 rusqlite = { version = "0.34", features = ["bundled"] }
 rusqlite_migration = "2"
 hex = "0.4"
