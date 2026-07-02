@@ -174,8 +174,9 @@ impl std::fmt::Debug for FilterHash {
 /// [`ChainId`], a [`LogIdx`], a timestamp, or any other bare integer as it
 /// flows through positions, events, headers, the range tree, and the cache.
 ///
-/// It is part of [`EvmPosition`], so `#[serde(transparent)]` keeps the postcard
-/// marshal byte-identical and saved resume-anchors loadable.
+/// It is part of [`EvmPosition`], so `#[serde(transparent)]` keeps the
+/// marshalled form identical to the pre-newtype `u64` and saved resume-anchors
+/// loadable.
 ///
 /// Arithmetic is *affine*: a block ± a `u64` offset is another block ([`Add`] /
 /// [`Sub`] / [`BlockNumber::saturating_add`] / [`BlockNumber::saturating_sub`]
@@ -296,8 +297,8 @@ impl BlockRange {
 /// so it can't be silently swapped with a block number or any other bare
 /// integer as it flows through positions, events, and the range tree.
 ///
-/// It is part of [`EvmPosition`], and therefore of its postcard marshal —
-/// hence `#[serde(transparent)]`, so saved resume-anchors stay byte-identical
+/// It is part of [`EvmPosition`], and therefore of its marshalled form —
+/// hence `#[serde(transparent)]`, so saved resume-anchors stay identical
 /// to the pre-newtype `u32` encoding. [`LogIdx::MAX`] is the end-of-block
 /// sentinel (`BlockPos::end_of_block`, tip positions): strictly greater than
 /// every real log index in a block.
@@ -400,12 +401,16 @@ impl EvmPosition {
 }
 
 impl Position for EvmPosition {
-    fn marshal(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("EvmPosition serialization cannot fail")
+    fn marshal(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("EvmPosition serialization cannot fail")
     }
+}
 
-    fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        postcard::from_bytes(bytes).ok()
+impl EvmPosition {
+    /// Reconstruct from a [`Position::marshal`] value. Called by the owning
+    /// store's `load` (deserialization lives on the store, not the position).
+    pub fn from_value(value: serde_json::Value) -> Option<Self> {
+        serde_json::from_value(value).ok()
     }
 }
 

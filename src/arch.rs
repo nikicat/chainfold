@@ -31,8 +31,6 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use futures_util::stream::unfold;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 // ============================================================
 // Core type aliases
@@ -115,14 +113,20 @@ impl HistoryError {
 /// [`HistStore`]. Heterogeneous merge wraps per-source positions in a keyed
 /// [`crate::merge::MergedPos`] and never compares them across sources.
 pub trait Position: Clone + Default + Eq + Ord + std::fmt::Debug + Send + Sync + 'static {
-    /// Serialize for persistence. Reconstruct with [`unmarshal`](Self::unmarshal).
-    fn marshal(&self) -> Vec<u8>;
-
-    /// Deserialize a previously marshalled position. Returns `None` on
-    /// invalid data.
-    fn unmarshal(bytes: &[u8]) -> Option<Self>
-    where
-        Self: Sized;
+    /// Serialize to a structured [`serde_json::Value`] for persistence.
+    ///
+    /// A *structured* value (not opaque bytes) so composite positions nest
+    /// trivially — `MergedPos` is a JSON object of its sources' values,
+    /// `MatcherAnchors` a `{src, dst}` object — with no hand-rolled framing.
+    /// Dump it to JSON or any other serde format at the storage boundary.
+    ///
+    /// Deserialization is deliberately **not** on this trait — it lives on the
+    /// owning store as [`HistStore::load`]. A position can only serialize
+    /// *itself* (a behaviour of a concrete instance), whereas `load` must
+    /// exist *before* any instance does and, for heterogeneous merge, needs
+    /// the source identities the store holds. Mirrors the reference
+    /// `history.ts`'s `pos.serialize()` / `store.load(json)` split.
+    fn marshal(&self) -> serde_json::Value;
 }
 
 // ============================================================
@@ -187,36 +191,6 @@ impl<T: Clone + Send + Sync + 'static> Store<T> {
                 Some((val, (rx, false)))
             }
         }))
-    }
-}
-
-// ============================================================
-// AsyncDisposable
-// ============================================================
-
-/// Handle that cancels a background task on drop.
-///
-/// Returned by push-based subscription APIs; dropping it cancels the task.
-pub struct AsyncDisposable {
-    cancel: CancellationToken,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl AsyncDisposable {
-    pub fn new(cancel: CancellationToken, handle: JoinHandle<()>) -> Self {
-        Self {
-            cancel,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for AsyncDisposable {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
     }
 }
 
@@ -359,16 +333,14 @@ impl<T: Send + Sync + 'static, P: Position> HistStore<T, P> {
         self.backend.time_pos(time).await
     }
 
-    /// Reactive tip stores (best-effort; sources without finality wiring
-    /// fall back to `latest`).
-    pub fn latest(&self) -> &Store<P> {
-        self.backend.latest()
-    }
-    pub fn best(&self) -> &Store<P> {
-        self.backend.best()
-    }
-    pub fn safe(&self) -> &Store<P> {
-        self.backend.safe()
+    /// Reconstruct a position from a [`serde_json::Value`] produced by
+    /// [`Position::marshal`].
+    ///
+    /// The store — which knows the concrete `P` (and, for merge, the source
+    /// identities) — owns deserialization. Resume by loading a saved anchor
+    /// here, then [`Hist::split`]ting at it. Returns `None` on invalid input.
+    pub fn load(&self, value: serde_json::Value) -> Option<P> {
+        self.backend.load(value)
     }
 }
 
@@ -411,9 +383,10 @@ pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// Estimate a position at a wall-clock time.
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;
 
-    fn latest(&self) -> &Store<P>;
-    fn best(&self) -> &Store<P>;
-    fn safe(&self) -> &Store<P>;
+    /// Deserialize a position from a [`Position::marshal`] value. The store
+    /// owns deserialization because it knows the concrete `P` (and, for
+    /// merge, the per-source identities). Returns `None` on invalid input.
+    fn load(&self, value: serde_json::Value) -> Option<P>;
 }
 
 // ============================================================

@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 
 use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
-    Positioned, Store, Timestamp,
+    Positioned, Timestamp,
 };
 
 type Predicate<Item> = Arc<dyn Fn(&Item) -> bool + Send + Sync>;
@@ -76,14 +76,8 @@ where
         self.upstream.time_pos(time).await
     }
 
-    fn latest(&self) -> &Store<P> {
-        self.upstream.latest()
-    }
-    fn best(&self) -> &Store<P> {
-        self.upstream.best()
-    }
-    fn safe(&self) -> &Store<P> {
-        self.upstream.safe()
+    fn load(&self, value: serde_json::Value) -> Option<P> {
+        self.upstream.load(value)
     }
 }
 

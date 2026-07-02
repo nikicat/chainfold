@@ -26,19 +26,25 @@ use tokio::time::timeout;
 // Source A — integer position, "trade" events
 // ============================================================
 
+/// Reconstruct a position from a [`Position::marshal`] value. Deserialization
+/// no longer lives on the `Position` trait; the generic `Source<P>` below needs
+/// this as a bound so its `HistStoreBackend::load` can rebuild the concrete `P`.
+trait FromValue: Sized {
+    fn from_value(v: &serde_json::Value) -> Option<Self>;
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Default)]
 struct MockPosU64(u64);
 
 impl Position for MockPosU64 {
-    fn marshal(&self) -> Vec<u8> {
-        self.0.to_le_bytes().to_vec()
+    fn marshal(&self) -> serde_json::Value {
+        serde_json::json!(self.0)
     }
-    fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        bytes
-            .try_into()
-            .ok()
-            .map(u64::from_le_bytes)
-            .map(MockPosU64)
+}
+
+impl FromValue for MockPosU64 {
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        v.as_u64().map(MockPosU64)
     }
 }
 
@@ -51,13 +57,14 @@ impl Position for MockPosU64 {
 struct MockPosNamed(String);
 
 impl Position for MockPosNamed {
-    fn marshal(&self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
+    fn marshal(&self) -> serde_json::Value {
+        serde_json::json!(self.0)
     }
-    fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        std::str::from_utf8(bytes)
-            .ok()
-            .map(|s| MockPosNamed(s.to_owned()))
+}
+
+impl FromValue for MockPosNamed {
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        v.as_str().map(|s| MockPosNamed(s.to_owned()))
     }
 }
 
@@ -90,27 +97,21 @@ fn cmp_by_time(a: &MergedItem<CommonEvent>, b: &MergedItem<CommonEvent>) -> Orde
 // like "n01", "n02" (alphabetically ordered).
 // ============================================================
 
-struct Source<P: Position + 'static> {
+struct Source<P: Position + FromValue + 'static> {
     items: Mutex<Vec<(P, CommonEvent)>>,
-    latest_store: Store<P>,
-    latest_tx: watch::Sender<P>,
-    best_store: Store<P>,
-    safe_store: Store<P>,
+    tip: Store<P>,
+    tip_tx: watch::Sender<P>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
-impl<P: Position + 'static> Source<P> {
+impl<P: Position + FromValue + 'static> Source<P> {
     fn new(initial: Vec<(P, CommonEvent)>) -> Arc<Self> {
         let tip = initial.last().map(|(p, _)| p.clone()).unwrap_or_default();
-        let (tx, rx) = watch::channel(tip.clone());
-        let (_, b_rx) = watch::channel(tip.clone());
-        let (_, s_rx) = watch::channel(tip);
+        let (tx, rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
-            latest_store: Store::new(rx),
-            latest_tx: tx,
-            best_store: Store::new(b_rx),
-            safe_store: Store::new(s_rx),
+            tip: Store::new(rx),
+            tip_tx: tx,
             self_ref: std::sync::OnceLock::new(),
         });
         let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -122,7 +123,7 @@ impl<P: Position + 'static> Source<P> {
             let mut items = self.items.lock().unwrap();
             items.push((pos.clone(), e));
         }
-        let _ = self.latest_tx.send(pos);
+        let _ = self.tip_tx.send(pos);
     }
 
     fn arc_self(&self) -> Arc<Self> {
@@ -134,7 +135,7 @@ impl<P: Position + 'static> Source<P> {
     }
 }
 
-impl<P: Position + 'static> HistBackend<CommonEvent, P> for Source<P> {
+impl<P: Position + FromValue + 'static> HistBackend<CommonEvent, P> for Source<P> {
     fn iter(&self, start: P, end: P) -> ItemStream<CommonEvent, P> {
         let items = self.items.lock().unwrap().clone();
         let yielded: Vec<Positioned<CommonEvent, P>> = items
@@ -147,10 +148,10 @@ impl<P: Position + 'static> HistBackend<CommonEvent, P> for Source<P> {
 }
 
 #[async_trait::async_trait]
-impl<P: Position + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
+impl<P: Position + FromValue + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
     fn snapshots(&self) -> HistStream<CommonEvent, P> {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
-        let mut sub = self.latest_store.subscribe();
+        let mut sub = self.tip.subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
@@ -160,21 +161,15 @@ impl<P: Position + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
 
     async fn next(&self) -> Hist<CommonEvent, P> {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
-        Hist::new(backend, P::default(), self.latest_store.get())
+        Hist::new(backend, P::default(), self.tip.get())
     }
 
     async fn time_pos(&self, _time: Timestamp) -> Result<P, HistoryError> {
         Ok(P::default())
     }
 
-    fn latest(&self) -> &Store<P> {
-        &self.latest_store
-    }
-    fn best(&self) -> &Store<P> {
-        &self.best_store
-    }
-    fn safe(&self) -> &Store<P> {
-        &self.safe_store
+    fn load(&self, value: serde_json::Value) -> Option<P> {
+        P::from_value(&value)
     }
 }
 
@@ -201,16 +196,15 @@ async fn merged_pos_marshal_round_trip_across_heterogeneous_anchors() {
 
     let items = collect_merged(merged.next().await).await;
     let anchor = items.last().unwrap().pos.clone();
-    let bytes = anchor.marshal();
-    let restored = MergedPos::unmarshal(&bytes).expect("unmarshal");
+    let value = anchor.marshal();
+    let restored = merged.load(value).expect("load");
     assert_eq!(restored, anchor);
 
-    // The restored anchor decodes per-source bytes correctly.
-    let alpha_bytes = restored.get("alpha").expect("alpha key present");
-    let named_bytes = restored.get("named").expect("named key present");
-    assert_eq!(MockPosU64::unmarshal(alpha_bytes), Some(MockPosU64(1)));
+    // The restored anchor decodes each per-source position back to its
+    // concrete type correctly.
+    assert_eq!(restored.get_as::<MockPosU64>("alpha"), Some(MockPosU64(1)));
     assert_eq!(
-        MockPosNamed::unmarshal(named_bytes),
+        restored.get_as::<MockPosNamed>("named"),
         Some(MockPosNamed("n01".into())),
     );
 }
@@ -261,8 +255,8 @@ async fn merge_resumes_from_marshalled_anchor() {
 
     // Save anchor after "b1" (index 1).
     let anchor = items_all[1].pos.clone();
-    let bytes = anchor.marshal();
-    let restored = MergedPos::unmarshal(&bytes).expect("unmarshal");
+    let value = anchor.marshal();
+    let restored = merged.load(value).expect("load");
 
     let (_, tail) = hist.split(restored);
     let items_tail = collect_merged(tail).await;
@@ -287,7 +281,7 @@ async fn merged_pos_handles_added_source() {
     let anchor = items[0].pos.clone();
     assert!(anchor.get("alpha").is_some());
     assert!(anchor.get("named").is_none());
-    let saved_bytes = anchor.marshal();
+    let saved_value = anchor.marshal();
 
     // Phase 2: add a second source. Use the same saved anchor.
     let a2 = Source::<MockPosU64>::new(vec![
@@ -303,7 +297,9 @@ async fn merged_pos_handles_added_source() {
     sources2.insert("named".into(), ErasedHistStore::new(b.hist_store()));
     let merged2 = merge_hist_stores(sources2, cmp_by_time);
 
-    let restored = MergedPos::unmarshal(&saved_bytes).expect("unmarshal");
+    // Reload the saved (alpha-only) anchor against the two-source merge —
+    // the missing "named" key defaults to that source's earliest.
+    let restored = merged2.load(saved_value).expect("load");
     let hist = merged2.next().await;
     let (_, tail) = hist.split(restored);
     let items_tail = collect_merged(tail).await;
@@ -366,12 +362,15 @@ async fn merge_composes_with_since() {
     sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
     let merged = merge_hist_stores(sources, cmp_by_time);
 
-    // Build a cut "between a1 and b1": positions = { alpha: 1, named: "" }.
-    let mut cut_positions = BTreeMap::new();
-    cut_positions.insert("alpha".into(), MockPosU64(1).marshal());
-    // named has not advanced — leave at default (= empty string).
-    cut_positions.insert("named".into(), MockPosNamed::default().marshal());
-    let cut = MergedPos::new(cut_positions);
+    // Build a cut "between a1 and b1": positions = { alpha: 1, named: default }.
+    // `MergedPos::new` is crate-private, so rebuild the cut by loading its
+    // marshalled JSON form through the merge store (named left at its default,
+    // i.e. empty string — it has not advanced).
+    let cut_value = serde_json::json!({
+        "alpha": MockPosU64(1).marshal(),
+        "named": MockPosNamed::default().marshal(),
+    });
+    let cut = merged.load(cut_value).expect("load cut");
 
     let since = since_hist_store(merged, cut);
     let items = collect_merged(since.next().await).await;
@@ -418,11 +417,14 @@ async fn merge_time_pos_aggregates_per_source() {
     let merged = merge_hist_stores(sources, cmp_by_time);
 
     let tp = merged.time_pos(Timestamp::new(42)).await.expect("time_pos");
-    // Both source stubs return P::default() — verify marshalled bytes
-    // match each source's default.
-    assert_eq!(tp.get("alpha"), Some(&MockPosU64::default().marshal()[..]));
+    // Both source stubs return P::default() — verify each aggregated
+    // per-source position is that source's default.
     assert_eq!(
-        tp.get("named"),
-        Some(&MockPosNamed::default().marshal()[..])
+        tp.get_as::<MockPosU64>("alpha"),
+        Some(MockPosU64::default())
+    );
+    assert_eq!(
+        tp.get_as::<MockPosNamed>("named"),
+        Some(MockPosNamed::default())
     );
 }

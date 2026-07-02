@@ -97,33 +97,25 @@ impl<SP: Position, DP: Position> MatcherAnchors<SP, DP> {
         Self { src, dst }
     }
 
-    pub fn marshal(&self) -> Vec<u8> {
-        let s = self.src.marshal();
-        let d = self.dst.marshal();
-        let mut out = Vec::with_capacity(8 + s.len() + d.len());
-        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-        out.extend_from_slice(&s);
-        out.extend_from_slice(&(d.len() as u32).to_le_bytes());
-        out.extend_from_slice(&d);
-        out
+    /// Serialize to a `{"src": …, "dst": …}` JSON object — pure serde
+    /// composition of the two positions' [`Position::marshal`] values, no
+    /// hand-rolled framing.
+    pub fn marshal(&self) -> serde_json::Value {
+        serde_json::json!({ "src": self.src.marshal(), "dst": self.dst.marshal() })
     }
 
-    pub fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 4 {
-            return None;
+    /// The `src` / `dst` sub-values from a [`marshal`](Self::marshal) object.
+    /// The typed positions are reconstructed by each side's
+    /// [`HistStore::load`] (deserialization lives on the store).
+    pub fn split(value: serde_json::Value) -> Option<(serde_json::Value, serde_json::Value)> {
+        match value {
+            serde_json::Value::Object(mut obj) => {
+                let src = obj.remove("src")?;
+                let dst = obj.remove("dst")?;
+                Some((src, dst))
+            }
+            _ => None,
         }
-        let s_len = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
-        if bytes.len() < 4 + s_len + 4 {
-            return None;
-        }
-        let src = SP::unmarshal(&bytes[4..4 + s_len])?;
-        let d_off = 4 + s_len;
-        let d_len = u32::from_le_bytes(bytes[d_off..d_off + 4].try_into().ok()?) as usize;
-        if bytes.len() < d_off + 4 + d_len {
-            return None;
-        }
-        let dst = DP::unmarshal(&bytes[d_off + 4..d_off + 4 + d_len])?;
-        Some(Self::new(src, dst))
     }
 }
 
@@ -459,15 +451,32 @@ where
 
     async fn load_anchors(&self) -> Result<MatcherAnchors<SP, DP>, HistoryError> {
         match self.anchor_store.get(&self.anchor_key).await? {
-            Some(bytes) => MatcherAnchors::<SP, DP>::unmarshal(&bytes)
-                .ok_or_else(|| HistoryError::internal("failed to unmarshal anchors")),
+            Some(bytes) => {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| HistoryError::internal(format!("anchor json: {e}")))?;
+                let (src_v, dst_v) = MatcherAnchors::<SP, DP>::split(value)
+                    .ok_or_else(|| HistoryError::internal("malformed anchors object"))?;
+                // Deserialize each side via its own store (`load`).
+                let src = self
+                    .base
+                    .src_store
+                    .load(src_v)
+                    .ok_or_else(|| HistoryError::internal("failed to load src anchor"))?;
+                let dst = self
+                    .base
+                    .dst_store
+                    .load(dst_v)
+                    .ok_or_else(|| HistoryError::internal("failed to load dst anchor"))?;
+                Ok(MatcherAnchors::new(src, dst))
+            }
             None => self.base.time_anchors(self.start).await,
         }
     }
 
     /// Persist `next` and update the in-memory cache.
     pub async fn set_anchors(&self, next: MatcherAnchors<SP, DP>) -> Result<(), HistoryError> {
-        let bytes = next.marshal();
+        let bytes = serde_json::to_vec(&next.marshal())
+            .map_err(|e| HistoryError::internal(format!("anchor json: {e}")))?;
         self.anchor_store.set(&self.anchor_key, bytes).await?;
         *self.cached.lock().await = Some(next);
         Ok(())
@@ -569,11 +578,14 @@ mod tests {
     struct MockPos(u64);
 
     impl Position for MockPos {
-        fn marshal(&self) -> Vec<u8> {
-            self.0.to_le_bytes().to_vec()
+        fn marshal(&self) -> serde_json::Value {
+            serde_json::json!(self.0)
         }
-        fn unmarshal(bytes: &[u8]) -> Option<Self> {
-            bytes.try_into().ok().map(u64::from_le_bytes).map(MockPos)
+    }
+
+    impl MockPos {
+        fn from_value(v: &serde_json::Value) -> Option<Self> {
+            v.as_u64().map(MockPos)
         }
     }
 
@@ -594,10 +606,8 @@ mod tests {
 
     struct MockSource {
         items: StdMutex<Vec<Ev>>,
-        latest_store: Store<MockPos>,
-        latest_tx: watch::Sender<MockPos>,
-        best_store: Store<MockPos>,
-        safe_store: Store<MockPos>,
+        tip: Store<MockPos>,
+        tip_tx: watch::Sender<MockPos>,
         self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
     }
 
@@ -605,14 +615,10 @@ mod tests {
         fn new(initial: Vec<Ev>) -> Arc<Self> {
             let tip = MockPos(initial.len() as u64);
             let (tx, rx) = watch::channel(tip);
-            let (_, b_rx) = watch::channel(tip);
-            let (_, s_rx) = watch::channel(tip);
             let s = Arc::new(Self {
                 items: StdMutex::new(initial),
-                latest_store: Store::new(rx),
-                latest_tx: tx,
-                best_store: Store::new(b_rx),
-                safe_store: Store::new(s_rx),
+                tip: Store::new(rx),
+                tip_tx: tx,
                 self_ref: std::sync::OnceLock::new(),
             });
             let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -625,7 +631,7 @@ mod tests {
                 items.push(e);
                 MockPos(items.len() as u64)
             };
-            let _ = self.latest_tx.send(new_tip);
+            let _ = self.tip_tx.send(new_tip);
         }
 
         fn arc_self(&self) -> Arc<Self> {
@@ -657,7 +663,7 @@ mod tests {
     impl HistStoreBackend<Ev, MockPos> for MockSource {
         fn snapshots(&self) -> HistStream<Ev, MockPos> {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-            let mut sub = self.latest_store.subscribe();
+            let mut sub = self.tip.subscribe();
             Box::pin(poll_fn(move |cx| {
                 StdPin::new(&mut sub)
                     .poll_next(cx)
@@ -667,21 +673,15 @@ mod tests {
 
         async fn next(&self) -> Hist<Ev, MockPos> {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-            Hist::new(backend, MockPos(0), self.latest_store.get())
+            Hist::new(backend, MockPos(0), self.tip.get())
         }
 
         async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {
             Ok(MockPos(0))
         }
 
-        fn latest(&self) -> &Store<MockPos> {
-            &self.latest_store
-        }
-        fn best(&self) -> &Store<MockPos> {
-            &self.best_store
-        }
-        fn safe(&self) -> &Store<MockPos> {
-            &self.safe_store
+        fn load(&self, value: serde_json::Value) -> Option<MockPos> {
+            MockPos::from_value(&value)
         }
     }
 
@@ -798,7 +798,11 @@ mod tests {
         let key = "test-key";
         // Persist anchors that point past all items.
         store
-            .set(key, MatcherAnchors::new(MockPos(99), MockPos(99)).marshal())
+            .set(
+                key,
+                serde_json::to_vec(&MatcherAnchors::new(MockPos(99), MockPos(99)).marshal())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -834,11 +838,10 @@ mod tests {
     #[tokio::test]
     async fn matcher_anchors_marshal_round_trip() {
         let a = MatcherAnchors::new(MockPos(42), MockPos(7));
-        let bytes = a.marshal();
-        let restored: MatcherAnchors<MockPos, MockPos> =
-            MatcherAnchors::unmarshal(&bytes).expect("unmarshal");
-        assert_eq!(restored.src, MockPos(42));
-        assert_eq!(restored.dst, MockPos(7));
+        let value = a.marshal();
+        let (src_v, dst_v) = MatcherAnchors::<MockPos, MockPos>::split(value).expect("split");
+        assert_eq!(MockPos::from_value(&src_v), Some(MockPos(42)));
+        assert_eq!(MockPos::from_value(&dst_v), Some(MockPos(7)));
     }
 
     #[tokio::test]
@@ -868,10 +871,12 @@ mod tests {
         let a2 = m.get_anchors().await.unwrap();
         assert_eq!(a2, next);
 
-        // Persistence written.
+        // Persistence written (as a `{src, dst}` JSON object).
         let bytes = store.get("k").await.unwrap().expect("persisted");
-        let parsed: MatcherAnchors<MockPos, MockPos> = MatcherAnchors::unmarshal(&bytes).unwrap();
-        assert_eq!(parsed, next);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let (src_v, dst_v) = MatcherAnchors::<MockPos, MockPos>::split(value).unwrap();
+        assert_eq!(MockPos::from_value(&src_v), Some(MockPos(7)));
+        assert_eq!(MockPos::from_value(&dst_v), Some(MockPos(3)));
     }
 
     #[tokio::test]

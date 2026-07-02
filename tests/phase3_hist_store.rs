@@ -26,11 +26,14 @@ use tokio::sync::watch;
 struct MockPos(u64);
 
 impl Position for MockPos {
-    fn marshal(&self) -> Vec<u8> {
-        self.0.to_le_bytes().to_vec()
+    fn marshal(&self) -> serde_json::Value {
+        serde_json::json!(self.0)
     }
-    fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        bytes.try_into().ok().map(u64::from_le_bytes).map(MockPos)
+}
+
+impl MockPos {
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        v.as_u64().map(MockPos)
     }
 }
 
@@ -41,10 +44,8 @@ struct MockEvent(String);
 /// (0,0] is empty; (0, len] iterates everything.
 struct MockSource {
     items: Mutex<Vec<MockEvent>>,
-    latest_store: Store<MockPos>,
-    latest_tx: watch::Sender<MockPos>,
-    best_store: Store<MockPos>,
-    safe_store: Store<MockPos>,
+    tip: Store<MockPos>,
+    tip_tx: watch::Sender<MockPos>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
@@ -52,14 +53,10 @@ impl MockSource {
     fn new(initial: Vec<MockEvent>) -> Arc<Self> {
         let tip = MockPos(initial.len() as u64);
         let (tx, rx) = watch::channel(tip);
-        let (_b_tx, b_rx) = watch::channel(tip);
-        let (_s_tx, s_rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
-            latest_store: Store::new(rx),
-            latest_tx: tx,
-            best_store: Store::new(b_rx),
-            safe_store: Store::new(s_rx),
+            tip: Store::new(rx),
+            tip_tx: tx,
             self_ref: std::sync::OnceLock::new(),
         });
         let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -72,7 +69,7 @@ impl MockSource {
             items.push(event);
             MockPos(items.len() as u64)
         };
-        let _ = self.latest_tx.send(new_tip);
+        let _ = self.tip_tx.send(new_tip);
     }
 
     fn snapshot(&self) -> Vec<MockEvent> {
@@ -109,7 +106,7 @@ impl HistBackend<MockEvent, MockPos> for MockSource {
 impl HistStoreBackend<MockEvent, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<MockEvent, MockPos> {
         let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
-        let mut sub = self.latest_store.subscribe();
+        let mut sub = self.tip.subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
@@ -119,21 +116,15 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
 
     async fn next(&self) -> Hist<MockEvent, MockPos> {
         let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
-        Hist::new(backend, MockPos(0), self.latest_store.get())
+        Hist::new(backend, MockPos(0), self.tip.get())
     }
 
     async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {
         Ok(MockPos(0))
     }
 
-    fn latest(&self) -> &Store<MockPos> {
-        &self.latest_store
-    }
-    fn best(&self) -> &Store<MockPos> {
-        &self.best_store
-    }
-    fn safe(&self) -> &Store<MockPos> {
-        &self.safe_store
+    fn load(&self, value: serde_json::Value) -> Option<MockPos> {
+        MockPos::from_value(&value)
     }
 }
 
@@ -205,8 +196,8 @@ async fn hist_split_round_trips_via_marshalled_anchor() {
 
     let (_, tail) = h.split(MockPos(2));
     let first_after = collect(tail).await.first().unwrap().pos;
-    let bytes = first_after.marshal();
-    let restored = MockPos::unmarshal(&bytes).expect("unmarshal");
+    let value = first_after.marshal();
+    let restored = MockPos::from_value(&value).expect("from_value");
     assert_eq!(restored, MockPos(3));
 
     // Resuming from the anchor of "c" yields only items AFTER "c" — that's
@@ -291,8 +282,8 @@ async fn act_and_wait_snapshot_before_op_not_after() {
 #[tokio::test]
 async fn position_marshal_round_trip() {
     let p = MockPos(123_456_789);
-    let bytes = p.marshal();
-    let restored = MockPos::unmarshal(&bytes).unwrap();
+    let value = p.marshal();
+    let restored = MockPos::from_value(&value).unwrap();
     assert_eq!(restored, p);
 }
 

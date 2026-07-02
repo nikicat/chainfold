@@ -26,7 +26,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    Hist, HistStore, HistStoreBackend, HistStream, HistoryError, Position, Store, Timestamp,
+    Hist, HistStore, HistStoreBackend, HistStream, HistoryError, Position, Timestamp,
 };
 
 /// Pre-split every snapshot emitted by `upstream` at `cut`. Items strictly
@@ -75,14 +75,8 @@ where
         self.upstream.time_pos(time).await
     }
 
-    fn latest(&self) -> &Store<P> {
-        self.upstream.latest()
-    }
-    fn best(&self) -> &Store<P> {
-        self.upstream.best()
-    }
-    fn safe(&self) -> &Store<P> {
-        self.upstream.safe()
+    fn load(&self, value: serde_json::Value) -> Option<P> {
+        self.upstream.load(value)
     }
 }
 
