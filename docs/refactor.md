@@ -19,7 +19,8 @@
 > | 5b — OwnedErc20 follow-up | ✅ Done (2026-05-23) | Two narrow filters + merge; `erc20_explorer --owner` rewired. |
 > | 6 — Matcher | ✅ Done (2026-05-23) | `BaseMatcher` / `AnchoredMatcher` / `AnchorStore` (in-mem + SQLite). |
 > | Structural cleanup | ✅ Done (2026-05-26) | Function-level dedup + module-tree splits + `mod.rs`→`foo.rs` migration (see below). |
-> | **7 — Pruning + best/safe wiring** | ⏳ **Pending — next eligible chunk** | In-memory eviction + `best`/`safe` stores. Facade removal is moot (none exists). |
+> | Reactive core (R1–R4, R7) | ✅ Done (2026-07-02) | `EvmChain` + generic `RangeIndexStore`; finality → chain; object positions + store-owned `load`. Canonical log: `TODO.md` R-series + `ARCHITECTURE.md` §5A. |
+> | **7 — Pruning + best/safe wiring** | ⏳ **Pending — next eligible chunk** | In-memory eviction + real `Best`/`Safe` producers on `EvmChain` (revised by R3, see below). |
 > | Bridge decoder | ⏳ Deferred | Generic `--match-on` extractor ships; ABI-aware impls per bridge are app-specific. |
 > | Same-`P` merge alias | ⏳ Deferred | Not load-bearing; `MergedItem.source_key` is useful as-is. |
 > | Reducer | ⏳ Deferred (Phase 6 spec) | Sibling of Matcher; `Erc20Balance` rebuild gates on it. |
@@ -76,9 +77,10 @@ The structural-debt inventory accumulated over Phases 0–6 has all landed:
 A phased refactor aligning chainfold with the reference implementation's production-validated
 layering. Built on three locked-in structural shifts:
 
-1. **Cache layering** — in-memory hot path (`LogIndex`, `src/evm/log_index/`)
-   above SQLite backfill (`LogCache`, `src/evm/cache/`). SQLite never sits on
-   the live-event critical path.
+1. **Cache layering** — in-memory hot path (`RangeIndex`,
+   `src/evm/range_index/`; named `LogIndex` in `src/evm/log_index/` before
+   R3 generalized it) above SQLite backfill (`LogCache`, `src/evm/cache/`).
+   SQLite never sits on the live-event critical path.
 2. **Snapshot + tip-stream split** — `Hist<T,P>` (finite, immutable snapshot)
    and `HistStore<T,P>` (yields a fresh `Hist` as the tip advances, via
    `snapshots()`). `Position` doubles as the anchor — there is **no** separate
@@ -93,9 +95,11 @@ layering. Built on three locked-in structural shifts:
 - **Library core** (source-agnostic): `src/arch.rs` (`Position`, `Hist`,
   `HistStore`, `Store`, `HistBackend`/`HistStoreBackend`), `src/merge.rs`,
   `src/combinators/` (`mapped`/`filtered`/`since`), `src/matcher/`.
-- **EVM source** (concrete): `src/evm/` — `history.rs`, `cache/`, `log_index/`,
-  `erc20.rs`, `owned_erc20.rs`, `subscriber.rs`, `types.rs`, `retry.rs`,
-  `aligned_ranges.rs`, `signatures.rs`.
+- **EVM source** (concrete): `src/evm/` — `chain/` (`EvmChain`, head clock,
+  per-store wiring), `range_index/` (generic tree + `RangeIndexStore` +
+  `LogSpec`), `cache/`, `chain_provider.rs`, `erc20.rs`, `owned_erc20.rs`,
+  `types.rs`, `retry.rs`, `aligned_ranges.rs`, `signatures.rs`. (Pre-R3:
+  `history.rs`, `log_index/`, `subscriber.rs` — deleted 2026-07-02.)
 - **Product CLI:** `src/bin/chainfold/` (behind the `cli` feature) — the real
   binary, carrying its own unit tests. This is distinct from the per-feature **demo
   binaries** in `examples/` (`history_explorer`, `erc20_explorer`,
@@ -137,53 +141,61 @@ layering. Built on three locked-in structural shifts:
 
 ## Phase 7 — Pruning + best/safe wiring (next eligible)
 
-**Estimated:** ~1 week. Opportunistic. **Prereqs:** Phases 1 + 2 (uses
-`LogIndex` and subscriptions) — both shipped.
+**Estimated:** ~1 week. Opportunistic. **Prereqs:** Phases 1 + 2 — both
+shipped — plus the R3 reactive-core refactor (shipped 2026-07-02), which
+**relocated this phase's finality half**: there are no per-history
+`best_store`/`safe_store` anymore; finality is the chain-wide `Finality`
+tier on `EvmChain`.
 
 ### Goal
 
-Bound long-running memory, and wire the `best`/`safe` reactive stores that
-have been stubbed since Phase 3.
+Bound long-running memory, and wire real `Best`/`Safe` producers into
+`EvmChain`'s head clock (both tiers currently mirror `Latest`).
 
 ### Current state to build on
 
-- **`src/evm/history.rs`** — `best_store`/`safe_store` are stub `Store`s built
-  from `watch::channel(earliest)` whose senders drop immediately (see
-  `EvmLogHistory::new`, ~line 140). `get()` answers `earliest`; `subscribe()`
-  yields once then ends. `latest_store` is fully wired.
+- **`src/evm/chain.rs`** — `EvmChain::head(tier)` / `logs(filter, tier)`
+  accept a `Finality` tier but ignore it (`Latest`-only). The head clock
+  (`chain/head_clock.rs`) publishes one `watch::Sender<HeadEvent>`; per-tier
+  producers slot in as sibling senders the same wiring pattern subscribes to.
 - **`src/evm/cache/log_cache.rs`** — durable `compact_ranges(filter, up_to)`
   already exists and is tested (`compact_merges_finalized_ranges`,
   `compact_skips_reorged_ranges`). What's missing is **in-memory** eviction.
-- **`src/evm/log_index/range_tree.rs`** — empty-range tombstones are already a
-  first-class concept (the type doc mentions "preserved across compaction"),
-  but no prune/compact methods exist yet.
+- **`src/evm/range_index/range_tree.rs`** — empty-range tombstones are
+  already a first-class concept (the type doc mentions "preserved across
+  compaction"), but no prune/compact methods exist yet. The tree is generic
+  over `RangeSpec` since R3; prune/compact land once, for every source.
 - **No deprecated facade exists** — Phase 3 removed `Cursor`/`History` outright.
   The original plan's "delete the deprecated facade" task is therefore moot.
 
 ### Deliverables
 
-**`src/evm/log_index/range_tree.rs`** — in-memory pruning:
+**`src/evm/range_index/range_tree.rs`** — in-memory pruning:
 - `prune_older_than(threshold: Duration)` — for `Range`s last-touched before
   `now - threshold`, drop the `item` payload (set to `None`) but **keep the
   `Range` entry**; empty ranges stay as tombstones.
 - `compact_in_memory(up_to_block)` — merge adjacent empty ranges. Safety: only
   on ranges entirely below the `safe` tip (a tip reorg must never invalidate a
   merged range — see locked-in decision #8).
-- On `items()` into a pruned range, repopulate from `LogCache` (cache-aside).
+- On `items()` into a pruned range, repopulate from the durable store
+  (cache-aside, via `RangeSpec::load_window`).
 
-**`src/evm/history.rs`** — `best`/`safe`:
-- `best`: poll `eth_getBlockByNumber("latest", false)` minus a configurable
-  confirmation depth (default 12 for mainnet); bump `best_store`.
-- `safe`: poll `eth_getBlockByNumber("finalized", false)` where supported
-  (post-Merge ETH, most L2s); fall back to `latest - 64` otherwise; bump
-  `safe_store`.
-- On `safe` advance, kick off background `LogCache::compact_ranges` for ranges
-  entirely below the new safe tip (durable side), and
+**`src/evm/chain.rs` + `chain/head_clock.rs`** — `Best`/`Safe` producers:
+- `Best`: derive from the `Latest` head minus a configurable confirmation
+  depth (default 12 for mainnet) — no extra RPC; publish on the `Best` tier's
+  channel.
+- `Safe`: poll `eth_getBlockByNumber("finalized", false)` where supported
+  (post-Merge ETH, most L2s); fall back to `latest - 64` otherwise.
+- `head(tier)` / `logs(filter, tier)` stop collapsing to `Latest`; a
+  `Safe`-tier store's wiring subscribes to the `Safe` channel, so its
+  `snapshots()` tick on finalization.
+- On `Safe` advance, kick off background `LogCache::compact_ranges` for
+  ranges entirely below the new safe tip (durable side), and
   `range_tree::compact_in_memory` (in-memory side).
 
 ### Test plan
 
-**Unit (`src/evm/log_index/range_tree.rs` tests):**
+**Unit (`src/evm/range_index/range_tree.rs` tests):**
 - `prune_drops_items_keeps_range`
 - `prune_then_iter_repopulates_from_cache`
 - `compact_in_memory_merges_adjacent_empty`
@@ -255,9 +267,9 @@ are forward tracks, not yet sized into numbered phases:
   live `eth_subscribe` push with no code changes. EVM first; later blockchains'
   RPC dialects follow as their backends land.
 
-Both ride the same `Hist`/`HistStore`/`LogCache`/`LogIndex` machinery — they are
-front-ends, not forks. Sequencing relative to Phase 7 is open; the daemon in
-particular benefits from Phase 7's finality wiring (it must answer
+Both ride the same `Hist`/`HistStore`/`LogCache`/`RangeIndex` machinery — they
+are front-ends, not forks. Sequencing relative to Phase 7 is open; the daemon
+in particular benefits from Phase 7's finality wiring (it must answer
 `eth_subscribe` and serve `safe`/`finalized` views correctly).
 
 ### Near-term CLI plan

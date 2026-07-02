@@ -7,10 +7,13 @@
 > [`README.md`](../README.md); for the original pre-refactor design brainstorm
 > see [`blockchain_storage.md`](./blockchain_storage.md).
 >
-> **Status:** Phases 0–6 + the OwnedErc20 follow-up are shipped. The
-> **library** and **CLI** surfaces are live; the **daemon** (`chainfoldd`)
-> is planned. Phase 7 (memory pruning + `best`/`safe` finality wiring) is
-> the next eligible chunk.
+> **Status:** Phases 0–6 + the OwnedErc20 follow-up are shipped, and the
+> reactive-core refactor (R1–R4, R7 — `EvmChain` + the generic
+> `RangeIndexStore`, replacing `EvmLogHistory`/`LogIndex`/`EvmLogSubscriber`)
+> is fully landed on `refactor/reactive-core`, including the CLI, examples,
+> and test-suite migration. The **library** and **CLI** surfaces are live;
+> the **daemon** (`chainfoldd`) is planned. Phase 7 (memory pruning +
+> `best`/`safe` head producers) is the next eligible chunk.
 
 ---
 
@@ -21,7 +24,7 @@
 3. [Product surfaces](#3-product-surfaces)
 4. [Module map & layering](#4-module-map--layering)
 5. [Core abstractions](#5-core-abstractions)
-5A. [Client API vs. backend traits (R3 target)](#5a-client-api-vs-backend-traits-r3-target)
+5A. [Client API vs. backend traits (shipped)](#5a-client-api-vs-backend-traits-shipped)
 6. [Combinators](#6-combinators)
 7. [Merge — heterogeneous sources](#7-merge--heterogeneous-sources)
 8. [Matcher — correlation](#8-matcher--correlation)
@@ -90,7 +93,7 @@ flowchart TB
         CLI["CLI<br/>chainfold binary<br/>(features = cli)"]
         DAEMON["Daemon<br/>chainfoldd<br/>(planned)"]
     end
-    ENGINE["ONE ENGINE<br/>Hist · HistStore · Store · Matcher<br/>LogIndex + LogCache + reactive core"]
+    ENGINE["ONE ENGINE<br/>Hist · HistStore · Store · Matcher<br/>RangeIndex + LogCache + reactive core"]
     LIB --> ENGINE
     CLI --> ENGINE
     DAEMON -.planned.-> ENGINE
@@ -138,13 +141,13 @@ flowchart TB
 
     subgraph EVM["EVM source — cfg(feature = evm)"]
         direction TB
-        EvmLogHistory["EvmLogHistory&lt;P&gt;<br/>impl HistStoreBackend"]
+        EvmChain["EvmChain&lt;P&gt;<br/>ONE head clock · Finality · vends log stores"]
         OwnedErc20["OwnedErc20<br/>2 narrow filters + merge"]
         Erc20["erc20<br/>Transfer decode · metadata · balance fold"]
-        LogIndex["LogIndex<br/>in-memory BTreeMap range tree"]
+        RIStore["RangeIndexStore&lt;LogSpec&gt;<br/>generic HistStoreBackend + HistBackend"]
+        RangeIndex["RangeIndex&lt;LogSpec&gt;<br/>in-memory BTreeMap range tree"]
         Cache["CacheDb → LogCache / Erc20Cache / EventSignatureCache<br/>durable SQLite"]
-        Subscriber["EvmLogSubscriber<br/>WS or Poll, reconnect w/ backoff"]
-        ChainProvider["ChainProvider&lt;P&gt;<br/>alloy Provider + ChainId"]
+        ChainProvider["ChainProvider&lt;P&gt;<br/>alloy Provider + ChainId + LogCache<br/>header singleflight"]
     end
 
     subgraph TRANSPORT["Transport / persistence"]
@@ -158,42 +161,41 @@ flowchart TB
     merge --> arch
     matcher --> arch
     OwnedErc20 --> merge
-    OwnedErc20 --> EvmLogHistory
-    Erc20 --> EvmLogHistory
-    EvmLogHistory --> LogIndex
-    EvmLogHistory --> Subscriber
-    EvmLogHistory --> ChainProvider
-    LogIndex --> Cache
-    ChainProvider -.HTTP backfill.-> Alloy
-    Subscriber -.WS push / HTTP poll.-> Alloy
+    OwnedErc20 --> EvmChain
+    Erc20 --> Cache
+    EvmChain -- "logs(filter, tier)" --> RIStore
+    EvmChain --> ChainProvider
+    RIStore --> RangeIndex
+    RangeIndex --> Cache
+    ChainProvider -.RPC + WS push.-> Alloy
     Cache --> SQLite
 
     classDef core fill:#e8f0fe,stroke:#4477cc
     classDef evm fill:#fef3e8,stroke:#cc7744
     classDef transport fill:#eee,stroke:#888
     class arch,combinators,merge,matcher,signatures core
-    class EvmLogHistory,OwnedErc20,Erc20,LogIndex,Cache,Subscriber,ChainProvider evm
+    class EvmChain,OwnedErc20,Erc20,RIStore,RangeIndex,Cache,ChainProvider evm
     class Alloy,SQLite transport
 ```
 
 **Crate layout** (`src/`):
 
 ```
-lib.rs                     pub mod {arch, combinators, matcher, merge, signatures}; cfg(evm) evm
+lib.rs                     pub mod {arch, combinators, matcher, merge, shared, signatures}; cfg(evm) evm
 ├─ arch.rs                 Position · Positioned · Hist · HistStore · Store · backend traits
 ├─ combinators/            mapped.rs · filtered.rs · since.rs
 ├─ merge.rs                MergedPos · MergedItem · ErasedHistStore · merge_hist_stores
 ├─ matcher/                matcher.rs + anchor_store_sqlite.rs
+├─ shared.rs               Shared<T> — Arc newtype; .share() names the refcount bump
 ├─ signatures.rs           event-name → signature/topic0 resolution
 ├─ evm/                    ← cfg(feature = "evm")
-│  ├─ types.rs             EvmEvent · EvmPosition · ChainId · Topic · BlockNumber · LogIdx · …
-│  ├─ history.rs           EvmLogHistory (the HistStoreBackend)
-│  ├─ log_index/           block_pos · range_tree · nav · gap_fill  (in-memory hot path)
+│  ├─ types.rs             EvmEvent · EvmPosition · ChainId · Topic · BlockNumber · LogIdx · ChunkSize · …
+│  ├─ chain.rs + chain/    EvmChain — config · head_clock · wiring · rpc
+│  ├─ range_index/         spec (RangeSpec seam) · block_pos · range_tree · gap_fill · log_spec · store (RangeIndexStore)
 │  ├─ cache.rs + cache/    CacheDb → LogCache · Erc20Cache · EventSignatureCache (SQLite)
-│  ├─ subscriber.rs        EvmLogSubscriber (WS / Poll)
 │  ├─ erc20.rs             Transfer decode · metadata · balance apply
 │  ├─ owned_erc20.rs       two-filter in/out merge
-│  ├─ chain_provider.rs    ChainProvider<P>
+│  ├─ chain_provider.rs    ChainProvider<P> — chain-scoped RPC seam
 │  ├─ aligned_ranges.rs    aligned_block_ranges
 │  ├─ retry.rs             rpc_retry_layer
 │  └─ observe.rs           the tracing contract
@@ -215,17 +217,16 @@ Five public shapes in `src/arch.rs`. Everything else composes them.
 
 ```mermaid
 flowchart LR
-    Position["<b>Position</b><br/>totally-ordered cut point<br/>marshal/unmarshal · Default · Ord"]
+    Position["<b>Position</b><br/>totally-ordered cut point<br/>marshal → JSON · Default · Ord"]
     Positioned["<b>Positioned&lt;T,P&gt;</b><br/>item + post-cut position"]
     Hist["<b>Hist&lt;T,P&gt;</b><br/>finite snapshot (start, end]<br/>iter · split · is_empty"]
-    HistStore["<b>HistStore&lt;T,P&gt;</b><br/>reactive stream of Hists<br/>snapshots · latest/best/safe"]
+    HistStore["<b>HistStore&lt;T,P&gt;</b><br/>reactive stream of Hists<br/>snapshots · next · time_pos · load"]
     Store["<b>Store&lt;T&gt;</b><br/>reactive value<br/>get · subscribe"]
 
     Position --> Hist
     Position --> HistStore
     Positioned --> Hist
     Hist --> HistStore
-    Store --> HistStore
 ```
 
 ### `Position` — the cut point
@@ -240,13 +241,21 @@ position is the gap *between* items, never an item itself. It is
 pub trait Position:
     Clone + Default + Eq + Ord + Debug + Send + Sync + 'static
 {
-    fn marshal(&self) -> Vec<u8>;
-    fn unmarshal(bytes: &[u8]) -> Option<Self>;
+    fn marshal(&self) -> serde_json::Value;
 }
 
 // EVM's impl:
 pub struct EvmPosition { pub block: BlockNumber, pub log_index: LogIdx }
 ```
+
+`marshal` returns a *structured* `serde_json::Value` (not opaque bytes), so
+composite positions nest by pure composition — `MergedPos` marshals to a JSON
+object of its sources' values, `MatcherAnchors` to a `{src, dst}` object — with
+no hand-rolled framing. There is deliberately **no `unmarshal`** on the trait:
+deserialization lives on the owning store as [`HistStore::load`](#histstoret-p--the-reactive-tip-stream),
+because `load` must exist *before* any position instance does and, for merge,
+needs the source identities only the store holds. Mirrors the reference
+`history.ts`'s `pos.serialize()` / `store.load(json)` asymmetry.
 
 ### `Positioned<T, P>` — an item at a place
 
@@ -282,12 +291,15 @@ tip advances; the first yield is the current snapshot.
 impl<T, P: Position> HistStore<T, P> {
     fn snapshots(&self) -> impl Stream<Item = Hist<T,P>>;
     async fn next(&self) -> Hist<T,P>;
-    async fn time_pos(&self, t: Timestamp) -> Result<P, _>; // time → position
-    fn latest(&self) -> &Store<P>;   // mempool-ish tip (wired)
-    fn best(&self)   -> &Store<P>;   // mined tip     (Phase 7 stub → latest)
-    fn safe(&self)   -> &Store<P>;   // finalized tip (Phase 7 stub → latest)
+    async fn time_pos(&self, t: Timestamp) -> Result<P, _>;      // time → position
+    fn load(&self, v: serde_json::Value) -> Option<P>;           // marshal's inverse
 }
 ```
+
+There are **no finality accessors** here (R3): finality is a chain-wide fact,
+not a per-store one, so it lives on the source's chain entity —
+`EvmChain::head(Finality)` — and a store carries a single neutral end/tip
+signal exposed through `snapshots()`/`next()`. See [§13](#13-reorg--finality-model).
 
 ### `Store<T>` — a reactive value
 
@@ -309,8 +321,9 @@ async fn act_and_wait<T,P,R,...>(store, op, predicate)
     -> Result<(Positioned<T,P>, R), HistoryError>;
 ```
 
-`AsyncDisposable` wraps a `CancellationToken` + `JoinHandle`; dropping it
-cancels the background task.
+Background tasks are guarded by `tokio_util::task::AbortOnDropHandle` — drop
+the owner, the task aborts (R7; the old `AsyncDisposable` wrapper is deleted).
+See [§14](#14-ownership--lifetime).
 
 ### The backend seam — `HistBackend` and `HistStoreBackend`
 
@@ -319,8 +332,11 @@ over an `Arc<dyn …Backend>`. A `Hist` is `{ backend: Arc<dyn HistBackend>,
 start, end }`; a `HistStore` is `{ backend: Arc<dyn HistStoreBackend> }`.
 `snapshots()`/`next()` mint `Hist`s that all share the store's underlying
 `Arc<dyn HistBackend>`, so every snapshot of one source reads through the *same*
-index. Adding a source = implement these two traits; combinators, merge, and
-matcher then compose over them for free.
+index. A range-based source doesn't hand-write these traits anymore: it authors
+a `RangeSpec` and gets both impls from the generic `RangeIndexStore<S>`
+([§5A](#5a-client-api-vs-backend-traits-shipped)); non-range backends (merge,
+combinators, mocks) still implement them directly. Either way, combinators,
+merge, and matcher compose over the traits for free.
 
 **`HistBackend<T, P>`** — backs a single `Hist`. Two methods; only `iter` is
 required.
@@ -345,7 +361,7 @@ pub trait HistBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
 ```
 
 **`HistStoreBackend<T, P>`** — backs a `HistStore`: the reactive tip stream plus
-the finality tip accessors.
+the time anchor and position deserialization.
 
 ```rust
 #[async_trait]
@@ -353,19 +369,19 @@ pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// Fresh `Hist` per tip advance; first item is the current snapshot.
     fn snapshots(&self) -> HistStream<T, P>;
 
-    /// The current snapshot (snapped to the latest known tip). Synchronous
-    /// tip read internally — see `EvmLogHistory::next` → `latest_store.get()`.
+    /// The current snapshot (snapped to the latest known tip). For
+    /// `RangeIndexStore` this waits until the source has seeded the tip,
+    /// then is a plain watch read.
     async fn next(&self) -> Hist<T, P>;
 
     /// Estimate a position at a wall-clock time (cut point for time-based
     /// resume). For EVM: block-time estimation, no per-call RPC.
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;
 
-    /// Reactive finality tips. `latest` is wired; `best`/`safe` are Phase-7
-    /// stubs that mirror `latest` today (see §13 and TODO R2/R3).
-    fn latest(&self) -> &Store<P>;
-    fn best(&self)   -> &Store<P>;
-    fn safe(&self)   -> &Store<P>;
+    /// Deserialize a position from a `Position::marshal` value. The store
+    /// owns deserialization — it knows the concrete `P` (and, for merge,
+    /// the per-source identities). `None` on invalid input.
+    fn load(&self, value: serde_json::Value) -> Option<P>;
 }
 ```
 
@@ -383,14 +399,16 @@ hardcode `Ord`, it delegates to `backend.clamp_pos(p, start, end)`:
 - **Default (`Ord`-based).** `p < start → start`, `p > end → end`, else `p`.
   Correct whenever a position's `Ord` *is* its containment order — true for
   `EvmPosition` (lexicographic `(block, log_index)`).
-- **Why it's overridable.** `MergedPos` is a `BTreeMap<SourceKey, Vec<u8>>`
-  ordered **byte-lex** to give the *total* order `Position: Ord` demands — but
-  postcard leb128 doesn't preserve numeric order across byte-length boundaries,
-  so byte-lex ≠ per-source containment. `MergedHistBackend` overrides
-  `clamp_pos` to clamp **each per-source position separately, via that source's
-  own `Ord`** (see [§7](#7-merge--heterogeneous-sources)). Without the override,
-  splitting a merged `Hist` at a saved `MergedPos` could clamp to the wrong cut
-  and drop or duplicate items per source.
+- **Why it's overridable.** `MergedPos` holds one live position object per
+  source; its total `Ord` (required by `Position`) is lexicographic over the
+  sorted key union, comparing each component with its own concrete `Ord`
+  through the `cmp_erased` seam. A total order — but **not** component-wise
+  containment: clock A can sort before clock B while being *ahead* of B on
+  some source. `MergedHistBackend` overrides `clamp_pos` to clamp **each
+  per-source position separately, via that source's own `Ord`** (see
+  [§7](#7-merge--heterogeneous-sources)). Without the override, splitting a
+  merged `Hist` at a saved `MergedPos` could clamp to the wrong cut and drop
+  or duplicate items per source.
 
 In short: `clamp_pos` is the seam that keeps `split` correct for a position whose
 sort order is not its containment order.
@@ -398,152 +416,166 @@ sort order is not its containment order.
 #### Concurrency contract
 
 A single backend is read through many `Hist`s at once — snapshots share the
-store's `Arc<dyn HistBackend>`, and the live path has the WS watcher writing
-while consumers walk. Backends must therefore be safe under concurrent `iter`
-and concurrent read/write. The EVM `LogIndex` satisfies this with a `Mutex` over
-the BTree plus per-range singleflight (`Notify`): the first walker into a cold
-gap fetches; peers coalesce onto it. Pinned by
-`concurrent_searches_in_same_gap_fire_one_fetch` (`log_index.rs:586`) — 5
-concurrent walkers over one `Arc<LogIndex>`, 1 fetch. (Coverage gaps — parallel
-`multi_thread`/loom, disjoint-range walkers, reader-vs-`insert_page` — noted in
-§18.)
+store's `Arc<dyn HistBackend>`, and the live path has the wiring tasks writing
+(`on_events` → `insert_page`) while consumers walk. Backends must therefore be
+safe under concurrent `iter` and concurrent read/write. The `RangeIndex`
+satisfies this with a `Mutex` over the BTree plus per-range singleflight
+(`Notify`): the first walker into a cold gap fetches; peers coalesce onto it.
+Pinned by `concurrent_searches_in_same_gap_fire_one_fetch` (now in
+`range_index.rs` tests) — 5 concurrent walkers over one shared index, 1
+fetch. (Coverage gaps — parallel `multi_thread`/loom, disjoint-range walkers,
+reader-vs-`insert_page` — noted in §18.)
 
 ---
 
-## 5A. Client API vs. backend traits (R3 target)
+## 5A. Client API vs. backend traits (shipped)
 
-> **Status: R3 target design — under review, not yet shipped.** The shipped
-> abstractions are in [§5](#5-core-abstractions); this is the two-layer reshape
-> R3 (the `Chain` entity) introduces. Tracked in [TODO.md](./TODO.md) R3.
+> **Status: shipped** (R3, 2026-07-02 — `5916497` core reshape + `dd6525c`
+> EVM, on `refactor/reactive-core`). This is the two-layer split as built;
+> [deviations from the pre-R3 sketch](#deviations-from-the-pre-r3-sketch)
+> below records where it landed differently.
 
-Two layers. A new source (evm / bitcoin / cex / perpdex) implements **one
-`Source` trait** (plus `Position`). Everything reactive — the `HistStore`, its
-index, gap-fill, live wiring — is **generic, written once** by chainfold. This
-mirrors the reference [`FetchSource` / `HistStoreImpl`](../../reference/src/history.ts)
-split.
+Two layers. A range-based source authors a **`RangeSpec`** (what to store,
+resolve, persist) plus concrete wiring driving two entry points; everything
+reactive — the `HistStoreBackend`, its index, gap-fill, snapshots, position
+deserialization — is **generic, written once** as `RangeIndexStore<S>`. This
+mirrors the reference [`history.ts`](../../reference/src/history.ts)'s
+`HistStoreImpl` over its `RangeTree` + `HistoryCallbacks`.
 
-Boxed stream aliases used below (they cross `dyn` boundaries → nameable boxed
-streams, not `impl Stream`). `Page<T,P> = { from: P, to: P, items: Vec<Positioned<T,P>> }`
-is a fetched/delivered batch carrying its range bounds.
+### Generic reactive layer — written once
+
+`RangeIndexStore<S: RangeSpec>` (`src/evm/range_index/store.rs`) implements
+**both** §5 backend traits over a `RangeIndex<S>` plus one reactive tip:
+
+- **One nullable end tip** — a single `watch::Sender<Option<S::PubPos>>` (the
+  reference's `end` field + `endChanged` event, fused into one watch channel).
+  `None` until the source seeds it; `snapshots()`/`next()` *wait* for a seeded
+  tip rather than fabricate an empty snapshot at `earliest`.
+- **Two entry points** (the reference's `HistoryCallbacks`), called by wiring:
+  - `on_events(page)` — live batch: insert into the in-memory tree, then bump
+    the tip to `S::page_tip(page)` (the reference's `onEvents` →
+    `onBump(page.to)`).
+  - `on_bump(pos)` — the tip advanced with **zero** events (a head block with
+    no matching logs; a reconnect; the initial seed). Monotonic via
+    `send_if_modified` — a bump at-or-before the current tip is a no-op.
+- **`HistBackend::iter`** = lazy `ensure_window_loaded` (materialize persisted
+  scanned ranges into the tree) + the streaming, singleflight
+  `RangeIndex::items`.
+- **Store-owned deserialization** — `HistStoreBackend::load` delegates to
+  `RangeSpec::load_pos`.
+- **Wiring lifetime** — background tasks attach via
+  `attach_wiring(AbortOnDropHandle<()>)` and hold only `Weak` back-references:
+  they die with the store, and there is no `Arc` cycle (R7).
+
+### Leaf seam — a source author implements `RangeSpec`
 
 ```rust
-type ItemStream<T,P> = Pin<Box<dyn Stream<Item = Result<Positioned<T,P>, HistoryError>> + Send>>;
-type HistStream<T,P> = Pin<Box<dyn Stream<Item = Hist<T,P>> + Send>>;
-type PageStream<T,P> = Pin<Box<dyn Stream<Item = Result<Page<T,P>, HistoryError>> + Send>>;
-type Subscription<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
+trait RangeSpec: Clone + Send + Sync + 'static {
+    type Pos: IndexPos;        // tree-key position        (logs: BlockPos)
+    type Item: Copy;           // lightweight tree entry   (logs: LogRef, a cache pointer)
+    type Event;                // public item              (logs: EvmEvent)
+    type PubPos: Position;     // public navigable position (logs: EvmPosition)
+    type Page;                 // one fetch / one live delivery (logs: LogPage)
+
+    // shape: positions, page bounds, the tip a delivered page bumps to
+    fn item_pos(&Item) -> Pos;        fn page_items(&Page) -> Vec<Item>;
+    fn page_bounds(&Page) -> BlockRange;   fn page_tip(&Page) -> PubPos;
+    fn index_pos(&PubPos) -> Pos;     fn window(from: &PubPos, to: &PubPos) -> BlockRange;
+
+    // the three durable-store touches
+    fn resolve(&self, &Item) -> Result<Positioned<Event, PubPos>, _>;  // sync read, never RPC
+    fn persist(&self, &Page) -> Result<(), _>;                         // gap-fill + drain
+    fn load_window(&self, BlockRange) -> Result<Vec<LoadedSpan<Item>>, _>;  // lazy tree load
+
+    // store-owned position deserialization (behind HistStore::load)
+    fn load_pos(&self, serde_json::Value) -> Option<PubPos>;
+}
 ```
 
-### Backend — a source author implements `Source` (+ `Position`)
+Fetching is a separately injected closure — `Fetcher<Page>`, wrapping the
+source's RPC (`eth_getLogs` for logs) — so tests pass a pure-Rust stub and the
+provider-capturing fetch stays out of the persistence spec. `LogSpec` (a cache
+handle + `FilterHash`) is the EVM-logs impl; an EVM-**blocks** spec is the
+planned second instance (the `blocks` command, M1).
+
+### Client — the chain entity (concrete per source)
 
 ```rust
-/// One source's ordered, serializable cut point (evm: EvmPosition; …).
-trait Position: Clone + Default + Eq + Ord + Debug + Send + Sync + 'static {
-    fn marshal(&self) -> Vec<u8>;                 // Default = the zero / start position
-    fn unmarshal(bytes: &[u8]) -> Option<Self>;
-}
-
-/// The WHOLE per-source contract: two I/O directions + a time anchor. No
-/// reactive glue, no index — those are generic (below). Small: a new backend
-/// is a few hundred lines.
-trait Source<T, P: Position>: Send + Sync {
-    /// PULL — backfill `(from, to]` as pages, oldest-first, no gaps/overlap.
-    /// (evm: chunked `eth_getLogs`.)
-    fn fetch(&self, from: P, to: P) -> PageStream<T, P>;
-
-    /// PUSH — live delivery. The source calls `cb.on_events` / `cb.on_bump`;
-    /// drop the returned handle to stop. THIS is "follow" — not a Chain method.
-    /// (evm: WS `eth_subscribe(logs)` + `newHeads`, or HTTP poll.)
-    /// Returns `tokio_util::task::AbortOnDropHandle` — the idiomatic cancel-on-
-    /// drop task guard that replaces the TS-ism `AsyncDisposable` (TODO R7).
-    fn subscribe(&self, cb: Arc<dyn HistoryCallbacks<T, P>>) -> AbortOnDropHandle<()>;
-
-    /// Wall-clock → position, for time-anchored resume / the matcher.
-    fn time_pos(&self, t: Timestamp) -> Result<P, HistoryError>;
-}
-
-/// The push channel: IMPLEMENTED by the generic store, CALLED by the source.
-trait HistoryCallbacks<T, P: Position>: Send + Sync {
-    fn on_events(&self, page: Page<T, P>);   // live batch, chronological, newest ≥ head
-    fn on_bump(&self, pos: P);               // tip advanced with ZERO events
-                                             //   (new block, no matching logs; or reconnect)
-    fn end(&self) -> Option<P>;              // store's current head — source computes the delta
-}
-```
-
-`on_bump` is the non-obvious piece: it advances the head **without events** (a
-block that matched nothing, or a reconnect), so `snapshots()`/`watch()` wake and
-the gap fills lazily on iterate. Today it's buried in `update_tip_to`; the
-reference makes it a first-class callback, and finality (`best`/`safe`) is just
-more `on_bump` sources.
-
-### Generic reactive layer — chainfold writes this once
-
-```rust
-// Owns the (generic) RangeIndex. Drives Source::fetch on iterate-into-gap and
-// Source::subscribe for live (via a HistoryCallbacks impl it provides). ONE
-// impl for ALL sources — this is where the `range_index/` WIP lands.
-struct HistStore<T, P> {
-    fn snapshots(&self) -> HistStream<T, P>;       // a Hist per head advance (first = current)
-    fn current(&self)   -> Hist<T, P>;
-    fn watch(&self, since: P) -> ItemStream<T, P>; // sugar: snapshots() as an item tail from an anchor
-    fn time_pos(&self, t: Timestamp) -> Result<P, HistoryError>;   // delegates to Source
-    fn follow(&self /* … */) -> AbortOnDropHandle<()>;  // starts Source::subscribe; drop stops
-}
-struct Hist<T, P> { /* iter / split(p) / start / end / is_empty */ }   // reads the store's RangeIndex
-```
-
-The previous `HistBackend` / `HistStoreBackend` (reactive glue re-implemented per
-source, incl. every mock) **collapse into this one generic `HistStore` over a
-`Source`.**
-
-### Client — the `Chain` factory (concrete per source)
-
-```rust
-enum Finality { Latest, Best, Safe }     // Latest wired; Best/Safe = Phase-7 producers
+enum Finality { Latest, Best, Safe }     // Best/Safe mirror Latest until Phase 7
 struct LogFilter { address: Address, topics: [Option<Topic>; 4] }   // the "query" for logs
+struct HeadEvent { number: BlockNumber, hash: BlockHash }
 
-Chain (EvmChain)   fn head(&self, tier)          -> Store<BlockNumber>
-                   fn logs(&self, filter, tier)  -> HistStore<EvmEvent, EvmPosition>
-                   fn blocks(&self, tier)        -> HistStore<Block, BlockNumber>
-Store<T>           fn get(&self) -> T;   fn subscribe(&self) -> Subscription<T>
+EvmChain::new(provider: ChainProvider<P>, config: EvmChainConfig).await  // one head fetch
+chain.head(tier)          -> Store<HeadEvent>                  // the chain-wide clock
+chain.logs(&filter, tier) -> HistStore<EvmEvent, EvmPosition>  // sync, no RPC
+chain.refresh_head().await -> BlockNumber                      // one-shot poll (non-follow)
+// chain.blocks(tier) — planned (M1)
 ```
 
-`Chain` is concrete because it vends *many* item types (`logs`, `blocks`, later
-traces/state) — no single trait/`dyn` expresses that. Per call it builds a
-`Source` and wraps it in the generic `HistStore`:
+`EvmChain` is concrete because it vends *many* item types (`logs`, `blocks`,
+later traces/state) — no single trait/`dyn` expresses that. It owns the
+chain-wide concerns **once**: the `ChainProvider` (which carries the
+`LogCache`, [§12](#12-caching-mechanics)), the single head clock, the
+`time_pos` block-time anchor. `logs(filter, tier)` builds a `LogSpec` +
+fetcher + `RangeIndexStore`, seeds the tip from the current head, spawns the
+store's wiring, and hands back a plain `HistStore` — cheap and synchronous,
+no RPC; cached state materializes lazily.
 
-```rust
-// EvmChain::logs(filter, tier):
-//   let src = EvmLogSource::new(self.provider, self.cache, filter, self.head(tier));
-//   HistStore::over(src)                    // generic;  src: Source<EvmEvent, EvmPosition>
-```
+**Follow mode is fixed at construction** (`EvmChainConfig::follow`), not a
+per-store method: `None` = one-shot (head moves only via `refresh_head()`),
+`Poll`/`Ws` = the chain runs one head clock and every store gets live wiring.
+Log delivery stays **per filter** — `eth_subscribe(logs)` can't express
+OR-topics (decision #11), so only the *head clock* is chain-wide. See
+[§11](#11-data-flow--cold-live-resume) for the wiring variants and the
+false-coverage soundness rule.
 
-So the EVM author writes exactly: `impl Position for EvmPosition`; one
-`EvmLogSource: Source<EvmEvent, EvmPosition>` (fetch = `eth_getLogs`; subscribe =
-WS/poll → `on_events`/`on_bump`; time_pos = block estimate); the concrete
-`EvmChain` factory. **No `HistBackend`, no `HistStoreBackend`.** Cross-source
-uniformity (merge over an EVM chain + a CEX) happens at the `HistStore` level; a
-`dyn Chain` is never needed.
+### Finality lives on the chain
 
-### Finality lives on `Chain`
+`head(tier): Store<HeadEvent>` is the chain-wide clock (pre-R3 it was
+redundantly on every history). The chain holds **one**
+`watch::Sender<HeadEvent>`; `head(Best/Safe)` mirror `Latest` until Phase 7
+wires their producers into the head clock (per-tier channels — a
+confirmation-depth lag for `best`, a `finalized` poll for `safe`). Every
+published head has its block header persisted *first* — the **headers-present
+invariant** — so `LogSpec::resolve` can fill event timestamps synchronously.
+A log store's tip widens a head block to `EvmPosition(block, LogIdx::MAX)`.
 
-`head(tier): Store<BlockNumber>` is the chain-wide clock (was redundantly on
-every history). R3 holds **one** `watch::Sender<BlockNumber>`; `head(Best/Safe)`
-mirror `Latest` until Phase 7 wires their pollers (each a `newHeads`-style
-`on_bump` at a different depth). A log-`HistStore`'s `snapshots()` widens a
-`head(tier)` block → `EvmPosition(block, u32::MAX)`.
+### Deviations from the pre-R3 sketch
 
-### What changed — three iterations
+The sketch that lived here proposed a source-agnostic `Source` trait +
+`HistoryCallbacks` trait. What shipped deviates deliberately:
 
-| | Shipped (§5) | first §5A sketch | **this sketch (`Source` split)** |
+- **No `Source` trait was added** (concrete-first, decision #6). The leaf
+  seam is `RangeSpec` + the concrete wiring in `chain/wiring.rs`. Lift a
+  trait when the blocks source (M1) arrives and shows what's actually common.
+- **`HistBackend`/`HistStoreBackend` survive** — the sketch had them collapse
+  away, but they remain the composition seam merge/combinators/mocks implement
+  directly. What changed: a range-based source no longer hand-writes them;
+  `RangeIndexStore<S>` implements both, once.
+- **`HistoryCallbacks` is not a trait** — `on_events`/`on_bump` are inherent
+  methods on `RangeIndexStore`; wiring holds a `Weak<RangeIndexStore<_>>` and
+  calls them directly.
+- **Follow is not a per-store `subscribe`/`follow` method** — it's fixed at
+  `EvmChain::new`; the chain owns one head clock, each store owns its wiring.
+- **`head(tier)` carries `HeadEvent { number, hash }`**, not a bare block
+  number — the hash rides along for reorg detection and the headers-present
+  invariant.
+- `watch(since)` never became a method — the free `watch_hist` already covers
+  it. `Page` is not a generic struct — it's `RangeSpec::Page` (concrete:
+  `LogPage`).
+
+### Sketch → shipped mapping
+
+| | pre-R3 shipped | R3 sketch | **R3 shipped** |
 |---|---|---|---|
-| Per-source contract | `HistBackend` + `HistStoreBackend` | same | **one `Source`** (fetch + subscribe + time_pos) |
-| Reactive `HistStore` | per source | per source | **generic, written once** |
-| Live / follow | ad-hoc `EvmLogSubscriber` | `Chain::follow` (guessed) | **`Source::subscribe(callbacks)`** |
-| Tip w/ no events | inline `update_tip_to` | — | **`HistoryCallbacks::on_bump`** |
-| Finality tips | on every backend | `Chain::head(tier)` | `Chain::head(tier)` |
-| Backfill unit | items (`iter`) | items | **pages (`fetch` → `Page`)**, range-bounded |
-| Task guard | `AsyncDisposable` (token + abort) | same | **`AbortOnDropHandle`** (tokio-util `rt`) |
+| Per-source contract | hand-written `HistBackend` + `HistStoreBackend` | one `Source` trait | **`RangeSpec` + concrete wiring** (trait deferred to M1) |
+| Reactive `HistStore` | per source | generic | **`RangeIndexStore<S>` — generic, written once** |
+| Live / follow | ad-hoc `EvmLogSubscriber` | `Source::subscribe(callbacks)` | **one chain head clock + per-store wiring tasks** |
+| Tip w/ no events | inline `update_tip_to` | `HistoryCallbacks::on_bump` | **`RangeIndexStore::on_bump`** (single nullable watch tip) |
+| Finality tips | `latest/best/safe` on every backend | `Chain::head(tier)` | **`EvmChain::head(Finality) -> Store<HeadEvent>`** |
+| Backfill unit | items (`iter`) | pages (`fetch` → `Page`) | **`RangeSpec::Page` + injected `Fetcher<Page>`** |
+| Position (de)serialization | `marshal`/`unmarshal: Vec<u8>` on `Position` | — | **`marshal -> serde_json::Value`; `load` on the store** |
+| Task guard | `AsyncDisposable` (token + abort) | `AbortOnDropHandle` | **`AbortOnDropHandle` + `Weak` back-refs** (R7) |
 
 ---
 
@@ -666,17 +698,19 @@ vanish once anchors advance past them. Persist matched pairs in your app
 
 ## 9. The EVM source layer
 
-The concrete `HistStoreBackend` for EVM log streams (`feature = "evm"`).
+The concrete client for EVM log streams (`feature = "evm"`).
 
 | Component | Role |
 |---|---|
-| **`EvmLogHistory<P>`** | `HistStoreBackend<EvmEvent, EvmPosition>` over one log filter. Owns the `LogIndex`, the three tip stores, and drives the subscriber. |
-| **`LogIndex`** | In-memory `BTreeMap<BlockPos, Range>` per filter. Empty-range tombstones, singleflight via `Arc<Notify>` per range, lazy first-touch load from `LogCache`, async drain to SQLite. **The hot path.** |
-| **`CacheDb` → `LogCache` / `Erc20Cache` / `EventSignatureCache`** | Durable SQLite over one shared `Arc<Mutex<Connection>>`. Narrow per-concern views; **never on the live path.** |
-| **`EvmLogSubscriber`** | `eth_subscribe(logs)` over WebSocket, or HTTP poll fallback. Reconnect-with-backoff (100 ms → 30 s); gap-fill on reconnect is invisible to the consumer. Drop cancels via `CancellationToken`. |
-| **`OwnedErc20<P>`** | Two narrow `EvmLogHistory` (`topic1 = owner` outgoing, `topic2 = owner` incoming) sharing one cache, merged by `(block, log_index)`. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`). |
+| **`EvmChain<P>`** | The per-chain entity. Owns the `ChainProvider`, **one** head clock (`newHeads` or poll; headers persisted before publishing), and vends per-filter stores via `logs(&LogFilter, Finality)` (sync, no RPC). Follow mode fixed at construction (`EvmChainConfig`); one-shot chains advance via `refresh_head()`. |
+| **`RangeIndexStore<S: RangeSpec>`** | The reactive layer, written once: `HistStoreBackend` + `HistBackend` over a `RangeIndex<S>` plus a single nullable `end` tip (`watch::Sender<Option<PubPos>>`; monotonic `on_bump`, `on_events` = insert page + bump). Wiring tasks attach as `AbortOnDropHandle`s holding `Weak` back-refs. |
+| **`RangeIndex<S>`** | Generic in-memory `BTreeMap<S::Pos, Range>` per source stream. Empty-range tombstones, singleflight via `Arc<Notify>` per range, lazy first-touch window load, async drain to SQLite. **The hot path.** |
+| **`LogSpec`** | The `RangeSpec` for EVM logs: `LogRef` tree items, sync `resolve` to `EvmEvent` (headers-present invariant), persist/load against `LogCache`, `EvmPosition` load. |
+| **`CacheDb` → `LogCache` / `Erc20Cache` / `EventSignatureCache`** | Durable SQLite over one shared connection. Narrow per-concern views; **never on the live path.** |
+| **chain wiring** (`chain/wiring.rs`) | Per-store tasks driving `on_events`/`on_bump`: mirror-head (one-shot), eager gap-fill (poll follow), or a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session (ws follow). Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
+| **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), merged by `(block, log_index)`. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
-| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId`, so the layer reads the chain for free instead of re-issuing `eth_chainId`. |
+| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Shared<LogCache>`**. Internalizes `rpc_span` instrumentation + error mapping (inherent `get_block_number`/`get_logs`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
 | **`aligned_block_ranges`** | Snaps RPC ranges to `batch_size` boundaries so concurrent consumers hit the same cache entries. |
 
 **Position bridging:** `EvmPosition(0, 0)` ↔ `BlockPos::Bottom`; otherwise
@@ -692,19 +726,20 @@ whole Transfer stream filtered client-side. See design decision #11 in
 
 ## 10. Storage model
 
-Two tiers. The **in-memory `LogIndex`** is the hot path; **SQLite** is the
+Two tiers. The **in-memory `RangeIndex`** is the hot path; **SQLite** is the
 durable backfill store, drained to asynchronously and never blocking a live
 event or a warm read.
 
-### In-memory: `LogIndex`
+### In-memory: `RangeIndex<S: RangeSpec>`
 
-A per-filter `BTreeMap` of scanned ranges over block positions. Scanned-ness
+A per-source-stream `BTreeMap` of scanned ranges over tree positions
+(`LogSpec`: per-filter, keyed by `BlockPos`). Scanned-ness
 is **first-class**: a range that was scanned and found empty is stored as a
 *tombstone* alongside filled ranges.
 
 ```mermaid
 flowchart LR
-    subgraph LogIndex["LogIndex — BTreeMap&lt;BlockPos, Range&gt; (per filter_hash)"]
+    subgraph RangeIndex["RangeIndex&lt;LogSpec&gt; — BTreeMap&lt;BlockPos, Range&gt; (per filter_hash)"]
         R1["[100..200]<br/>filled: 3 logs"]
         R2["[200..500]<br/>EMPTY tombstone<br/>(scanned, nothing here)"]
         R3["[500..640]<br/>placeholder<br/>(fetch in flight — Notify)"]
@@ -811,18 +846,19 @@ a small `kv` table, independent of the log cache.
 ## 11. Data flow — cold, live, resume
 
 The cold-backfill path and the live-push path share the same in-memory
-`LogIndex`; SQLite sits under the cold path and is drained-to under the live
-path, never blocking either.
+`RangeIndex`; SQLite sits under the cold path and is drained-to under the
+live path, never blocking either.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant App as Consumer
     participant Hist as Hist::iter
-    participant Idx as LogIndex
+    participant Idx as RangeIndex
     participant Drain as drain task
     participant DB as LogCache (SQLite)
-    participant Sub as EvmLogSubscriber
+    participant Wire as ws wiring task
+    participant Clock as head clock
     participant RPC as alloy Provider
 
     Note over App,RPC: COLD path — iter into an uncached gap
@@ -840,21 +876,24 @@ sequenceDiagram
     Idx-->>Hist: stream items
     Hist-->>App: Positioned(EvmEvent, EvmPosition)
 
-    Note over App,RPC: LIVE path — subscribe() → push
-    App->>Sub: subscribe(transport)
-    Sub->>RPC: eth_subscribe(logs) + newHeads
-    RPC-->>Sub: log / block stream
-    Sub->>Idx: insert_page (synchronous BTree update)
-    Sub->>Idx: bump latest_store (watch Sender)
+    Note over App,RPC: LIVE path — follow mode (fixed at EvmChain::new)
+    Clock->>RPC: eth_subscribe(newHeads) — ONE per chain
+    Wire->>RPC: eth_subscribe(logs) — narrow, per filter store
+    RPC-->>Wire: log push
+    Wire->>Idx: on_events → insert_page (synchronous BTree update)
+    Wire->>Wire: on_bump → end tip advances (watch Sender)
     Idx-->>Drain: send(LogPage) — off the hot path
     Drain->>DB: persist
-    Idx-->>App: watch_hist consumer wakes, yields item
+    Wire-->>App: watch_hist consumer wakes, yields item
+    RPC-->>Clock: new head (no matching logs)
+    Clock->>DB: persist header, then publish
+    Clock-->>Wire: head advance → empty coverage page + bump
 ```
 
 **Resume / subscribe-from-the-past** unifies the two: `watch_hist(&store,
 saved_anchor)` splits each fresh snapshot at the running anchor and iterates
 only the tail. Early snapshots walk the cold cache; once the walk reaches the
-tip, new snapshots (driven by the live subscriber bumping `latest_store`)
+tip, new snapshots (driven by the wiring bumping the store's `end` tip)
 extend the window seamlessly. The consumer never distinguishes "history" from
 "live", and reconnect gap-fill is invisible.
 
@@ -891,7 +930,7 @@ flowchart TB
    boundaries (default 1000 blocks) so consumers asking slightly different
    ranges collide on the same cache entries.
 4. **SQLite off the live path.** A WS-delivered log goes
-   `Subscriber → LogIndex → consumer` synchronously; the durable write is
+   `wiring → RangeIndex → consumer` synchronously; the durable write is
    drained in the background. Warm reads and live events never wait on disk.
 
 The retry layer (`rpc_retry_layer`) wraps transient RPC failures with bounded
@@ -915,9 +954,11 @@ flowchart LR
   queries filter them at read time. Nothing is truncated.
 - **Scanned ranges self-invalidate.** A range whose `end_block_hash` is
   reorged is refetched.
-- **Three reactive tip stores** on every `HistStore`: `latest` (fully wired),
-  `best` (Phase 7: `latest − confirmation_depth`), `safe` (Phase 7: RPC
-  `finalized`, else `latest − 64`).
+- **Finality is chain-wide** (R3): the `Finality` tier on
+  `EvmChain::head(tier)` / `EvmChain::logs(filter, tier)`, not per-store
+  accessors. `Latest` is fully wired; `Best`/`Safe` mirror `Latest` until
+  Phase 7 wires their producers (`latest − confirmation_depth`; RPC
+  `finalized`, else `latest − 64`) into the head clock.
 - **Compaction runs only below `safe`** so a tip reorg can never invalidate a
   merged range (decision #8).
 - **Consumer-side recovery today:** track `block_hash` on the last consumed
@@ -928,52 +969,56 @@ flowchart LR
 
 ## 14. Ownership & lifetime
 
-Every cancellable thing is owned by either an `Arc<T>` (shared) or an
-`AsyncDisposable` (single-owner; drop cancels). **No raw `tokio::spawn`
-survives its owning struct.**
+Every cancellable thing is owned by either an `Arc`/`Shared` handle (shared)
+or an `AbortOnDropHandle` (single-owner; drop aborts — R7). **No raw
+`tokio::spawn` survives its owning struct.** Background tasks hold only
+`Weak` back-references to the store that owns them, so there is no
+keep-alive cycle.
 
 ```mermaid
 flowchart LR
     subgraph OWNED["Consumer-held"]
-        OwnedErc20Box["OwnedErc20&lt;P&gt;<br/>owns 2 × Arc&lt;EvmLogHistory&gt;"]
-        SubscriberBox["EvmLogSubscriber<br/>(from .subscribe())"]
-        MergedBox["HistStore from merge<br/>(owns tip-aggregator tasks)"]
+        ChainBox["EvmChain&lt;P&gt;<br/>owns the head clock handle"]
+        StoreBox["HistStore from chain.logs()<br/>store owns its wiring handle"]
+        MergedBox["HistStore from merge<br/>(no tasks — snapshots select children)"]
     end
     subgraph BG["Background tasks — abort on owner drop"]
-        Watcher["WS / Poll watcher"]
-        DrainTask["LogIndex drain task"]
-        Aggr["merged latest/best/safe aggregators"]
+        Clock["head clock (newHeads / poll)"]
+        Wiring["per-store wiring<br/>(mirror / poll-fill / ws session)"]
+        DrainTask["RangeIndex drain task"]
     end
-    subgraph SHARED["Shared (Arc)"]
-        CacheA["Arc&lt;CacheDb&gt; (SQLite conn)"]
-        IdxA["Arc&lt;LogIndex&gt; (per filter_hash)"]
+    subgraph SHARED["Shared handles"]
+        CacheA["Shared&lt;LogCache&gt; (SQLite conn)"]
+        IdxA["Arc&lt;RangeIndex&gt; (per filter_hash)"]
     end
 
-    OwnedErc20Box --> IdxA
-    OwnedErc20Box --> CacheA
-    SubscriberBox -. drop aborts .-> Watcher
-    Watcher -- insert_page --> IdxA
+    ChainBox -. drop aborts .-> Clock
+    StoreBox -. drop aborts .-> Wiring
+    Wiring -. Weak upgrade .-> IdxA
+    Clock -- watch Sender --> Wiring
+    Wiring -- on_events --> IdxA
     IdxA -- attach_drain --> DrainTask
     DrainTask -- writes --> CacheA
-    MergedBox -. drop aborts .-> Aggr
+    Clock -- persist headers --> CacheA
 
     classDef bg fill:#fff4e8,stroke:#cc8844
     classDef shared fill:#e8f5e8,stroke:#44aa44
-    class Watcher,DrainTask,Aggr bg
+    class Clock,Wiring,DrainTask bg
     class CacheA,IdxA shared
 ```
 
-**The watch-coalescing footgun.** The merge tip aggregators fan per-source
-`Store<P>` subscriptions into a synthesized store. The tempting bug: skip each
-subscription's first emission as "already represented." **This loses updates**
-— tokio `watch` coalesces, so an update arriving between subscribe-time and the
-task's first poll shows up *as* the first emission and gets dropped. **The rule:
-propagate every emission** (redundant initial sends are harmless; the
-consumer-side watch coalesces too). Pinned by
-`snapshots_advance_when_any_source_appends`. (The matcher used to have the same
-aggregator for `changes()`; **R4 removed it** — the reactive `iter()` now drives
-directly off both `snapshots()` streams via `tokio::select!`, so there's no
-synthesized channel to mis-seed. The merge aggregators go the same way in R3.)
+**The watch-coalescing footgun.** Any task driven by a `tokio::sync::watch`
+subscription must propagate **every** emission. The tempting bug: skip the
+subscription's first emission as "already represented by the channel's init
+value." **This loses updates** — `watch` coalesces, so an update arriving
+between subscribe-time and the task's first poll shows up *as* the first
+emission and gets dropped. **The rule: propagate every emission** (redundant
+sends are harmless; the consumer-side watch coalesces too). Pinned by
+`snapshots_advance_when_any_source_appends`. The two historical instances —
+the matcher's `changes()` aggregator (removed by R4) and merge's tip
+aggregators (removed by R3) — are both gone; today's merge `snapshots()`
+seeds one snapshot per child before `select_all`ing their streams, which is
+the same rule expressed structurally.
 
 ---
 
@@ -1060,7 +1105,7 @@ swapped with a block number, a topic can't be confused with a hash.
 | `Topic` | newtype over `B256` | owns the address↔topic relationship (`From<Address>` left-pads, `.address()` extracts); unwraps to `B256` at the alloy `Filter`/`Log` boundary |
 | `ChainId` | `u64` | `#[serde(transparent)]` + `Ord` + `Display`; its `ToSql` lives in the *cache* layer so the domain type stays persistence-free |
 | `BlockNumber` | `u64` | **affine**: block ± u64 = block; block − block = u64 via `.get()`. `#[serde(transparent)]` keeps the `EvmPosition` marshal byte-identical |
-| `LogIdx` | `u32` | per-block log index. Named `LogIdx`, *not* `LogIndex`, to avoid colliding with the range-tree `LogIndex` |
+| `LogIdx` | `u32` | per-block log index. Named `LogIdx`, *not* `LogIndex` — that name belonged to the pre-R3 range tree (now `RangeIndex`) |
 | `FilterHash` | `[u8; 32]` | the BLAKE3 cache partition key; not an EVM hash, so a newtype (`ToSql` in the cache layer) |
 | `Timestamp` | `u64` | source-agnostic (lives in `arch.rs`); the unit `time_pos`/`act_and_wait` speak |
 | `SourceKey` | `String` | the `MergedPos.positions` / `MergedItem.source_key` key; `#[serde(transparent)]` + `Borrow<str>` |
@@ -1102,14 +1147,14 @@ contract (e.g. a second walk of a cached range issues zero `eth_getLogs`).
 Coverage runs via `cargo-llvm-cov`, uploaded to Codecov (patch ≥ 80%).
 
 **Concurrency coverage.** `concurrent_searches_in_same_gap_fire_one_fetch`
-(`log_index.rs:586`) pins the shared-BTree singleflight: 5 concurrent walkers
-over one `Arc<LogIndex>` and the same cold gap → 1 fetch, all 5 see the item.
-It's `#[tokio::test]` (current-thread), so it covers *concurrent* (interleaved),
-not *parallel* (multi-core), access. Known gaps: no `multi_thread`/loom test for
-true data races; no test for concurrent walkers over *disjoint/overlapping*
-ranges on one BTree; no reader-vs-writer test (a walk in flight while the
-subscriber's `insert_page` mutates the same BTree). These matter more once the
-reactive-core refactor reshapes who reads the shared index.
+(`src/evm/range_index.rs` tests) pins the shared-BTree singleflight: 5
+concurrent walkers over one `Arc<RangeIndex<LogSpec>>` and the same cold gap
+→ 1 fetch, all 5 see the item. It's `#[tokio::test]` (current-thread), so it
+covers *concurrent* (interleaved), not *parallel* (multi-core), access. Known
+gaps (tracked as R6 in `TODO.md`): no `multi_thread`/loom test for true data
+races; no test for concurrent walkers over *disjoint/overlapping* ranges on
+one BTree; no reader-vs-writer test (a walk in flight while the ws wiring's
+`on_events` mutates the same BTree).
 
 ---
 
@@ -1119,17 +1164,17 @@ Canonical plan lives in [`refactor.md`](./refactor.md). The biggest unbuilt
 pieces:
 
 - **Phase 7 — pruning + `best`/`safe` wiring** *(next eligible)*.
-  `LogIndex::prune_older_than` (drop item payloads, keep tombstones),
-  `compact_in_memory(up_to_block)`, real `best`/`safe` polling, bounded RSS
-  under indefinite follow. `LogCache::compact_ranges` (durable side) already
-  exists and is tested; the in-memory eviction is what's missing.
-- **`RangeIndex` generalization** *(uncommitted WIP in `src/evm/range_index/`,
-  not yet wired into the module tree)*. Refactors the log-specific `LogIndex`
-  into a generic `RangeIndex` over a `RangeSpec` seam (`IndexPos` +
-  `Item`/`Full`/`Page` + `resolve`/`persist`/`load_window`), so the same
-  singleflight/gap-fill/streaming machinery can back both EVM **logs** and a
-  future EVM **blocks** history. Foundation for the histories-first `blocks`
-  CLI command.
+  `RangeIndex::prune_older_than` (drop item payloads, keep tombstones),
+  `compact_in_memory(up_to_block)`, real `best`/`safe` producers wired into
+  `EvmChain`'s head clock, bounded RSS under indefinite follow.
+  `LogCache::compact_ranges` (durable side) already exists and is tested;
+  the in-memory eviction is what's missing.
+- **EVM blocks source** *(M1)*. A `BlockSpec: RangeSpec` reusing the same
+  `RangeIndex`/`RangeIndexStore` machinery (shipped generic with R3) to back
+  `chain.blocks(tier) -> HistStore<Block, BlockNumber>` — foundation for the
+  histories-first `blocks` CLI command. When it lands, consider lifting a
+  source-agnostic `Source` trait over the per-source wiring (deferred from
+  §5A per decision #6, concrete-first).
 - **Reducer** — the matcher's sibling (stateful monotonic fold over one
   stream, positioned by a vector of source positions). `Erc20Balance` rebuild
   gates on it.

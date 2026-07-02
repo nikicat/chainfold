@@ -308,6 +308,24 @@ feature.
 
 </details>
 
+## MergedPos: no typed constructor for consumers (post-R3 friction)
+
+Surfaced twice during the R3 consumer migration (erc20_explorer, CLI erc20):
+a consumer holding a concrete position (e.g. one `EvmPosition` meant as a
+uniform lower bound across both merge sources) cannot build a `MergedPos`
+directly — `MergedPos::new` went `pub(crate)` when positions became erased
+anchor objects. The documented path is a marshal/load round-trip:
+`p.marshal()` → JSON object `{key: value, …}` → `merged_store.load(value)`,
+which turns an infallible construction into `Option` + error plumbing at
+every `split` bound.
+
+Candidate fix: a small public helper on the merge layer — e.g.
+`MergedHistStore::pos_for_all<P: Position>(p: P) -> MergedPos` (apply one
+typed position to every source key; anchor it per-key) or a public keyed
+builder taking `(SourceKey, impl Position)` pairs. Decide together with
+[[TODO(merge-erasure)]] in `src/merge.rs` — a monomorphic same-`P` merge
+would dissolve this case entirely.
+
 ## R8+ — (incoming)
 
 _Reserved for the additional points the user will add._
