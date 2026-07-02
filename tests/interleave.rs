@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
-    Positioned, Store, Timestamp, watch_hist,
+    Positioned, Signal, Timestamp, watch_hist,
 };
 use chainfold::combinators::{
     FilteredItem, PosMapper, filter_hist_store, map_positions, since_hist_store,
@@ -212,6 +212,11 @@ impl<P: Position + FromValue + 'static> Source<P> {
         self.self_ref.get().unwrap().upgrade().unwrap()
     }
 
+    /// The tip as a reactive [`Signal`]; `.subscribe()` streams its changes.
+    fn tip_signal(&self) -> Signal<P> {
+        Signal::new(self.tip.subscribe())
+    }
+
     fn hist_store(self: &Arc<Self>) -> HistStore<CommonEvent, P> {
         HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<CommonEvent, P>>)
     }
@@ -233,7 +238,7 @@ impl<P: Position + FromValue + 'static> HistBackend<CommonEvent, P> for Source<P
 impl<P: Position + FromValue + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
     fn snapshots(&self) -> HistStream<CommonEvent, P> {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
-        let mut sub = Store::new(self.tip.subscribe()).subscribe();
+        let mut sub = self.tip_signal().subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)

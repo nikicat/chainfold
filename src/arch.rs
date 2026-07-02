@@ -152,17 +152,23 @@ impl<T, P: Position> Positioned<T, P> {
 }
 
 // ============================================================
-// Store
+// Signal
 // ============================================================
 
-/// Reactive value that updates as upstream state changes.
+/// A reactive value: the current value plus a stream of its changes.
 ///
-/// Inspired by Svelte/Zustand stores.
-pub struct Store<T: Clone + Send + Sync> {
+/// A thin newtype over [`tokio::sync::watch::Receiver`] — "current value +
+/// change notifications" is exactly what `watch` provides. The load-bearing
+/// half is the synchronous [`get`](Signal::get) read; [`subscribe`](Signal::subscribe)
+/// adds the change stream. Named `Signal` (à la SolidJS/Leptos), not `Store`, to keep
+/// the reactive *value* distinct from the `*Store` types (`HistStore`,
+/// `LogCache`'s stores, `AnchorStore`, `RangeIndexStore`), which are backing
+/// stores, not reactive values.
+pub struct Signal<T: Clone + Send + Sync> {
     rx: watch::Receiver<T>,
 }
 
-impl<T: Clone + Send + Sync> Clone for Store<T> {
+impl<T: Clone + Send + Sync> Clone for Signal<T> {
     fn clone(&self) -> Self {
         Self {
             rx: self.rx.clone(),
@@ -170,7 +176,7 @@ impl<T: Clone + Send + Sync> Clone for Store<T> {
     }
 }
 
-impl<T: Clone + Send + Sync + 'static> Store<T> {
+impl<T: Clone + Send + Sync + 'static> Signal<T> {
     pub fn new(rx: watch::Receiver<T>) -> Self {
         Self { rx }
     }

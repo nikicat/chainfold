@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
-    Positioned, Store, Timestamp, act_and_wait, watch_hist,
+    Positioned, Signal, Timestamp, act_and_wait, watch_hist,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -77,6 +77,11 @@ impl MockSource {
         self.self_ref.get().unwrap().upgrade().unwrap()
     }
 
+    /// The tip as a reactive [`Signal`]; `.subscribe()` streams its changes.
+    fn tip_signal(&self) -> Signal<MockPos> {
+        Signal::new(self.tip.subscribe())
+    }
+
     fn hist_store(self: &Arc<Self>) -> HistStore<MockEvent, MockPos> {
         HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
     }
@@ -103,7 +108,7 @@ impl HistBackend<MockEvent, MockPos> for MockSource {
 impl HistStoreBackend<MockEvent, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<MockEvent, MockPos> {
         let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
-        let mut sub = Store::new(self.tip.subscribe()).subscribe();
+        let mut sub = self.tip_signal().subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)

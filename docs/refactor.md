@@ -19,7 +19,7 @@
 > | 5b — OwnedErc20 follow-up | ✅ Done (2026-05-23) | Two narrow filters + merge; `erc20_explorer --owner` rewired. |
 > | 6 — Matcher | ✅ Done (2026-05-23) | `BaseMatcher` / `AnchoredMatcher` / `AnchorStore` (in-mem + SQLite). |
 > | Structural cleanup | ✅ Done (2026-05-26) | Function-level dedup + module-tree splits + `mod.rs`→`foo.rs` migration (see below). |
-> | Reactive core (R1–R4, R7) | ✅ Done (2026-07-02) | `EvmChain` + generic `RangeIndexStore`; finality → chain; object positions + store-owned `load`. Canonical log: `TODO.md` R-series + `ARCHITECTURE.md` §5A. |
+> | Reactive core (R1–R5, R7) | ✅ Done (2026-07-02) | `EvmChain` + generic `RangeIndexStore`; finality → chain; object positions + store-owned `load`; R5 = `Store<T>`→`Signal<T>` rename (kept newtype + `get()`; unbox declined). Canonical log: `TODO.md` R-series + `ARCHITECTURE.md` §5A. **R6 (concurrency tests) still open.** |
 > | **7 — Pruning + best/safe wiring** | ⏳ **Pending — next eligible chunk** | In-memory eviction + real `Best`/`Safe` producers on `EvmChain` (revised by R3, see below). |
 > | Bridge decoder | ⏳ Deferred | Generic `--match-on` extractor ships; ABI-aware impls per bridge are app-specific. |
 > | Same-`P` merge alias | ✅ Subsumed (2026-07-02) | The merge split made same-`P` the primary API: `merge_hist_stores` is the monomorphic ordered merge. |

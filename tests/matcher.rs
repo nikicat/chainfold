@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
-    Positioned, Store, Timestamp,
+    Positioned, Signal, Timestamp,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, BaseMatcher, InMemoryAnchorStore, Match, MatchFn, MatchInput,
@@ -92,6 +92,11 @@ impl MockSource {
         self.self_ref.get().unwrap().upgrade().unwrap()
     }
 
+    /// The tip as a reactive [`Signal`]; `.subscribe()` streams its changes.
+    fn tip_signal(&self) -> Signal<MockPos> {
+        Signal::new(self.tip.subscribe())
+    }
+
     fn hist_store(self: &Arc<Self>) -> HistStore<Ev, MockPos> {
         HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<Ev, MockPos>>)
     }
@@ -117,7 +122,7 @@ impl HistBackend<Ev, MockPos> for MockSource {
 impl HistStoreBackend<Ev, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<Ev, MockPos> {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-        let mut sub = Store::new(self.tip.subscribe()).subscribe();
+        let mut sub = self.tip_signal().subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)

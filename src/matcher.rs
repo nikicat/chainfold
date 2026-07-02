@@ -563,7 +563,7 @@ pub type MatcherStateStream<Src, Dst, Output, SP, DP> = Pin<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arch::{HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream, Store};
+    use crate::arch::{HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream, Signal};
     use futures_core::Stream;
     use futures_util::stream::{iter, poll_fn};
     use std::pin::Pin as StdPin;
@@ -635,6 +635,11 @@ mod tests {
             self.self_ref.get().unwrap().upgrade().unwrap()
         }
 
+        /// The tip as a reactive [`Signal`]; `.subscribe()` streams its changes.
+        fn tip_signal(&self) -> Signal<MockPos> {
+            Signal::new(self.tip.subscribe())
+        }
+
         fn hist_store(self: &Arc<Self>) -> HistStore<Ev, MockPos> {
             HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<Ev, MockPos>>)
         }
@@ -660,7 +665,7 @@ mod tests {
     impl HistStoreBackend<Ev, MockPos> for MockSource {
         fn snapshots(&self) -> HistStream<Ev, MockPos> {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-            let mut sub = Store::new(self.tip.subscribe()).subscribe();
+            let mut sub = self.tip_signal().subscribe();
             Box::pin(poll_fn(move |cx| {
                 StdPin::new(&mut sub)
                     .poll_next(cx)
