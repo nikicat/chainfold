@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
-use chainfold::arch::{HistStore, Position, Positioned, watch_hist};
+use chainfold::arch::{Positioned, watch_hist};
 use chainfold::evm::{
-    CacheDb, Erc20Metadata, EvmChain, EvmEvent, EvmPosition, IN_KEY, OUT_KEY, OwnedErc20,
-    apply_transfer, fetch_erc20_metadata,
+    CacheDb, Erc20Metadata, EvmChain, EvmEvent, EvmPosition, OwnedErc20, apply_transfer,
+    fetch_erc20_metadata,
 };
-use chainfold::merge::{MergedItem, MergedPos};
+use chainfold::merge::{MergedItem, OrderedPos};
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 
@@ -94,7 +94,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         if follow.is_follow() {
             // The chain was built with a poll transport, so both inner
             // stores' tips are already driven live by the head clock.
-            let mut stream = watch_hist(&merged_hs, merged_pos_for(&merged_hs, start)?);
+            let mut stream = watch_hist(&merged_hs, OrderedPos::from(start));
             let mut count = 0;
             while let Some(item) = stream.next().await {
                 if render_transfer(
@@ -111,8 +111,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             }
         } else {
             let hist = merged_hs.next().await;
-            let (_, after_start) = hist.split(merged_pos_for(&merged_hs, start)?);
-            let (window, _) = after_start.split(merged_pos_for(&merged_hs, end)?);
+            let (_, after_start) = hist.split(OrderedPos::from(start));
+            let (window, _) = after_start.split(OrderedPos::from(end));
             let mut stream = window.iter();
             let mut count = 0;
             while let Some(item) = stream.next().await {
@@ -149,7 +149,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 /// running balance when enabled, and print. Returns `true` if printed —
 /// the caller increments its count on `true`.
 fn render_transfer(
-    item: &Positioned<MergedItem<EvmEvent>, MergedPos>,
+    item: &Positioned<MergedItem<EvmEvent, EvmPosition>, OrderedPos<EvmPosition>>,
     balance: &mut U256,
     last_pos: &mut Option<EvmPosition>,
     count: usize,
@@ -173,21 +173,4 @@ fn render_transfer(
         fmt::print_transfer(&positioned, count, ctx);
     }
     true
-}
-
-/// Build the two-key `MergedPos` representing `p` for both the `in` and
-/// `out` sub-histories. `MergedPos` construction is owned by the merged
-/// store, so this round-trips `p` through [`HistStore::load`] with a JSON
-/// object keyed like the store's sources. Used to bracket the merged stream
-/// when the caller has only an [`EvmPosition`] (e.g. from `resolve_range`).
-fn merged_pos_for(
-    hs: &HistStore<MergedItem<EvmEvent>, MergedPos>,
-    p: EvmPosition,
-) -> Result<MergedPos, Box<dyn std::error::Error>> {
-    let value = p.marshal();
-    let mut obj = serde_json::Map::new();
-    obj.insert(IN_KEY.to_owned(), value.clone());
-    obj.insert(OUT_KEY.to_owned(), value);
-    hs.load(serde_json::Value::Object(obj))
-        .ok_or_else(|| "internal: merged store rejected a per-source anchor".into())
 }

@@ -1,8 +1,16 @@
-//! Phase 5 acceptance: heterogeneous-source merge + keyed `MergedPos`.
+//! Cross-family interleave over an app-defined position enum — the
+//! **multi-chain wallet recipe** (Phase 5 acceptance, reshaped by the
+//! ordered/interleave merge split).
 //!
-//! Source-agnostic — uses two mock source types with *different* `Position`
-//! types (`MockPosU64` and `MockPosNamed`) to exercise the type-erasure
-//! path. Merge primitives must not reference any concrete source.
+//! Source-agnostic — two mock source families with *different* `Position`
+//! types (`MockPosU64` and `MockPosNamed`) unify into one closed enum
+//! (`DuoPos`) via `map_positions`, then merge with
+//! `interleave_hist_stores`. This is the pattern an app uses to track a
+//! runtime-configured set of sources across compile-time-bounded families
+//! (EVM/Tron/BTC/…): the chain *set* is dynamic (source keys), the chain
+//! *families* are the enum's variants. Also pins the tagged-anchor marshal
+//! round-trip across a restart (rebuild stores, reload the saved JSON
+//! anchor, resume exactly).
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -14,8 +22,10 @@ use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Store, Timestamp, watch_hist,
 };
-use chainfold::combinators::{FilteredItem, filter_hist_store, since_hist_store};
-use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, merge_hist_stores};
+use chainfold::combinators::{
+    FilteredItem, PosMapper, filter_hist_store, map_positions, since_hist_store,
+};
+use chainfold::merge::{MergedItem, MergedPos, SourceKey, interleave_hist_stores};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use futures_util::stream::{iter, poll_fn};
@@ -23,7 +33,7 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 
 // ============================================================
-// Source A — integer position, "trade" events
+// Source family A — integer positions
 // ============================================================
 
 /// Reconstruct a position from a [`Position::marshal`] value. Deserialization
@@ -49,8 +59,7 @@ impl FromValue for MockPosU64 {
 }
 
 // ============================================================
-// Source B — variable-length-bytes position, "burn" events.
-// Demonstrates a *different* Position type sharing the same item type.
+// Source family B — string positions ("n01", "n02", … alphabetical)
 // ============================================================
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
@@ -65,6 +74,80 @@ impl Position for MockPosNamed {
 impl FromValue for MockPosNamed {
     fn from_value(v: &serde_json::Value) -> Option<Self> {
         v.as_str().map(|s| MockPosNamed(s.to_owned()))
+    }
+}
+
+// ============================================================
+// DuoPos — the app's closed position enum over both families
+// ============================================================
+
+/// The app-defined unification: one variant per compiled-in source family.
+/// Cross-variant `Ord` is arbitrary (derive: variant order) and never
+/// consulted by the interleave — positions are only compared within one
+/// source key, which always carries one variant.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+enum DuoPos {
+    U64(MockPosU64),
+    Named(MockPosNamed),
+}
+
+impl Default for DuoPos {
+    fn default() -> Self {
+        Self::U64(MockPosU64::default())
+    }
+}
+
+impl Position for DuoPos {
+    /// Tagged so `load` can pick the family: `{"u64": ..}` / `{"named": ..}`.
+    fn marshal(&self) -> serde_json::Value {
+        match self {
+            Self::U64(p) => serde_json::json!({ "u64": p.marshal() }),
+            Self::Named(p) => serde_json::json!({ "named": p.marshal() }),
+        }
+    }
+}
+
+fn duo_from_value(v: &serde_json::Value) -> Option<DuoPos> {
+    let obj = v.as_object()?;
+    if let Some(inner) = obj.get("u64") {
+        return MockPosU64::from_value(inner).map(DuoPos::U64);
+    }
+    MockPosNamed::from_value(obj.get("named")?).map(DuoPos::Named)
+}
+
+/// Embeds family A into [`DuoPos`].
+struct U64Mapper;
+
+impl PosMapper<MockPosU64, DuoPos> for U64Mapper {
+    fn wrap(&self, p: MockPosU64) -> DuoPos {
+        DuoPos::U64(p)
+    }
+    fn unwrap(&self, q: DuoPos) -> Option<MockPosU64> {
+        match q {
+            DuoPos::U64(p) => Some(p),
+            DuoPos::Named(_) => None,
+        }
+    }
+    fn load(&self, value: serde_json::Value) -> Option<DuoPos> {
+        duo_from_value(&value)
+    }
+}
+
+/// Embeds family B into [`DuoPos`].
+struct NamedMapper;
+
+impl PosMapper<MockPosNamed, DuoPos> for NamedMapper {
+    fn wrap(&self, p: MockPosNamed) -> DuoPos {
+        DuoPos::Named(p)
+    }
+    fn unwrap(&self, q: DuoPos) -> Option<MockPosNamed> {
+        match q {
+            DuoPos::U64(_) => None,
+            DuoPos::Named(p) => Some(p),
+        }
+    }
+    fn load(&self, value: serde_json::Value) -> Option<DuoPos> {
+        duo_from_value(&value)
     }
 }
 
@@ -85,16 +168,18 @@ fn ev(time: u64, label: &str) -> CommonEvent {
     }
 }
 
-fn cmp_by_time(a: &MergedItem<CommonEvent>, b: &MergedItem<CommonEvent>) -> Ordering {
+fn cmp_by_time(
+    a: &MergedItem<CommonEvent, DuoPos>,
+    b: &MergedItem<CommonEvent, DuoPos>,
+) -> Ordering {
     a.value.time.cmp(&b.value.time)
 }
 
 // ============================================================
 // Generic in-memory mock source over (P, Item).
 //
-// Source A uses (MockPosU64, CommonEvent) — items at pos = 1-based index.
-// Source B uses (MockPosNamed, CommonEvent) — items at named positions
-// like "n01", "n02" (alphabetically ordered).
+// Family A uses (MockPosU64, CommonEvent); family B uses
+// (MockPosNamed, CommonEvent).
 // ============================================================
 
 struct Source<P: Position + FromValue + 'static> {
@@ -170,9 +255,29 @@ impl<P: Position + FromValue + 'static> HistStoreBackend<CommonEvent, P> for Sou
     }
 }
 
+// ============================================================
+// Wallet-recipe wiring: lift both families into DuoPos, interleave.
+// ============================================================
+
+type WalletStore = HistStore<MergedItem<CommonEvent, DuoPos>, MergedPos<DuoPos>>;
+
+fn wallet_store(alpha: &Arc<Source<MockPosU64>>, named: &Arc<Source<MockPosNamed>>) -> WalletStore {
+    let mut sources: BTreeMap<SourceKey, HistStore<CommonEvent, DuoPos>> = BTreeMap::new();
+    sources.insert("alpha".into(), map_positions(alpha.hist_store(), U64Mapper));
+    sources.insert(
+        "named".into(),
+        map_positions(named.hist_store(), NamedMapper),
+    );
+    interleave_hist_stores(sources, cmp_by_time)
+}
+
+fn named_pos(s: &str) -> MockPosNamed {
+    MockPosNamed(s.to_owned())
+}
+
 async fn collect_merged(
-    hist: Hist<MergedItem<CommonEvent>, MergedPos>,
-) -> Vec<Positioned<MergedItem<CommonEvent>, MergedPos>> {
+    hist: Hist<MergedItem<CommonEvent, DuoPos>, MergedPos<DuoPos>>,
+) -> Vec<Positioned<MergedItem<CommonEvent, DuoPos>, MergedPos<DuoPos>>> {
     use futures_util::TryStreamExt;
     hist.iter().try_collect().await.unwrap()
 }
@@ -183,13 +288,11 @@ async fn collect_merged(
 
 #[tokio::test]
 async fn merged_pos_marshal_round_trip_across_heterogeneous_anchors() {
-    // Build a MergedPos with one u64-positioned source and one string-positioned source.
+    // Build a MergedPos with one u64-family source and one string-family
+    // source, both lifted into DuoPos.
     let a = Source::<MockPosU64>::new(vec![(MockPosU64(1), ev(10, "a1"))]);
-    let b = Source::<MockPosNamed>::new(vec![(MockPosNamed("n01".into()), ev(15, "b1"))]);
-    let mut sources = BTreeMap::new();
-    sources.insert("alpha".into(), ErasedHistStore::new(a.hist_store()));
-    sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
-    let merged = merge_hist_stores(sources, cmp_by_time);
+    let b = Source::<MockPosNamed>::new(vec![(named_pos("n01"), ev(15, "b1"))]);
+    let merged = wallet_store(&a, &b);
 
     let items = collect_merged(merged.next().await).await;
     let anchor = items.last().unwrap().pos.clone();
@@ -198,11 +301,14 @@ async fn merged_pos_marshal_round_trip_across_heterogeneous_anchors() {
     assert_eq!(restored, anchor);
 
     // The restored anchor decodes each per-source position back to its
-    // concrete type correctly.
-    assert_eq!(restored.get_as::<MockPosU64>("alpha"), Some(MockPosU64(1)));
+    // family's variant correctly.
     assert_eq!(
-        restored.get_as::<MockPosNamed>("named"),
-        Some(MockPosNamed("n01".into())),
+        restored.get(&"alpha".into()),
+        Some(&DuoPos::U64(MockPosU64(1)))
+    );
+    assert_eq!(
+        restored.get(&"named".into()),
+        Some(&DuoPos::Named(named_pos("n01"))),
     );
 }
 
@@ -213,21 +319,21 @@ async fn merge_interleaves_heterogeneous_sources_by_time() {
         (MockPosU64(2), ev(40, "a2")),
     ]);
     let b = Source::<MockPosNamed>::new(vec![
-        (MockPosNamed("n01".into()), ev(20, "b1")),
-        (MockPosNamed("n02".into()), ev(30, "b2")),
+        (named_pos("n01"), ev(20, "b1")),
+        (named_pos("n02"), ev(30, "b2")),
     ]);
-    let mut sources = BTreeMap::new();
-    sources.insert("alpha".into(), ErasedHistStore::new(a.hist_store()));
-    sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
-    let merged = merge_hist_stores(sources, cmp_by_time);
+    let merged = wallet_store(&a, &b);
 
     let items = collect_merged(merged.next().await).await;
     let labels: Vec<&str> = items.iter().map(|p| p.item.value.label.as_str()).collect();
     assert_eq!(labels, vec!["a1", "b1", "b2", "a2"]);
 
-    // source_key alternates correctly.
+    // source_key alternates correctly, and each item carries its typed
+    // family position.
     let keys: Vec<&str> = items.iter().map(|p| p.item.source_key.as_str()).collect();
     assert_eq!(keys, vec!["alpha", "named", "named", "alpha"]);
+    assert_eq!(items[0].item.source_pos, DuoPos::U64(MockPosU64(1)));
+    assert_eq!(items[1].item.source_pos, DuoPos::Named(named_pos("n01")));
 }
 
 #[tokio::test]
@@ -238,13 +344,10 @@ async fn merge_resumes_from_marshalled_anchor() {
         (MockPosU64(3), ev(60, "a3")),
     ]);
     let b = Source::<MockPosNamed>::new(vec![
-        (MockPosNamed("n01".into()), ev(20, "b1")),
-        (MockPosNamed("n02".into()), ev(50, "b2")),
+        (named_pos("n01"), ev(20, "b1")),
+        (named_pos("n02"), ev(50, "b2")),
     ]);
-    let mut sources = BTreeMap::new();
-    sources.insert("alpha".into(), ErasedHistStore::new(a.hist_store()));
-    sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
-    let merged = merge_hist_stores(sources, cmp_by_time);
+    let merged = wallet_store(&a, &b);
 
     let hist = merged.next().await;
     let items_all = collect_merged(hist.clone()).await;
@@ -265,19 +368,58 @@ async fn merge_resumes_from_marshalled_anchor() {
 }
 
 #[tokio::test]
+async fn wallet_recipe_resumes_across_restart() {
+    // "Session 1": walk halfway, persist the anchor as a JSON string.
+    let a = Source::<MockPosU64>::new(vec![
+        (MockPosU64(1), ev(10, "a1")),
+        (MockPosU64(2), ev(40, "a2")),
+    ]);
+    let b = Source::<MockPosNamed>::new(vec![(named_pos("n01"), ev(20, "b1"))]);
+    let merged = wallet_store(&a, &b);
+    let items = collect_merged(merged.next().await).await;
+    let saved = serde_json::to_string(&items[1].pos.marshal()).expect("serialize anchor");
+    drop(merged);
+
+    // "Session 2": rebuild everything from scratch — new sources (with an
+    // event that arrived while we were down), new mappers, new interleave —
+    // and resume from the persisted JSON.
+    let a = Source::<MockPosU64>::new(vec![
+        (MockPosU64(1), ev(10, "a1")),
+        (MockPosU64(2), ev(40, "a2")),
+    ]);
+    let b = Source::<MockPosNamed>::new(vec![
+        (named_pos("n01"), ev(20, "b1")),
+        (named_pos("n02"), ev(50, "b2")),
+    ]);
+    let merged = wallet_store(&a, &b);
+    let value: serde_json::Value = serde_json::from_str(&saved).expect("parse anchor");
+    let restored = merged.load(value).expect("load");
+
+    let hist = merged.next().await;
+    let (_, tail) = hist.split(restored);
+    let labels: Vec<String> = collect_merged(tail)
+        .await
+        .iter()
+        .map(|p| p.item.value.label.clone())
+        .collect();
+    // Consumed through b1 before the "crash"; a2 and the new b2 remain.
+    assert_eq!(labels, vec!["a2", "b2"]);
+}
+
+#[tokio::test]
 async fn merged_pos_handles_added_source() {
     // Phase 1: one source, walk halfway, save anchor.
     let a = Source::<MockPosU64>::new(vec![
         (MockPosU64(1), ev(10, "a1")),
         (MockPosU64(2), ev(40, "a2")),
     ]);
-    let mut sources1 = BTreeMap::new();
-    sources1.insert("alpha".into(), ErasedHistStore::new(a.hist_store()));
-    let merged1 = merge_hist_stores(sources1, cmp_by_time);
+    let mut sources1: BTreeMap<SourceKey, HistStore<CommonEvent, DuoPos>> = BTreeMap::new();
+    sources1.insert("alpha".into(), map_positions(a.hist_store(), U64Mapper));
+    let merged1 = interleave_hist_stores(sources1, cmp_by_time);
     let items = collect_merged(merged1.next().await).await;
     let anchor = items[0].pos.clone();
-    assert!(anchor.get("alpha").is_some());
-    assert!(anchor.get("named").is_none());
+    assert!(anchor.get(&"alpha".into()).is_some());
+    assert!(anchor.get(&"named".into()).is_none());
     let saved_value = anchor.marshal();
 
     // Phase 2: add a second source. Use the same saved anchor.
@@ -286,16 +428,14 @@ async fn merged_pos_handles_added_source() {
         (MockPosU64(2), ev(40, "a2")),
     ]);
     let b = Source::<MockPosNamed>::new(vec![
-        (MockPosNamed("n01".into()), ev(20, "b1")),
-        (MockPosNamed("n02".into()), ev(50, "b2")),
+        (named_pos("n01"), ev(20, "b1")),
+        (named_pos("n02"), ev(50, "b2")),
     ]);
-    let mut sources2 = BTreeMap::new();
-    sources2.insert("alpha".into(), ErasedHistStore::new(a2.hist_store()));
-    sources2.insert("named".into(), ErasedHistStore::new(b.hist_store()));
-    let merged2 = merge_hist_stores(sources2, cmp_by_time);
+    let merged2 = wallet_store(&a2, &b);
 
     // Reload the saved (alpha-only) anchor against the two-source merge —
-    // the missing "named" key defaults to that source's earliest.
+    // the missing "named" key defaults to `DuoPos::default()`, which the
+    // named source's clamp treats as its own beginning.
     let restored = merged2.load(saved_value).expect("load");
     let hist = merged2.next().await;
     let (_, tail) = hist.split(restored);
@@ -317,14 +457,11 @@ async fn merge_composes_with_filter() {
         (MockPosU64(2), ev(35, "a2")),
     ]);
     let b = Source::<MockPosNamed>::new(vec![
-        (MockPosNamed("n01".into()), ev(20, "b1")),
-        (MockPosNamed("n02".into()), ev(45, "b2")),
+        (named_pos("n01"), ev(20, "b1")),
+        (named_pos("n02"), ev(45, "b2")),
     ]);
-    let mut sources = BTreeMap::new();
-    sources.insert("alpha".into(), ErasedHistStore::new(a.hist_store()));
-    sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
-    let merged = merge_hist_stores(sources, cmp_by_time);
-    let filtered = filter_hist_store(merged, |mi: &MergedItem<CommonEvent>| {
+    let merged = wallet_store(&a, &b);
+    let filtered = filter_hist_store(merged, |mi: &MergedItem<CommonEvent, DuoPos>| {
         mi.value.time.is_multiple_of(2)
     });
     let items = collect_merged_filtered(filtered.next().await).await;
@@ -337,37 +474,31 @@ async fn merge_composes_with_filter() {
 }
 
 async fn collect_merged_filtered(
-    hist: Hist<FilteredItem<MergedItem<CommonEvent>>, MergedPos>,
-) -> Vec<Positioned<FilteredItem<MergedItem<CommonEvent>>, MergedPos>> {
+    hist: Hist<FilteredItem<MergedItem<CommonEvent, DuoPos>>, MergedPos<DuoPos>>,
+) -> Vec<Positioned<FilteredItem<MergedItem<CommonEvent, DuoPos>>, MergedPos<DuoPos>>> {
     use futures_util::TryStreamExt;
     hist.iter().try_collect().await.unwrap()
 }
 
 #[tokio::test]
 async fn merge_composes_with_since() {
-    // since(merge(a, b), cut) — split below a saved merged anchor.
+    // since(interleave(a, b), cut) — split below a saved merged anchor.
     let a = Source::<MockPosU64>::new(vec![
         (MockPosU64(1), ev(10, "a1")),
         (MockPosU64(2), ev(40, "a2")),
     ]);
     let b = Source::<MockPosNamed>::new(vec![
-        (MockPosNamed("n01".into()), ev(20, "b1")),
-        (MockPosNamed("n02".into()), ev(50, "b2")),
+        (named_pos("n01"), ev(20, "b1")),
+        (named_pos("n02"), ev(50, "b2")),
     ]);
-    let mut sources = BTreeMap::new();
-    sources.insert("alpha".into(), ErasedHistStore::new(a.hist_store()));
-    sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
-    let merged = merge_hist_stores(sources, cmp_by_time);
+    let merged = wallet_store(&a, &b);
 
-    // Build a cut "between a1 and b1": positions = { alpha: 1, named: default }.
-    // `MergedPos::new` is crate-private, so rebuild the cut by loading its
-    // marshalled JSON form through the merge store (named left at its default,
-    // i.e. empty string — it has not advanced).
-    let cut_value = serde_json::json!({
-        "alpha": MockPosU64(1).marshal(),
-        "named": MockPosNamed::default().marshal(),
-    });
-    let cut = merged.load(cut_value).expect("load cut");
+    // A cut "between a1 and b1": alpha consumed through 1, named untouched —
+    // built directly with the public typed constructor.
+    let cut = MergedPos::from([
+        ("alpha", DuoPos::U64(MockPosU64(1))),
+        ("named", DuoPos::Named(MockPosNamed::default())),
+    ]);
 
     let since = since_hist_store(merged, cut);
     let items = collect_merged(since.next().await).await;
@@ -380,10 +511,7 @@ async fn merge_composes_with_since() {
 async fn merge_advances_with_tip_via_watch_hist() {
     let a = Source::<MockPosU64>::new(vec![(MockPosU64(1), ev(10, "a1"))]);
     let b = Source::<MockPosNamed>::new(vec![]);
-    let mut sources = BTreeMap::new();
-    sources.insert("alpha".into(), ErasedHistStore::new(a.clone().hist_store()));
-    sources.insert("named".into(), ErasedHistStore::new(b.clone().hist_store()));
-    let merged = merge_hist_stores(sources, cmp_by_time);
+    let merged = wallet_store(&a, &b);
 
     let mut stream = watch_hist(&merged, MergedPos::default());
     // First item: a1.
@@ -395,7 +523,7 @@ async fn merge_advances_with_tip_via_watch_hist() {
     assert_eq!(first.item.value.label, "a1");
 
     // Append to b; the merged store should re-snapshot and yield it.
-    b.append(MockPosNamed("n01".into()), ev(20, "b1"));
+    b.append(named_pos("n01"), ev(20, "b1"));
     let second = timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("second item within timeout")
@@ -407,21 +535,18 @@ async fn merge_advances_with_tip_via_watch_hist() {
 #[tokio::test]
 async fn merge_time_pos_aggregates_per_source() {
     let a = Source::<MockPosU64>::new(vec![(MockPosU64(1), ev(10, "a1"))]);
-    let b = Source::<MockPosNamed>::new(vec![(MockPosNamed("n01".into()), ev(20, "b1"))]);
-    let mut sources = BTreeMap::new();
-    sources.insert("alpha".into(), ErasedHistStore::new(a.hist_store()));
-    sources.insert("named".into(), ErasedHistStore::new(b.hist_store()));
-    let merged = merge_hist_stores(sources, cmp_by_time);
+    let b = Source::<MockPosNamed>::new(vec![(named_pos("n01"), ev(20, "b1"))]);
+    let merged = wallet_store(&a, &b);
 
     let tp = merged.time_pos(Timestamp::new(42)).await.expect("time_pos");
-    // Both source stubs return P::default() — verify each aggregated
-    // per-source position is that source's default.
+    // Both source stubs return P::default(), wrapped into each family's
+    // variant — verify the aggregation keeps the families apart.
     assert_eq!(
-        tp.get_as::<MockPosU64>("alpha"),
-        Some(MockPosU64::default())
+        tp.get(&"alpha".into()),
+        Some(&DuoPos::U64(MockPosU64::default()))
     );
     assert_eq!(
-        tp.get_as::<MockPosNamed>("named"),
-        Some(MockPosNamed::default())
+        tp.get(&"named".into()),
+        Some(&DuoPos::Named(MockPosNamed::default()))
     );
 }

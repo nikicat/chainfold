@@ -104,13 +104,15 @@ impl HistoryError {
 /// A position is the gap *between* (or at the boundary of) items — never an
 /// item itself. The natural lower bound (analogous to "before any item") is
 /// the type's own [`Default`] value; e.g. EVM uses `EvmPosition { block: 0,
-/// log_index: 0 }`. This sentinel is what [`crate::merge::ErasedHistStore`]
-/// substitutes when a saved [`crate::merge::MergedPos`] lacks an entry for
-/// a newly-added source.
+/// log_index: 0 }`. This sentinel is what the vector-clock interleave
+/// ([`crate::merge::interleave_hist_stores`]) substitutes when a saved
+/// [`crate::merge::MergedPos`] lacks an entry for a newly-added source.
 ///
 /// **Source-local.** Positions from different sources are not comparable
 /// and the trait does not provide source identity — that concern lives on
-/// [`HistStore`]. Heterogeneous merge wraps per-source positions in a keyed
+/// [`HistStore`]. Sources sharing one position space merge via
+/// [`crate::merge::merge_hist_stores`] on `P`'s own order; disjoint-space
+/// interleave wraps per-source positions in a keyed
 /// [`crate::merge::MergedPos`] and never compares them across sources.
 pub trait Position: Clone + Default + Eq + Ord + std::fmt::Debug + Send + Sync + 'static {
     /// Serialize to a structured [`serde_json::Value`] for persistence.

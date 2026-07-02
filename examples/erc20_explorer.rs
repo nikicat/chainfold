@@ -30,13 +30,13 @@ use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
-use chainfold::arch::{HistStore, Position, Timestamp, watch_hist};
+use chainfold::arch::{HistStore, Timestamp, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainProvider, ChunkSize, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent,
-    EvmPosition, IN_KEY, OUT_KEY, OwnedErc20, SubscribeTransport, TransferDirection,
-    apply_transfer, decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
+    EvmPosition, OwnedErc20, SubscribeTransport, TransferDirection, apply_transfer,
+    decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
 };
-use chainfold::merge::{MergedItem, MergedPos};
+use chainfold::merge::{MergedItem, OrderedPos};
 use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
@@ -239,22 +239,6 @@ fn print_transfer(
     );
 }
 
-/// Build the two-key `MergedPos` representing position `p` for both the
-/// `in` and `out` sub-histories. Used to bracket the merged stream when
-/// the caller has only an [`EvmPosition`] (e.g. from `resolve_range`).
-/// Positions are reconstructed by the merged store itself (`load`), which
-/// owns deserialization for its source set.
-fn merged_pos_for(
-    merged: &HistStore<MergedItem<EvmEvent>, MergedPos>,
-    p: EvmPosition,
-) -> Option<MergedPos> {
-    let value = p.marshal();
-    let mut m = serde_json::Map::new();
-    m.insert(IN_KEY.to_owned(), value.clone());
-    m.insert(OUT_KEY.to_owned(), value);
-    merged.load(serde_json::Value::Object(m))
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -344,14 +328,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut count = 0;
 
         if args.follow {
-            // Both inner stores drive the merged tip independently, fed by
-            // the chain's head clock.
-            let start_pos =
-                merged_pos_for(&merged_hs, start).ok_or("could not build merged start position")?;
-            let mut stream = watch_hist(&merged_hs, start_pos);
+            // Both inner stores are fed by the chain's head clock; the
+            // merged tip advances on their common (min) frontier.
+            let mut stream = watch_hist(&merged_hs, OrderedPos::from(start));
             while let Some(item) = stream.next().await {
                 let item = item?;
-                let mi: &MergedItem<EvmEvent> = &item.item;
+                let mi: &MergedItem<EvmEvent, EvmPosition> = &item.item;
                 let event_pos = mi.value.position();
                 if Some(event_pos) == last_pos {
                     // Self-transfer duplicate yield: already applied.
@@ -376,17 +358,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Bracket the window: split at start (drop head), then at end
             // (drop tail). The middle window iterates only owner-involved
             // events within the requested range.
-            let start_pos =
-                merged_pos_for(&merged_hs, start).ok_or("could not build merged start position")?;
-            let end_pos =
-                merged_pos_for(&merged_hs, end).ok_or("could not build merged end position")?;
             let hist = merged_hs.next().await;
-            let (_, after_start) = hist.split(start_pos);
-            let (window, _) = after_start.split(end_pos);
+            let (_, after_start) = hist.split(OrderedPos::from(start));
+            let (window, _) = after_start.split(OrderedPos::from(end));
             let mut stream = window.iter();
             while let Some(item) = stream.next().await {
                 let item = item?;
-                let mi: &MergedItem<EvmEvent> = &item.item;
+                let mi: &MergedItem<EvmEvent, EvmPosition> = &item.item;
                 let event_pos = mi.value.position();
                 if Some(event_pos) == last_pos {
                     continue;

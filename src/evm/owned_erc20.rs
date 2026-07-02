@@ -12,10 +12,21 @@
 //!
 //! Each store's `eth_getLogs` calls carry the owner topic, so the node
 //! filters server-side and only the relevant logs come over the wire.
-//! [`OwnedErc20::transfers`] merges them via [`merge_hist_stores`] keyed
-//! by `(block_number, log_index)` and returns a
-//! `HistStore<MergedItem<EvmEvent>, MergedPos>` whose
-//! `item.source_key` is `"in"` or `"out"` — that's the direction.
+//! [`OwnedErc20::transfers`] merges them via the ordered
+//! [`merge_hist_stores`] — both filters share the chain's
+//! `(block_number, log_index)` position space, so the chain's own order is
+//! the stream order and no comparator is needed. Yields are
+//! `MergedItem<EvmEvent, EvmPosition>` whose `source_key` is `"in"` or
+//! `"out"` — that's the direction.
+//!
+//! ## Self-transfers
+//!
+//! A transfer with `from == to == owner` is one log matched by both
+//! filters, so it surfaces twice — once per direction — at the identical
+//! [`EvmPosition`]. Each copy's anchor carries its direction tag
+//! ([`OrderedPos`]`::bound`), so a resume anchored *between* the two copies
+//! is exact: it replays the second copy and nothing else. (Before the
+//! ordered merge this was a known resume edge; the tagged anchor closed it.)
 //!
 //! ## Re-entry
 //!
@@ -33,7 +44,7 @@ use alloy::providers::Provider;
 
 use crate::arch::HistStore;
 use crate::evm::{EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, TRANSFER_TOPIC, Topic};
-use crate::merge::{ErasedHistStore, MergedItem, MergedPos, SourceKey, merge_hist_stores};
+use crate::merge::{MergedItem, OrderedPos, SourceKey, merge_hist_stores};
 
 /// Direction of an owned-ERC20 transfer relative to the tracked owner.
 ///
@@ -136,26 +147,20 @@ impl OwnedErc20 {
         &self.in_transfers
     }
 
-    /// Merged in/out transfer stream. Yielded items carry the direction
-    /// on `MergedItem::source_key` ([`OUT_KEY`] or [`IN_KEY`]).
+    /// Merged in/out transfer stream, ordered by `(block_number,
+    /// log_index)`. Yielded items carry the direction on
+    /// `MergedItem::source_key` ([`OUT_KEY`] or [`IN_KEY`]).
     ///
-    /// Items are ordered by `(block_number, log_index)`. Cross-direction
-    /// ties are impossible (a single log only has one `from` and one
-    /// `to`), so ordering is total.
-    pub fn transfers(&self) -> HistStore<MergedItem<EvmEvent>, MergedPos> {
-        let mut sources: BTreeMap<SourceKey, ErasedHistStore<EvmEvent>> = BTreeMap::new();
-        sources.insert(
-            OUT_KEY.into(),
-            ErasedHistStore::new(self.out_transfers.clone()),
-        );
-        sources.insert(
-            IN_KEY.into(),
-            ErasedHistStore::new(self.in_transfers.clone()),
-        );
-        merge_hist_stores(sources, |a, b| {
-            (a.value.block_number, a.value.log_index)
-                .cmp(&(b.value.block_number, b.value.log_index))
-        })
+    /// Anchor a window from a plain [`EvmPosition`] with
+    /// `OrderedPos::from(pos)`; saved item anchors resume exactly, including
+    /// between the two copies of a self-transfer (see the module docs).
+    pub fn transfers(
+        &self,
+    ) -> HistStore<MergedItem<EvmEvent, EvmPosition>, OrderedPos<EvmPosition>> {
+        let mut sources: BTreeMap<SourceKey, HistStore<EvmEvent, EvmPosition>> = BTreeMap::new();
+        sources.insert(OUT_KEY.into(), self.out_transfers.clone());
+        sources.insert(IN_KEY.into(), self.in_transfers.clone());
+        merge_hist_stores(sources)
     }
 }
 

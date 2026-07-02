@@ -1,4 +1,4 @@
-//! Integration tests for the Phase 5 follow-up: [`OwnedErc20`].
+//! Integration tests for [`OwnedErc20`] (the Phase 5 follow-up).
 //!
 //! These tests fork mainnet via the anvil harness, so they're
 //! `#[ignore]`-gated. Run with:
@@ -17,12 +17,11 @@ use std::time::Duration;
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
 use chainfold::Shared;
-use chainfold::arch::{HistStore, Position};
 use chainfold::evm::{
-    ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, IN_KEY,
-    LogCache, LogFilter, OUT_KEY, OwnedErc20, TRANSFER_TOPIC, Topic,
+    ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache,
+    LogFilter, OwnedErc20, TRANSFER_TOPIC, Topic,
 };
-use chainfold::merge::{MergedItem, MergedPos};
+use chainfold::merge::{MergedItem, OrderedPos};
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
@@ -30,19 +29,6 @@ use common::{
     anvil::{fork_mainnet, skip_no_anvil},
     fixtures::{FORK_BLOCK, USDC},
 };
-
-/// A merged cut with the same `EvmPosition` on both direction components,
-/// reconstructed through the merged store's own `load` (positions can only
-/// be deserialized by the store that owns the source identities).
-fn merged_pos_for(store: &HistStore<MergedItem<EvmEvent>, MergedPos>, p: EvmPosition) -> MergedPos {
-    let v = p.marshal();
-    let mut obj = serde_json::Map::new();
-    obj.insert(IN_KEY.to_string(), v.clone());
-    obj.insert(OUT_KEY.to_string(), v);
-    store
-        .load(serde_json::Value::Object(obj))
-        .expect("merged store loads its own key layout")
-}
 
 const TEST_CONFIG: EvmChainConfig = EvmChainConfig {
     chunk_size: ChunkSize::new(10),
@@ -122,10 +108,10 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let owned = OwnedErc20::new(&chain, owner, USDC);
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
-    let (_, after_start) = hist.split(merged_pos_for(&merged_hs, start));
-    let (window, _) = after_start.split(merged_pos_for(&merged_hs, end));
+    let (_, after_start) = hist.split(OrderedPos::from(start));
+    let (window, _) = after_start.split(OrderedPos::from(end));
     let mut stream = window.iter();
-    let mut yields: Vec<MergedItem<EvmEvent>> = Vec::new();
+    let mut yields: Vec<MergedItem<EvmEvent, EvmPosition>> = Vec::new();
     while let Some(item) = stream.next().await {
         yields.push(item.expect("iter").item);
     }
@@ -199,8 +185,8 @@ async fn owned_erc20_empty_for_inactive_address() {
     let end = EvmPosition::new(to_block, u32::MAX);
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
-    let (_, after_start) = hist.split(merged_pos_for(&merged_hs, start));
-    let (window, _) = after_start.split(merged_pos_for(&merged_hs, end));
+    let (_, after_start) = hist.split(OrderedPos::from(start));
+    let (window, _) = after_start.split(OrderedPos::from(end));
     let mut stream = window.iter();
     let mut count = 0;
     while let Some(item) = stream.next().await {
