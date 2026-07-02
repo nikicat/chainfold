@@ -6,7 +6,10 @@
 use std::ops::{Add, Sub};
 use std::sync::Arc;
 
-use alloy::primitives::{Address, B256, BlockHash, TxHash};
+use alloy::primitives::{Address, B256};
+// Re-exported so the rest of the crate names hashes through the domain-type
+// module rather than reaching into alloy at each site.
+pub use alloy::primitives::{BlockHash, TxHash};
 
 use crate::arch::{Position, Timestamp};
 
@@ -174,8 +177,9 @@ impl std::fmt::Debug for FilterHash {
 /// [`ChainId`], a [`LogIdx`], a timestamp, or any other bare integer as it
 /// flows through positions, events, headers, the range tree, and the cache.
 ///
-/// It is part of [`EvmPosition`], so `#[serde(transparent)]` keeps the postcard
-/// marshal byte-identical and saved resume-anchors loadable.
+/// It is part of [`EvmPosition`], so `#[serde(transparent)]` keeps the
+/// marshalled form identical to the pre-newtype `u64` and saved resume-anchors
+/// loadable.
 ///
 /// Arithmetic is *affine*: a block ± a `u64` offset is another block ([`Add`] /
 /// [`Sub`] / [`BlockNumber::saturating_add`] / [`BlockNumber::saturating_sub`]
@@ -289,6 +293,48 @@ impl BlockRange {
 }
 
 // ============================================================
+// ChunkSize
+// ============================================================
+
+/// A gap-fetch / scanned-range alignment granularity — a positive count of
+/// blocks.
+///
+/// A newtype so a chunk size can't be swapped with a block height
+/// ([`BlockNumber`]) or any other bare integer, and so the "must be
+/// positive" invariant is structural (`NonZeroU64` — the alignment math
+/// divides by it). A *count* is a distance in the affine [`BlockNumber`]
+/// algebra, hence not a `BlockNumber`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChunkSize(std::num::NonZeroU64);
+
+impl ChunkSize {
+    /// Wrap a block count.
+    ///
+    /// # Panics
+    /// Panics if `n == 0` — a zero alignment granularity is meaningless.
+    /// `const`-evaluable, so literal misuse fails at compile time.
+    pub const fn new(n: u64) -> Self {
+        match std::num::NonZeroU64::new(n) {
+            Some(v) => Self(v),
+            None => panic!("chunk size must be positive"),
+        }
+    }
+
+    /// The inner block count, for the alignment arithmetic boundary.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Display for ChunkSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward to the inner Display so formatter flags (width, alignment)
+        // survive — see the note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+// ============================================================
 // LogIdx
 // ============================================================
 
@@ -296,8 +342,8 @@ impl BlockRange {
 /// so it can't be silently swapped with a block number or any other bare
 /// integer as it flows through positions, events, and the range tree.
 ///
-/// It is part of [`EvmPosition`], and therefore of its postcard marshal —
-/// hence `#[serde(transparent)]`, so saved resume-anchors stay byte-identical
+/// It is part of [`EvmPosition`], and therefore of its marshalled form —
+/// hence `#[serde(transparent)]`, so saved resume-anchors stay identical
 /// to the pre-newtype `u32` encoding. [`LogIdx::MAX`] is the end-of-block
 /// sentinel (`BlockPos::end_of_block`, tip positions): strictly greater than
 /// every real log index in a block.
@@ -400,12 +446,16 @@ impl EvmPosition {
 }
 
 impl Position for EvmPosition {
-    fn marshal(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("EvmPosition serialization cannot fail")
+    fn marshal(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("EvmPosition serialization cannot fail")
     }
+}
 
-    fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        postcard::from_bytes(bytes).ok()
+impl EvmPosition {
+    /// Reconstruct from a [`Position::marshal`] value. Called by the owning
+    /// store's `load` (deserialization lives on the store, not the position).
+    pub fn from_value(value: serde_json::Value) -> Option<Self> {
+        serde_json::from_value(value).ok()
     }
 }
 

@@ -10,25 +10,26 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use futures_core::Stream;
-use futures_util::StreamExt;
 use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
-    ItemStream, Position, Positioned, Store, Timestamp,
+    Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
+    Positioned, Store, Timestamp,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct MockPos(pub u64);
 
 impl Position for MockPos {
-    fn marshal(&self) -> Vec<u8> {
-        self.0.to_le_bytes().to_vec()
+    fn marshal(&self) -> serde_json::Value {
+        serde_json::json!(self.0)
     }
-    fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        bytes.try_into().ok().map(u64::from_le_bytes).map(MockPos)
+}
+
+impl MockPos {
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        v.as_u64().map(MockPos)
     }
 }
 
@@ -37,25 +38,16 @@ pub struct MockEvent(pub String);
 
 pub struct MockSource {
     items: Mutex<Vec<MockEvent>>,
-    latest_store: Store<MockPos>,
-    latest_tx: watch::Sender<MockPos>,
-    best_store: Store<MockPos>,
-    safe_store: Store<MockPos>,
+    tip: watch::Sender<MockPos>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl MockSource {
     pub fn new(initial: Vec<MockEvent>) -> Arc<Self> {
         let tip = MockPos(initial.len() as u64);
-        let (tx, rx) = watch::channel(tip);
-        let (_, b_rx) = watch::channel(tip);
-        let (_, s_rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
-            latest_store: Store::new(rx),
-            latest_tx: tx,
-            best_store: Store::new(b_rx),
-            safe_store: Store::new(s_rx),
+            tip: watch::channel(tip).0,
             self_ref: std::sync::OnceLock::new(),
         });
         let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -68,7 +60,7 @@ impl MockSource {
             items.push(event);
             MockPos(items.len() as u64)
         };
-        let _ = self.latest_tx.send(new_tip);
+        self.tip.send_replace(new_tip);
     }
 
     fn snapshot(&self) -> Vec<MockEvent> {
@@ -104,7 +96,7 @@ impl HistBackend<MockEvent, MockPos> for MockSource {
 impl HistStoreBackend<MockEvent, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<MockEvent, MockPos> {
         let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
-        let mut sub = self.latest_store.subscribe();
+        let mut sub = Store::new(self.tip.subscribe()).subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
@@ -114,43 +106,15 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
 
     async fn next(&self) -> Hist<MockEvent, MockPos> {
         let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
-        Hist::new(backend, MockPos(0), self.latest_store.get())
-    }
-
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<MockEvent, MockPos>) + Send + Sync>,
-    ) -> AsyncDisposable {
-        let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = self.arc_self();
-        let mut sub = self.latest_store.subscribe();
-        let cancel = CancellationToken::new();
-        let cancel2 = cancel.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel2.cancelled() => break,
-                    tip = sub.next() => {
-                        let Some(tip) = tip else { break };
-                        cb(Hist::new(backend.clone(), MockPos(0), tip));
-                    }
-                }
-            }
-        });
-        AsyncDisposable::new(cancel, handle)
+        Hist::new(backend, MockPos(0), *self.tip.borrow())
     }
 
     async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {
         Ok(MockPos(0))
     }
 
-    fn latest(&self) -> &Store<MockPos> {
-        &self.latest_store
-    }
-    fn best(&self) -> &Store<MockPos> {
-        &self.best_store
-    }
-    fn safe(&self) -> &Store<MockPos> {
-        &self.safe_store
+    fn load(&self, value: serde_json::Value) -> Option<MockPos> {
+        MockPos::from_value(&value)
     }
 }
 

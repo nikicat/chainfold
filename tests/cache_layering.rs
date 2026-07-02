@@ -1,23 +1,26 @@
-//! Phase 1 integration tests: durable `LogCache` + in-memory `LogIndex`.
+//! Cache-layering integration tests: durable `LogCache` + in-memory range
+//! index (Phase 1 acceptance in `docs/refactor.md`).
 //!
 //! These hit a real RPC (mainnet via the anvil fork harness) so the cold
 //! cache populates via actual `eth_getLogs` calls. After that we drop the
-//! in-memory index, reopen, and verify the warm walk makes zero RPC calls.
+//! chain (and its in-memory index), reopen, and verify the warm walk
+//! answers from the durable cache without refetching.
 //!
 //! Marked `#[ignore]` because they spawn anvil + hit external RPC. Run
-//! with `cargo test --test phase1_layering -- --ignored`.
+//! with `cargo test --test cache_layering -- --ignored`.
 
 mod common;
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::{Hist, HistBackend};
+use chainfold::Shared;
+use chainfold::arch::HistStore;
 use chainfold::evm::{
-    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC,
+    ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache,
+    LogFilter, TRANSFER_TOPIC,
 };
 use futures_util::StreamExt;
 use tempfile::TempDir;
@@ -27,40 +30,50 @@ use common::{
     fixtures::{FORK_BLOCK, FORK_SWEEP_BLOCKS, USDC},
 };
 
-async fn build_history(
+async fn build_store(
     db_path: &std::path::Path,
     endpoint: Url,
     chunk_size: u64,
-) -> Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static + use<>>> {
-    let store = Arc::new(LogCache::open(db_path.to_str().unwrap()).expect("open store"));
-    let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint))
+) -> (
+    EvmChain<impl Provider<Ethereum> + Clone + 'static + use<>>,
+    HistStore<EvmEvent, EvmPosition>,
+) {
+    let cache = Shared::new(LogCache::open(db_path.to_str().unwrap()).expect("open cache"));
+    let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");
-    EvmLogHistory::with_options(
+    let chain = EvmChain::new(
         provider,
-        store,
-        USDC,
-        [Some(TRANSFER_TOPIC), None, None, None],
-        chunk_size,
-        12,
+        EvmChainConfig {
+            chunk_size: ChunkSize::new(chunk_size),
+            block_time: Duration::from_secs(12),
+            follow: None,
+        },
     )
     .await
-    .expect("EvmLogHistory::with_options")
+    .expect("EvmChain::new");
+    let store = chain.logs(
+        &LogFilter::new(USDC, [Some(TRANSFER_TOPIC), None, None, None]),
+        Finality::Latest,
+    );
+    (chain, store)
 }
 
-async fn walk_forward<P>(history: &Arc<EvmLogHistory<P>>, from_block: u64, to_block: u64) -> usize
-where
-    P: Provider<Ethereum> + Clone + Send + Sync + 'static,
-{
+async fn walk_forward(
+    store: &HistStore<EvmEvent, EvmPosition>,
+    from_block: u64,
+    to_block: u64,
+) -> usize {
     let start = if from_block == 0 {
         EvmPosition::earliest()
     } else {
         EvmPosition::new(from_block - 1, u32::MAX)
     };
     let end = EvmPosition::new(to_block, u32::MAX);
-    let backend: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = history.clone();
-    let hist = Hist::new(backend, start, end);
-    let mut stream = hist.iter();
+    let hist = store.next().await;
+    let (_, after_start) = hist.split(start);
+    let (window, _) = after_start.split(end);
+    let mut stream = window.iter();
     let mut count = 0;
     while let Some(item) = stream.next().await {
         let _ = item.expect("iter item");
@@ -86,19 +99,20 @@ async fn warm_store_then_drop_index_then_reopen() {
     let _ = FORK_SWEEP_BLOCKS;
     let chunk_size = 10;
 
-    let history_cold = build_history(&db_path, endpoint.clone(), chunk_size).await;
+    let (chain_cold, store_cold) = build_store(&db_path, endpoint.clone(), chunk_size).await;
     let cold_start = Instant::now();
-    let cold_count = walk_forward(&history_cold, from, to).await;
+    let cold_count = walk_forward(&store_cold, from, to).await;
     let cold_elapsed = cold_start.elapsed();
     assert!(
         cold_count > 0,
         "expected USDC transfers in the sweep window"
     );
-    drop(history_cold);
+    drop(store_cold);
+    drop(chain_cold);
 
-    let history_warm = build_history(&db_path, endpoint, chunk_size).await;
+    let (_chain_warm, store_warm) = build_store(&db_path, endpoint, chunk_size).await;
     let warm_start = Instant::now();
-    let warm_count = walk_forward(&history_warm, from, to).await;
+    let warm_count = walk_forward(&store_warm, from, to).await;
     let warm_elapsed = warm_start.elapsed();
 
     assert_eq!(
@@ -112,7 +126,7 @@ async fn warm_store_then_drop_index_then_reopen() {
     );
 
     eprintln!(
-        "phase1_layering: count={cold_count}, cold={cold_elapsed:?}, warm={warm_elapsed:?}, speedup={:.1}x",
+        "cache_layering: count={cold_count}, cold={cold_elapsed:?}, warm={warm_elapsed:?}, speedup={:.1}x",
         cold_elapsed.as_secs_f64() / warm_elapsed.as_secs_f64()
     );
 }

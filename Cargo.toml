@@ -28,10 +28,9 @@ async-trait = "0.1"
 thiserror = "2"
 futures-core = "0.3"
 futures-util = "0.3"
-tokio-util = "0.7" # CancellationToken (included by default, no "sync" feature in 0.7)
+tokio-util = { version = "0.7", features = ["rt"] } # AbortOnDropHandle
 rusqlite = { version = "0.34", features = ["bundled"] }
 rusqlite_migration = "2"
-postcard = { version = "1", features = ["alloc"] }
 hex = "0.4"
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls",
@@ -92,21 +91,21 @@ name = "mock_provider_smoke"
 required-features = ["evm"]
 
 [[test]]
-name = "phase1_layering"
+name = "cache_layering"
 required-features = ["evm"]
 
 [[test]]
-name = "phase2_push"
+name = "live_follow"
 required-features = ["evm"]
 
 [[test]]
-name = "phase3_hist_store"
+name = "hist_store"
 
 [[test]]
-name = "phase5_merge"
+name = "interleave"
 
 [[test]]
-name = "phase6_matcher"
+name = "matcher"
 
 [[test]]
 name = "owned_erc20"

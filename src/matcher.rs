@@ -10,9 +10,10 @@
 //! ## Two layers
 //!
 //! * [`BaseMatcher`] is the pure compute kernel. It owns nothing mutable and
-//!   no background loop other than the [`changes`](BaseMatcher::changes)
-//!   aggregator. Tests and ad-hoc callers drive it via
-//!   [`compute_state`](BaseMatcher::compute_state).
+//!   runs no background task. Tests and ad-hoc callers drive it via
+//!   [`compute_state`](BaseMatcher::compute_state); the reactive
+//!   [`iter`](AnchoredMatcher::iter) drives directly off both sources'
+//!   `snapshots()` and folds the `Hist` that triggered each recompute.
 //! * [`AnchoredMatcher`] wraps a [`BaseMatcher`] with persistence over an
 //!   [`AnchorStore`] plus an in-memory anchor cache. Production callers
 //!   typically use this — `current_state` / `set_anchors` / `iter` provide
@@ -47,12 +48,9 @@ use std::sync::Arc;
 use futures_core::Stream;
 use futures_util::stream::unfold;
 use futures_util::{StreamExt, TryStreamExt};
-use tokio::sync::{Mutex, watch};
-use tokio::task::JoinHandle;
+use tokio::sync::Mutex;
 
-use crate::arch::{
-    Hist, HistStore, HistoryError, Position, Positioned, Store, Subscription, Timestamp,
-};
+use crate::arch::{Hist, HistStore, HistoryError, Position, Positioned, Timestamp};
 
 mod anchor_store_sqlite;
 pub use anchor_store_sqlite::SqliteAnchorStore;
@@ -99,33 +97,25 @@ impl<SP: Position, DP: Position> MatcherAnchors<SP, DP> {
         Self { src, dst }
     }
 
-    pub fn marshal(&self) -> Vec<u8> {
-        let s = self.src.marshal();
-        let d = self.dst.marshal();
-        let mut out = Vec::with_capacity(8 + s.len() + d.len());
-        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-        out.extend_from_slice(&s);
-        out.extend_from_slice(&(d.len() as u32).to_le_bytes());
-        out.extend_from_slice(&d);
-        out
+    /// Serialize to a `{"src": …, "dst": …}` JSON object — pure serde
+    /// composition of the two positions' [`Position::marshal`] values, no
+    /// hand-rolled framing.
+    pub fn marshal(&self) -> serde_json::Value {
+        serde_json::json!({ "src": self.src.marshal(), "dst": self.dst.marshal() })
     }
 
-    pub fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 4 {
-            return None;
+    /// The `src` / `dst` sub-values from a [`marshal`](Self::marshal) object.
+    /// The typed positions are reconstructed by each side's
+    /// [`HistStore::load`] (deserialization lives on the store).
+    pub fn split(value: serde_json::Value) -> Option<(serde_json::Value, serde_json::Value)> {
+        match value {
+            serde_json::Value::Object(mut obj) => {
+                let src = obj.remove("src")?;
+                let dst = obj.remove("dst")?;
+                Some((src, dst))
+            }
+            _ => None,
         }
-        let s_len = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
-        if bytes.len() < 4 + s_len + 4 {
-            return None;
-        }
-        let src = SP::unmarshal(&bytes[4..4 + s_len])?;
-        let d_off = 4 + s_len;
-        let d_len = u32::from_le_bytes(bytes[d_off..d_off + 4].try_into().ok()?) as usize;
-        if bytes.len() < d_off + 4 + d_len {
-            return None;
-        }
-        let dst = DP::unmarshal(&bytes[d_off + 4..d_off + 4 + d_len])?;
-        Some(Self::new(src, dst))
     }
 }
 
@@ -248,24 +238,12 @@ where
 }
 
 // ============================================================
-// AbortOnDrop
-// ============================================================
-
-struct AbortOnDrop(JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-// ============================================================
 // BaseMatcher
 // ============================================================
 
 /// Pure compute kernel. Construct once, call
-/// [`compute_state`](Self::compute_state) per snapshot. No mutable state
-/// other than a background task that drives [`changes`](Self::changes).
+/// [`compute_state`](Self::compute_state) per snapshot. Holds no mutable
+/// state and runs no background task.
 pub struct BaseMatcher<Src, Dst, Output, SP, DP>
 where
     Src: Clone + Send + Sync + 'static,
@@ -277,8 +255,6 @@ where
     src_store: HistStore<Src, SP>,
     dst_store: HistStore<Dst, DP>,
     match_fn: Arc<dyn MatchFn<Src, Dst, Output, SP, DP>>,
-    changes_store: Store<()>,
-    _changes_task: AbortOnDrop,
 }
 
 impl<Src, Dst, Output, SP, DP> BaseMatcher<Src, Dst, Output, SP, DP>
@@ -294,16 +270,10 @@ where
         dst_store: HistStore<Dst, DP>,
         match_fn: Arc<dyn MatchFn<Src, Dst, Output, SP, DP>>,
     ) -> Self {
-        let (changes_store, task) = build_changes_store::<SP, DP>(
-            src_store.latest().subscribe(),
-            dst_store.latest().subscribe(),
-        );
         Self {
             src_store,
             dst_store,
             match_fn,
-            changes_store,
-            _changes_task: task,
         }
     }
 
@@ -315,6 +285,21 @@ where
     ) -> Result<BaseMatcherState<Src, Dst, Output, SP, DP>, HistoryError> {
         let src = self.src_store.next().await;
         let dst = self.dst_store.next().await;
+        self.compute_with(src, dst, anchors).await
+    }
+
+    /// Pure kernel: correlate the post-`anchors` tails of a given snapshot
+    /// pair. The `Hist`s are the caller's — from a `snapshots()` stream (the
+    /// reactive [`iter`](AnchoredMatcher::iter) path) or from `next()`
+    /// ([`compute_state`](Self::compute_state)). Splits each at its anchor and
+    /// folds; no store access, no re-fetch — so the `Hist` that triggered a
+    /// recompute is exactly the one folded.
+    pub async fn compute_with(
+        &self,
+        src: Hist<Src, SP>,
+        dst: Hist<Dst, DP>,
+        anchors: MatcherAnchors<SP, DP>,
+    ) -> Result<BaseMatcherState<Src, Dst, Output, SP, DP>, HistoryError> {
         let (_, src_hist) = src.split(anchors.src.clone());
         let (_, dst_hist) = dst.split(anchors.dst.clone());
         let src_items: Vec<Positioned<Src, SP>> = src_hist.iter().try_collect().await?;
@@ -333,12 +318,6 @@ where
             dst_items,
             anchors,
         })
-    }
-
-    /// Wake-up signal: emits `()` whenever either src or dst tip advances.
-    /// First emission is the current value (per [`Store::subscribe`]).
-    pub fn changes(&self) -> Store<()> {
-        self.changes_store.clone()
     }
 
     /// Build matcher anchors at wall-clock time `since` by delegating to
@@ -361,38 +340,6 @@ where
         let anchors = self.time_anchors(since).await?;
         self.compute_state(anchors).await
     }
-}
-
-fn build_changes_store<SP, DP>(
-    mut src_sub: Subscription<SP>,
-    mut dst_sub: Subscription<DP>,
-) -> (Store<()>, AbortOnDrop)
-where
-    SP: Position,
-    DP: Position,
-{
-    let (tx, rx) = watch::channel(());
-    let handle = tokio::spawn(async move {
-        // Always propagate every emission. Tokio `watch` channels coalesce
-        // missed updates into the next observable value, so skipping the
-        // first emission to dedupe with the initial `()` of the changes
-        // channel would silently lose any update that arrived between
-        // subscribe-time and task-poll. The extra startup `()` ticks are
-        // harmless — consumers recompute against unchanged state.
-        loop {
-            tokio::select! {
-                pos = src_sub.next() => {
-                    if pos.is_none() { break; }
-                    let _ = tx.send(());
-                }
-                pos = dst_sub.next() => {
-                    if pos.is_none() { break; }
-                    let _ = tx.send(());
-                }
-            }
-        }
-    });
-    (Store::new(rx), AbortOnDrop(handle))
 }
 
 // ============================================================
@@ -504,15 +451,32 @@ where
 
     async fn load_anchors(&self) -> Result<MatcherAnchors<SP, DP>, HistoryError> {
         match self.anchor_store.get(&self.anchor_key).await? {
-            Some(bytes) => MatcherAnchors::<SP, DP>::unmarshal(&bytes)
-                .ok_or_else(|| HistoryError::internal("failed to unmarshal anchors")),
+            Some(bytes) => {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| HistoryError::internal(format!("anchor json: {e}")))?;
+                let (src_v, dst_v) = MatcherAnchors::<SP, DP>::split(value)
+                    .ok_or_else(|| HistoryError::internal("malformed anchors object"))?;
+                // Deserialize each side via its own store (`load`).
+                let src = self
+                    .base
+                    .src_store
+                    .load(src_v)
+                    .ok_or_else(|| HistoryError::internal("failed to load src anchor"))?;
+                let dst = self
+                    .base
+                    .dst_store
+                    .load(dst_v)
+                    .ok_or_else(|| HistoryError::internal("failed to load dst anchor"))?;
+                Ok(MatcherAnchors::new(src, dst))
+            }
             None => self.base.time_anchors(self.start).await,
         }
     }
 
     /// Persist `next` and update the in-memory cache.
     pub async fn set_anchors(&self, next: MatcherAnchors<SP, DP>) -> Result<(), HistoryError> {
-        let bytes = next.marshal();
+        let bytes = serde_json::to_vec(&next.marshal())
+            .map_err(|e| HistoryError::internal(format!("anchor json: {e}")))?;
         self.anchor_store.set(&self.anchor_key, bytes).await?;
         *self.cached.lock().await = Some(next);
         Ok(())
@@ -526,18 +490,55 @@ where
         self.base.compute_state(anchors).await
     }
 
-    /// Stream of states, one per `changes()` tick. Each yield re-uses the
-    /// cached anchors; consumers advance via [`set_anchors`](Self::set_anchors).
+    /// Stream of states — the initial state immediately, then a fresh one each
+    /// time either source's `snapshots()` advances (new-block production on a
+    /// `Latest` store, finalization on a `Safe` store). Each yield folds the
+    /// `Hist` that triggered it against the currently-cached anchors; consumers
+    /// advance via [`set_anchors`](Self::set_anchors).
     pub fn iter(self: &Arc<Self>) -> MatcherStateStream<Src, Dst, Output, SP, DP> {
         let matcher = self.clone();
-        let sub = self.base.changes().subscribe();
-        Box::pin(unfold((matcher, sub), |(matcher, mut sub)| async move {
-            // Wait for a change tick (first tick is the current value,
-            // delivered immediately).
-            sub.next().await?;
-            let state = matcher.current_state().await;
-            Some((state, (matcher, sub)))
-        }))
+        let src_snaps = matcher.base.src_store.snapshots();
+        let dst_snaps = matcher.base.dst_store.snapshots();
+        Box::pin(unfold(
+            (
+                matcher,
+                src_snaps,
+                dst_snaps,
+                None::<Hist<Src, SP>>,
+                None::<Hist<Dst, DP>>,
+                false,
+            ),
+            |(matcher, mut src_snaps, mut dst_snaps, mut src_hist, mut dst_hist, seeded)| async move {
+                if seeded {
+                    // Wait for either side to advance, keeping the latest of each.
+                    tokio::select! {
+                        s = src_snaps.next() => src_hist = Some(s?),
+                        d = dst_snaps.next() => dst_hist = Some(d?),
+                    }
+                } else {
+                    // Seed: each snapshot stream's first item is the current snapshot.
+                    src_hist = Some(src_snaps.next().await?);
+                    dst_hist = Some(dst_snaps.next().await?);
+                }
+                let result = match matcher.get_anchors().await {
+                    Ok(anchors) => {
+                        matcher
+                            .base
+                            .compute_with(
+                                src_hist.clone().unwrap(),
+                                dst_hist.clone().unwrap(),
+                                anchors,
+                            )
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                Some((
+                    result,
+                    (matcher, src_snaps, dst_snaps, src_hist, dst_hist, true),
+                ))
+            },
+        ))
     }
 }
 
@@ -562,16 +563,14 @@ pub type MatcherStateStream<Src, Dst, Output, SP, DP> = Pin<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arch::{
-        AsyncDisposable, HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream,
-    };
+    use crate::arch::{HistBackend, HistStore, HistStoreBackend, HistStream, ItemStream, Store};
     use futures_core::Stream;
     use futures_util::stream::{iter, poll_fn};
     use std::pin::Pin as StdPin;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
+    use tokio::sync::watch;
     use tokio::time::timeout;
-    use tokio_util::sync::CancellationToken;
 
     // -- Mock source (same-shape across src/dst, parameterised by P) --
 
@@ -579,11 +578,14 @@ mod tests {
     struct MockPos(u64);
 
     impl Position for MockPos {
-        fn marshal(&self) -> Vec<u8> {
-            self.0.to_le_bytes().to_vec()
+        fn marshal(&self) -> serde_json::Value {
+            serde_json::json!(self.0)
         }
-        fn unmarshal(bytes: &[u8]) -> Option<Self> {
-            bytes.try_into().ok().map(u64::from_le_bytes).map(MockPos)
+    }
+
+    impl MockPos {
+        fn from_value(v: &serde_json::Value) -> Option<Self> {
+            v.as_u64().map(MockPos)
         }
     }
 
@@ -604,25 +606,16 @@ mod tests {
 
     struct MockSource {
         items: StdMutex<Vec<Ev>>,
-        latest_store: Store<MockPos>,
-        latest_tx: watch::Sender<MockPos>,
-        best_store: Store<MockPos>,
-        safe_store: Store<MockPos>,
+        tip: watch::Sender<MockPos>,
         self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
     }
 
     impl MockSource {
         fn new(initial: Vec<Ev>) -> Arc<Self> {
             let tip = MockPos(initial.len() as u64);
-            let (tx, rx) = watch::channel(tip);
-            let (_, b_rx) = watch::channel(tip);
-            let (_, s_rx) = watch::channel(tip);
             let s = Arc::new(Self {
                 items: StdMutex::new(initial),
-                latest_store: Store::new(rx),
-                latest_tx: tx,
-                best_store: Store::new(b_rx),
-                safe_store: Store::new(s_rx),
+                tip: watch::channel(tip).0,
                 self_ref: std::sync::OnceLock::new(),
             });
             let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -635,7 +628,7 @@ mod tests {
                 items.push(e);
                 MockPos(items.len() as u64)
             };
-            let _ = self.latest_tx.send(new_tip);
+            self.tip.send_replace(new_tip);
         }
 
         fn arc_self(&self) -> Arc<Self> {
@@ -667,7 +660,7 @@ mod tests {
     impl HistStoreBackend<Ev, MockPos> for MockSource {
         fn snapshots(&self) -> HistStream<Ev, MockPos> {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-            let mut sub = self.latest_store.subscribe();
+            let mut sub = Store::new(self.tip.subscribe()).subscribe();
             Box::pin(poll_fn(move |cx| {
                 StdPin::new(&mut sub)
                     .poll_next(cx)
@@ -677,40 +670,15 @@ mod tests {
 
         async fn next(&self) -> Hist<Ev, MockPos> {
             let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-            Hist::new(backend, MockPos(0), self.latest_store.get())
-        }
-
-        fn subscribe(&self, cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>) -> AsyncDisposable {
-            let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-            let mut sub = self.latest_store.subscribe();
-            let cancel = CancellationToken::new();
-            let cancel2 = cancel.clone();
-            let handle = tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = cancel2.cancelled() => break,
-                        tip = sub.next() => {
-                            let Some(tip) = tip else { break };
-                            cb(Hist::new(backend.clone(), MockPos(0), tip));
-                        }
-                    }
-                }
-            });
-            AsyncDisposable::new(cancel, handle)
+            Hist::new(backend, MockPos(0), *self.tip.borrow())
         }
 
         async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {
             Ok(MockPos(0))
         }
 
-        fn latest(&self) -> &Store<MockPos> {
-            &self.latest_store
-        }
-        fn best(&self) -> &Store<MockPos> {
-            &self.best_store
-        }
-        fn safe(&self) -> &Store<MockPos> {
-            &self.safe_store
+        fn load(&self, value: serde_json::Value) -> Option<MockPos> {
+            MockPos::from_value(&value)
         }
     }
 
@@ -827,7 +795,11 @@ mod tests {
         let key = "test-key";
         // Persist anchors that point past all items.
         store
-            .set(key, MatcherAnchors::new(MockPos(99), MockPos(99)).marshal())
+            .set(
+                key,
+                serde_json::to_vec(&MatcherAnchors::new(MockPos(99), MockPos(99)).marshal())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -863,11 +835,10 @@ mod tests {
     #[tokio::test]
     async fn matcher_anchors_marshal_round_trip() {
         let a = MatcherAnchors::new(MockPos(42), MockPos(7));
-        let bytes = a.marshal();
-        let restored: MatcherAnchors<MockPos, MockPos> =
-            MatcherAnchors::unmarshal(&bytes).expect("unmarshal");
-        assert_eq!(restored.src, MockPos(42));
-        assert_eq!(restored.dst, MockPos(7));
+        let value = a.marshal();
+        let (src_v, dst_v) = MatcherAnchors::<MockPos, MockPos>::split(value).expect("split");
+        assert_eq!(MockPos::from_value(&src_v), Some(MockPos(42)));
+        assert_eq!(MockPos::from_value(&dst_v), Some(MockPos(7)));
     }
 
     #[tokio::test]
@@ -897,35 +868,51 @@ mod tests {
         let a2 = m.get_anchors().await.unwrap();
         assert_eq!(a2, next);
 
-        // Persistence written.
+        // Persistence written (as a `{src, dst}` JSON object).
         let bytes = store.get("k").await.unwrap().expect("persisted");
-        let parsed: MatcherAnchors<MockPos, MockPos> = MatcherAnchors::unmarshal(&bytes).unwrap();
-        assert_eq!(parsed, next);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let (src_v, dst_v) = MatcherAnchors::<MockPos, MockPos>::split(value).unwrap();
+        assert_eq!(MockPos::from_value(&src_v), Some(MockPos(7)));
+        assert_eq!(MockPos::from_value(&dst_v), Some(MockPos(3)));
     }
 
     #[tokio::test]
-    async fn changes_fires_on_either_source_advance() {
+    async fn iter_fires_on_either_source_advance() {
         let src = MockSource::new(vec![]);
         let dst = MockSource::new(vec![]);
-        let base = BaseMatcher::new(src.hist_store(), dst.hist_store(), bridge_match_fn());
-        let mut sub = base.changes().subscribe();
+        let store = Arc::new(InMemoryAnchorStore::new());
+        let m: Arc<Matcher<Ev, Ev, MockPos, MockPos>> = Arc::new(AnchoredMatcher::new(
+            src.hist_store(),
+            dst.hist_store(),
+            bridge_match_fn(),
+            store as Arc<dyn AnchorStore>,
+            "k",
+            Timestamp::new(0),
+        ));
+        let mut stream = m.iter();
 
-        // First yield is the current value (immediate).
-        sub.next().await.expect("initial");
+        // Initial state is delivered immediately (both snapshots seeded).
+        timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("initial state within timeout")
+            .expect("stream open")
+            .expect("state ok");
 
-        // Advance src — changes should fire.
+        // Advancing src yields a fresh state.
         src.append(ev(1, "burn1"));
-        timeout(Duration::from_secs(2), sub.next())
+        timeout(Duration::from_secs(2), stream.next())
             .await
-            .expect("src change within timeout")
-            .expect("subscription not closed");
+            .expect("src advance within timeout")
+            .expect("stream open")
+            .expect("state ok");
 
-        // Advance dst — changes should fire too.
+        // Advancing dst yields a fresh state too.
         dst.append(ev(1, "mint1"));
-        timeout(Duration::from_secs(2), sub.next())
+        timeout(Duration::from_secs(2), stream.next())
             .await
-            .expect("dst change within timeout")
-            .expect("subscription not closed");
+            .expect("dst advance within timeout")
+            .expect("stream open")
+            .expect("state ok");
     }
 
     #[tokio::test]

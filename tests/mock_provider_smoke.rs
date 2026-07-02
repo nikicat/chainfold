@@ -1,7 +1,7 @@
 //! Smoke tests for the mock-provider helper (CCP-2).
 //!
 //! Confirms the Asserter wrapping and `remaining()` semantics work as
-//! Phase 1's singleflight test will rely on them.
+//! the cache-layering singleflight test relies on them.
 
 mod common;
 

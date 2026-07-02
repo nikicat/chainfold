@@ -1,47 +1,34 @@
-//! Fetcher-driven gap filling: the [`Fetcher`] type, `ensure_cached`, the
-//! `items()` async stream, and the singleflight `walk_step` shared by both.
-//! This is the only path that calls out to `eth_getLogs` (via the fetcher)
-//! and the only path that writes fetched pages back into [`LogCache`].
+//! Fetcher-driven gap filling: `ensure_cached`, the `items()` async stream,
+//! and the singleflight `walk_step` shared by both. This is the only path
+//! that calls the fetcher and the only path that writes fetched pages back
+//! to the durable store (via [`RangeSpec::persist`]).
+//!
+//! All generic over a [`RangeSpec`](super::spec::RangeSpec) `S`.
 
-use std::future::Future;
 use std::ops::Bound;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use alloy::rpc::types::Log;
 use futures_core::Stream;
 use tokio::sync::Notify;
 
-use super::LogIndex;
-use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
+use super::RangeIndex;
 use super::range_tree::{Range, install_gap_placeholder};
-use crate::arch::HistoryError;
+#[cfg(test)]
+use super::spec::Fetcher;
+use super::spec::{IndexPos, RangeSpec};
+use crate::arch::{HistoryError, Positioned};
 use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};
-use crate::evm::types::{BlockNumber, LogIdx};
+use crate::evm::types::BlockRange;
 
-// ============================================================
-// Fetcher
-// ============================================================
-
-/// Fills a gap on demand. Returns the [`LogPage`] for the requested
-/// inclusive block range `[from_block, to_block]`.
-///
-/// In production this wraps `eth_getLogs`; tests pass a closure to make
-/// `LogIndex` pure-Rust testable.
-pub type Fetcher = Arc<
-    dyn Fn(
-            BlockNumber,
-            BlockNumber,
-        ) -> Pin<Box<dyn Future<Output = Result<LogPage, HistoryError>> + Send>>
-        + Send
-        + Sync,
->;
+/// The public positioned value [`RangeIndex::items`] yields for a spec `S`.
+type Yielded<S> = Positioned<<S as RangeSpec>::Event, <S as RangeSpec>::PubPos>;
 
 /// Build a [`Fetcher`] that always errors. Useful in tests that should
 /// never trigger a fetch — if the fetcher is invoked the test fails
 /// with a clear message.
 #[cfg(test)]
-pub(crate) fn never_fetch() -> Fetcher {
+pub(crate) fn never_fetch<S: RangeSpec>() -> Fetcher<S::Page> {
     Arc::new(|_, _| {
         Box::pin(async {
             Err(HistoryError::internal(
@@ -51,21 +38,21 @@ pub(crate) fn never_fetch() -> Fetcher {
     })
 }
 
-impl LogIndex {
+impl<S: RangeSpec> RangeIndex<S> {
     // --------------------------------------------------------
     // ensure_cached + singleflight
     // --------------------------------------------------------
 
-    /// Fill any gaps in `[from_block, to_block]` by calling the fetcher.
+    /// Fill any gaps in `[range.from, range.to]` by calling the fetcher.
     /// Concurrent callers share work via per-range [`Notify`] sentinels —
     /// the first arrival at a gap installs the notify, fetches, drops the
     /// notify, and notifies waiters; later arrivals see the notify, wait
     /// on it, and re-walk.
-    pub async fn ensure_cached(&self, from_block: u64, to_block: u64) -> Result<(), HistoryError> {
-        self.ensure_window_loaded(from_block, to_block)?;
+    pub async fn ensure_cached(&self, range: BlockRange) -> Result<(), HistoryError> {
+        self.ensure_window_loaded(range)?;
 
-        let from_pos = BlockPos::before_block(from_block);
-        let to_pos = BlockPos::end_of_block(to_block);
+        let from_pos = S::Pos::before_block(range.from);
+        let to_pos = S::Pos::end_of_block(range.to);
         let mut cursor = from_pos;
         loop {
             match self.walk_step(cursor, to_pos) {
@@ -85,8 +72,8 @@ impl LogIndex {
                     notify,
                 } => {
                     // We hold the in-tree fetch notify; fetch outside the lock.
-                    let (block_from, block_to) = gap_block_range(start_pos, end_pos);
-                    let fetch_result = (self.fetcher)(block_from, block_to).await;
+                    let bounds = S::Pos::fetch_bounds(start_pos, end_pos);
+                    let fetch_result = (self.fetcher)(bounds.from, bounds.to).await;
                     // Always remove the placeholder + notify on completion.
                     self.finalize_gap_fill(start_pos, end_pos, fetch_result.as_ref().ok())?;
                     notify.notify_waiters();
@@ -96,59 +83,46 @@ impl LogIndex {
         }
     }
 
-    /// Remove the placeholder fetch range and insert any fetched logs as
+    /// Remove the placeholder fetch range and insert any fetched items as
     /// proper Range entries. Called after the fetcher returns (success or
     /// failure). On failure we just remove the placeholder so a subsequent
     /// caller retries.
     fn finalize_gap_fill(
         &self,
-        start_pos: BlockPos,
-        end_pos: BlockPos,
-        page: Option<&LogPage>,
+        start_pos: S::Pos,
+        end_pos: S::Pos,
+        page: Option<&S::Page>,
     ) -> Result<(), HistoryError> {
         let mut tree = self.tree.lock().unwrap();
         // Drop placeholder.
         tree.remove(&end_pos);
-        let Some(page) = page else { return Ok(()) };
+        let Some(page) = page else {
+            return Ok(());
+        };
+        let items = S::page_items(page);
         // Translate page items into Ranges chained from start_pos to end_pos.
         let mut prev = start_pos;
-        for log in &page.items {
-            let Some(item) = log_ref_from(log) else {
-                continue;
-            };
-            let pos = item.pos();
+        for item in &items {
+            let pos = S::item_pos(item);
             if pos <= prev || pos > end_pos {
                 continue;
             }
-            tree.insert(pos, Range::filled(prev, pos, item));
+            tree.insert(pos, Range::filled(prev, pos, *item));
             prev = pos;
         }
         if end_pos > prev {
             tree.insert(end_pos, Range::empty(prev, end_pos));
         }
-        // Persist to LogCache so the next process sees the same shape.
+        // Persist so the next process sees the same shape.
         drop(tree);
-        if !page.items.is_empty() {
-            self.store
-                .insert_logs(&self.filter_hash, &page.items)
-                .map_err(|e| HistoryError::internal(format!("insert_logs: {e}")))?;
-        }
-        self.store
-            .record_scanned_range(
-                &self.filter_hash,
-                page.from_block.get(),
-                page.to_block.get(),
-                &page.end_block_hash,
-            )
-            .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))?;
-        Ok(())
+        self.spec.persist(page)
     }
 
     // --------------------------------------------------------
     // items() async stream
     // --------------------------------------------------------
 
-    /// Yield every cached and fetched-on-demand log whose position is
+    /// Yield every cached and fetched-on-demand item whose position is
     /// in `(from, to]`, in ascending order. Closes when `to` is reached.
     ///
     /// Gaps in the tree trigger a fetcher call on the consuming task;
@@ -156,9 +130,9 @@ impl LogIndex {
     /// by dropping the stream (which drops the `Arc<Self>` capture).
     pub fn items(
         self: Arc<Self>,
-        from: BlockPos,
-        to: BlockPos,
-    ) -> Pin<Box<dyn Stream<Item = Result<Log, HistoryError>> + Send>> {
+        from: S::Pos,
+        to: S::Pos,
+    ) -> Pin<Box<dyn Stream<Item = Result<Yielded<S>, HistoryError>> + Send>> {
         use futures_util::stream::unfold;
         let state = ItemsState {
             index: self,
@@ -171,9 +145,9 @@ impl LogIndex {
                 return None;
             }
             match state.index.clone().next_yield(state.cursor, state.to).await {
-                Ok(Some((log, advanced))) => {
+                Ok(Some((full, advanced))) => {
                     state.cursor = advanced;
-                    Some((Ok(log), state))
+                    Some((Ok(full), state))
                 }
                 Ok(None) => None,
                 Err(e) => {
@@ -190,9 +164,9 @@ impl LogIndex {
     /// difference is this path acts on the `Cached` boundary item.
     async fn next_yield(
         self: Arc<Self>,
-        mut from: BlockPos,
-        to: BlockPos,
-    ) -> Result<Option<(Log, BlockPos)>, HistoryError> {
+        mut from: S::Pos,
+        to: S::Pos,
+    ) -> Result<Option<(Yielded<S>, S::Pos)>, HistoryError> {
         loop {
             match self.walk_step(from, to) {
                 WalkStep::Done => return Ok(None),
@@ -204,10 +178,10 @@ impl LogIndex {
                     }
                     match item {
                         Some(item) => {
-                            let log = self.resolve(&item)?;
-                            return Ok(Some((log, end)));
+                            let full = self.resolve(&item)?;
+                            return Ok(Some((full, end)));
                         }
-                        // Empty (no-log) range — advance and keep walking.
+                        // Empty (no-item) range — advance and keep walking.
                         None => from = end,
                     }
                 }
@@ -216,8 +190,8 @@ impl LogIndex {
                     end_pos,
                     notify,
                 } => {
-                    let (block_from, block_to) = gap_block_range(start_pos, end_pos);
-                    let result = (self.fetcher)(block_from, block_to).await;
+                    let bounds = S::Pos::fetch_bounds(start_pos, end_pos);
+                    let result = (self.fetcher)(bounds.from, bounds.to).await;
                     self.finalize_gap_fill(start_pos, end_pos, result.as_ref().ok())?;
                     notify.notify_waiters();
                     result?;
@@ -238,7 +212,7 @@ impl LogIndex {
     /// cached range, an in-flight fetch to wait on, or a gap to fill. On
     /// [`WalkStep::FillGap`] it installs a placeholder + notify as a side
     /// effect. Callers loop, advancing `cursor` until they reach `to`.
-    fn walk_step(&self, cursor: BlockPos, to: BlockPos) -> WalkStep {
+    fn walk_step(&self, cursor: S::Pos, to: S::Pos) -> WalkStep<S> {
         if cursor >= to {
             return WalkStep::Done;
         }
@@ -283,52 +257,30 @@ impl LogIndex {
 // Private supporting types
 // ============================================================
 
-/// One step of [`LogIndex::walk_step`]. Both `ensure_cached` (gap-fill only)
+/// One step of [`RangeIndex::walk_step`]. Both `ensure_cached` (gap-fill only)
 /// and `next_yield` (streaming) drive the same walk; they diverge only in how
 /// they treat the `Cached` arm — the former advances past it, the latter
 /// yields its boundary `item`.
-enum WalkStep {
+enum WalkStep<S: RangeSpec> {
     /// Coverage reached `to`; nothing left in range.
     Done,
-    /// A cached range covers `(cursor, end]`. `item` is its boundary log
+    /// A cached range covers `(cursor, end]`. `item` is its boundary item
     /// (`None` for an empty range).
-    Cached { end: BlockPos, item: Option<LogRef> },
+    Cached { end: S::Pos, item: Option<S::Item> },
     /// A gap `(start_pos, end_pos]` to fill via the fetcher; a placeholder
     /// guarded by `notify` is already installed in the tree.
     FillGap {
-        start_pos: BlockPos,
-        end_pos: BlockPos,
+        start_pos: S::Pos,
+        end_pos: S::Pos,
         notify: Arc<Notify>,
     },
     /// An in-flight fetch covers the cursor; wait on `notify`, then re-walk.
     Wait(Arc<Notify>),
 }
 
-struct ItemsState {
-    index: Arc<LogIndex>,
-    cursor: BlockPos,
-    to: BlockPos,
+struct ItemsState<S: RangeSpec> {
+    index: Arc<RangeIndex<S>>,
+    cursor: S::Pos,
+    to: S::Pos,
     done: bool,
-}
-
-/// Convert a position-level gap `(start, end]` to inclusive block-level
-/// bounds `(from_block, to_block)` suitable for the fetcher. If `start`
-/// is at the end of a block, advance past that block. If `start` is
-/// `Bottom`, start from block 0.
-fn gap_block_range(start: BlockPos, end: BlockPos) -> (BlockNumber, BlockNumber) {
-    let from_block = match start {
-        BlockPos::Bottom => BlockNumber::ZERO,
-        BlockPos::At { block, log_index } => {
-            if log_index == LogIdx::MAX {
-                block.saturating_add(1)
-            } else {
-                block
-            }
-        }
-    };
-    let to_block = match end {
-        BlockPos::Bottom => BlockNumber::ZERO,
-        BlockPos::At { block, .. } => block,
-    };
-    (from_block, to_block)
 }

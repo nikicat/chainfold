@@ -1,4 +1,4 @@
-//! Phase 6 acceptance: `Matcher` abstraction.
+//! The `Matcher` abstraction (Phase 6 acceptance in `docs/refactor.md`).
 //!
 //! Source-agnostic — uses two independent `Source<SP=SrcPos>` and
 //! `Source<DP=DstPos>` mock backends so the cross-source nature is
@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chainfold::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
-    ItemStream, Position, Positioned, Store, Timestamp,
+    Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
+    Positioned, Store, Timestamp,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, BaseMatcher, InMemoryAnchorStore, Match, MatchFn, MatchInput,
@@ -24,7 +24,6 @@ use futures_util::StreamExt;
 use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
 use tokio::time::timeout;
-use tokio_util::sync::CancellationToken;
 
 // ============================================================
 // MockPos — same shape for both src and dst in these tests
@@ -34,11 +33,14 @@ use tokio_util::sync::CancellationToken;
 struct MockPos(u64);
 
 impl Position for MockPos {
-    fn marshal(&self) -> Vec<u8> {
-        self.0.to_le_bytes().to_vec()
+    fn marshal(&self) -> serde_json::Value {
+        serde_json::json!(self.0)
     }
-    fn unmarshal(bytes: &[u8]) -> Option<Self> {
-        bytes.try_into().ok().map(u64::from_le_bytes).map(MockPos)
+}
+
+impl MockPos {
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        v.as_u64().map(MockPos)
     }
 }
 
@@ -61,25 +63,16 @@ fn ev(bridge_id: u64, label: &str) -> Ev {
 
 struct MockSource {
     items: Mutex<Vec<Ev>>,
-    latest_store: Store<MockPos>,
-    latest_tx: watch::Sender<MockPos>,
-    best_store: Store<MockPos>,
-    safe_store: Store<MockPos>,
+    tip: watch::Sender<MockPos>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl MockSource {
     fn new(initial: Vec<Ev>) -> Arc<Self> {
         let tip = MockPos(initial.len() as u64);
-        let (tx, rx) = watch::channel(tip);
-        let (_, b_rx) = watch::channel(tip);
-        let (_, s_rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
-            latest_store: Store::new(rx),
-            latest_tx: tx,
-            best_store: Store::new(b_rx),
-            safe_store: Store::new(s_rx),
+            tip: watch::channel(tip).0,
             self_ref: std::sync::OnceLock::new(),
         });
         let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -92,7 +85,7 @@ impl MockSource {
             items.push(e);
             MockPos(items.len() as u64)
         };
-        let _ = self.latest_tx.send(new_tip);
+        self.tip.send_replace(new_tip);
     }
 
     fn arc_self(&self) -> Arc<Self> {
@@ -124,7 +117,7 @@ impl HistBackend<Ev, MockPos> for MockSource {
 impl HistStoreBackend<Ev, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<Ev, MockPos> {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-        let mut sub = self.latest_store.subscribe();
+        let mut sub = Store::new(self.tip.subscribe()).subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
@@ -134,40 +127,15 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
 
     async fn next(&self) -> Hist<Ev, MockPos> {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-        Hist::new(backend, MockPos(0), self.latest_store.get())
-    }
-
-    fn subscribe(&self, cb: Box<dyn Fn(Hist<Ev, MockPos>) + Send + Sync>) -> AsyncDisposable {
-        let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-        let mut sub = self.latest_store.subscribe();
-        let cancel = CancellationToken::new();
-        let cancel2 = cancel.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel2.cancelled() => break,
-                    tip = sub.next() => {
-                        let Some(tip) = tip else { break };
-                        cb(Hist::new(backend.clone(), MockPos(0), tip));
-                    }
-                }
-            }
-        });
-        AsyncDisposable::new(cancel, handle)
+        Hist::new(backend, MockPos(0), *self.tip.borrow())
     }
 
     async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {
         Ok(MockPos(0))
     }
 
-    fn latest(&self) -> &Store<MockPos> {
-        &self.latest_store
-    }
-    fn best(&self) -> &Store<MockPos> {
-        &self.best_store
-    }
-    fn safe(&self) -> &Store<MockPos> {
-        &self.safe_store
+    fn load(&self, value: serde_json::Value) -> Option<MockPos> {
+        MockPos::from_value(&value)
     }
 }
 
@@ -366,7 +334,10 @@ async fn get_history_returns_full_window_regardless_of_persisted_anchors() {
     let store = Arc::new(InMemoryAnchorStore::new());
     let key = "matcher-test";
     store
-        .set(key, MatcherAnchors::new(MockPos(99), MockPos(99)).marshal())
+        .set(
+            key,
+            serde_json::to_vec(&MatcherAnchors::new(MockPos(99), MockPos(99)).marshal()).unwrap(),
+        )
         .await
         .unwrap();
     let m: Matcher<Ev, Ev, MockPos, MockPos> = AnchoredMatcher::new(

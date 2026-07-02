@@ -1,7 +1,7 @@
 > **Historical brainstorm doc.** Written during the initial design phase
 > before the Phase 0–6 refactor landed. **Some of this is superseded** —
 > e.g. "Apply(state, event)" + "Go-first" reflect a pre-Rust plan. See
-> [`arch.md`](./arch.md) for the *shipped* design.
+> [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the *shipped* design.
 >
 > What still holds: the **use-case motivation** (state reconstruction +
 > cross-chain history comparison), the **layering principle** ("SQLite

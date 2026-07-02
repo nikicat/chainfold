@@ -6,14 +6,20 @@ use std::path::PathBuf;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
+use chainfold::Shared;
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, RpcMethod, rpc_retry_layer, rpc_span, versioned_path,
+    CacheDb, ChainId, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, RpcMethod,
+    SubscribeTransport, rpc_retry_layer, rpc_span, versioned_path,
 };
 use tracing::Instrument;
 
-use crate::chains::ChainResolver;
+use crate::chains::{ChainHandle, ChainResolver, ChainSelector, select_chain};
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
 use crate::config::{ChainIdCheck, Config, ConfigError, RpcSource};
+
+/// Env var overriding the configured/built-in default chain, consulted when
+/// neither `--chain` nor `--chain-id` is passed.
+const CHAIN_ENV_VAR: &str = "CHAINFOLD_CHAIN";
 
 /// Default cache DB location: `$XDG_CACHE_HOME/chainfold/chainfold.db`.
 /// Falls back to `./chainfold.db` if no XDG cache dir is resolvable.
@@ -30,22 +36,42 @@ pub async fn run(
     direction: Direction,
     follow: FollowMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Eagerly load the chainlist resolver if we'll need it: name resolution
-    // OR public-RPC fallback (i.e. no explicit --rpc-url).
-    let resolver = if args.chain.is_some() || args.rpc_url.is_none() {
+    // Resolve which chain to target. Precedence (see `select_chain`):
+    // --chain-id > --chain > $CHAINFOLD_CHAIN > [evm] default_chain > ethereum.
+    let defaulted = args.chain.is_none() && args.chain_id.is_none();
+    let env_default = std::env::var(CHAIN_ENV_VAR)
+        .ok()
+        .and_then(|s| ChainSelector::parse(&s));
+    let selector = select_chain(
+        args.chain_id.map(ChainId::new),
+        args.chain.as_deref().map(ChainHandle::new),
+        env_default,
+        config.default_chain().cloned(),
+    );
+
+    // Load the chainlist resolver if we'll need it: name→id resolution, OR the
+    // public-RPC fallback (i.e. no explicit --rpc-url).
+    let needs_name = matches!(selector, ChainSelector::Name(_));
+    let resolver = if needs_name || args.rpc_url.is_none() {
         Some(ChainResolver::load_or_fetch().await?)
     } else {
         None
     };
 
-    let chain_id = match (args.chain_id, args.chain.as_deref()) {
-        (Some(id), _) => ChainId::new(id),
-        (None, Some(name)) => resolver
+    let chain_id = match &selector {
+        ChainSelector::Id(id) => *id,
+        ChainSelector::Name(handle) => resolver
             .as_ref()
-            .expect("resolver loaded when args.chain is set")
-            .resolve(name)?,
-        (None, None) => unreachable!("clap enforces required_unless_present"),
+            .expect("resolver loaded when chain is selected by name")
+            .resolve(handle)?,
     };
+
+    if defaulted {
+        eprintln!(
+            "note: no --chain/--chain-id given; using chain {chain_id} \
+             (set {CHAIN_ENV_VAR} or [evm] default_chain to change)"
+        );
+    }
 
     // Surface chainlist advisories for the resolved chain, when the chainlist
     // data is already loaded (resolver present — i.e. a name lookup or the
@@ -92,12 +118,8 @@ pub async fn run(
         .into());
     };
 
-    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    // The chain id is already resolved (and typed) from args — bundle it into
-    // the provider so the EVM layer reads it for free instead of re-fetching
-    // eth_chainId.
-    let provider = ChainProvider::new(ProviderBuilder::new().connect_client(client), chain_id);
-
+    // Open the durable cache before the provider — the ChainProvider bundles
+    // the log cache (header singleflight lives behind it).
     let db_path_buf = args.db.clone().unwrap_or_else(default_db_path);
     if let Some(parent) = db_path_buf.parent()
         && !parent.as_os_str().is_empty()
@@ -106,6 +128,16 @@ pub async fn run(
     }
     let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = CacheDb::open(&db_path)?;
+
+    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
+    // The chain id is already resolved (and typed) from args — bundle it into
+    // the provider so the EVM layer reads it for free instead of re-fetching
+    // eth_chainId.
+    let provider = ChainProvider::new(
+        ProviderBuilder::new().connect_client(client),
+        chain_id,
+        Shared::new(cache.logs()),
+    );
 
     match config.chain_id_check() {
         ChainIdCheck::Verify => {
@@ -122,22 +154,37 @@ pub async fn run(
         ChainIdCheck::Trust => {}
     }
 
+    // One chain entity per invocation. `--follow` fixes the live-tracking
+    // transport at construction: this binary always builds an HTTP provider,
+    // so follow mode polls (same 2s cadence the old subscribe calls used).
+    let chain = EvmChain::new(
+        provider,
+        EvmChainConfig {
+            chunk_size: ChunkSize::new(args.chunk_size),
+            follow: match follow {
+                FollowMode::Follow => Some(SubscribeTransport::poll_default()),
+                FollowMode::Once => None,
+            },
+            ..EvmChainConfig::default()
+        },
+    )
+    .await?;
+
     match &args.command {
         EvmCommand::Erc20(erc20_args) => {
             erc20::run(
-                &provider, &cache, &db_path, args, erc20_args, chain_id, direction, follow,
+                &chain, &cache, &db_path, args, erc20_args, direction, follow,
             )
             .await
         }
         EvmCommand::Events(events_args) => {
             events::run(
-                &provider,
+                &chain,
                 &cache,
                 &db_path,
                 config,
                 args,
                 events_args,
-                chain_id,
                 direction,
                 follow,
             )

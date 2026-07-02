@@ -1,13 +1,17 @@
-//! Position and pointer data types for the range tree.
+//! Position and pointer data types for the log range tree.
 //!
 //! [`BlockPos`] is the key type ordering the tree; [`LogRef`] is the
 //! lightweight pointer the tree stores in lieu of full `Log`s; [`LogPage`]
 //! is the unit of input to page insertion and gap fills.
+//!
+//! [`BlockPos`] implements [`IndexPos`](super::spec::IndexPos) so a
+//! [`RangeIndex<LogSpec>`](super::RangeIndex) can map a position-gap back to
+//! the inclusive block range an `eth_getLogs` fetch needs.
 
 use alloy::primitives::BlockHash;
 use alloy::rpc::types::Log;
 
-use crate::evm::types::{BlockNumber, LogIdx};
+use crate::evm::types::{BlockNumber, BlockRange, LogIdx};
 
 // ============================================================
 // BlockPos — position type for the tree
@@ -30,35 +34,9 @@ pub enum BlockPos {
 }
 
 impl BlockPos {
-    /// The position *just before* the first log in `block`. Used as the
-    /// exclusive lower bound for a block-level scanned range whose start
-    /// is `block`.
-    pub fn before_block(block: u64) -> Self {
-        match block.checked_sub(1) {
-            Some(prev) => BlockPos::At {
-                block: BlockNumber::new(prev),
-                log_index: LogIdx::MAX,
-            },
-            None => BlockPos::Bottom,
-        }
-    }
-
-    /// The position *at the end* of `block` — strictly greater than every
-    /// possible log in that block. Used as the inclusive upper bound for
-    /// a block-level scanned range whose end is `block`.
-    pub fn end_of_block(block: u64) -> Self {
-        BlockPos::At {
-            block: BlockNumber::new(block),
-            log_index: LogIdx::MAX,
-        }
-    }
-
     /// Convert a concrete (block, `log_index`) pair to a position.
-    pub fn at(block: u64, log_index: u32) -> Self {
-        BlockPos::At {
-            block: BlockNumber::new(block),
-            log_index: LogIdx::new(log_index),
-        }
+    pub fn at(block: BlockNumber, log_index: LogIdx) -> Self {
+        BlockPos::At { block, log_index }
     }
 
     /// The block number this position sits in, if concrete. `None` for
@@ -68,6 +46,47 @@ impl BlockPos {
             BlockPos::Bottom => None,
             BlockPos::At { block, .. } => Some(*block),
         }
+    }
+}
+
+impl super::spec::IndexPos for BlockPos {
+    fn bottom() -> Self {
+        BlockPos::Bottom
+    }
+
+    fn before_block(block: BlockNumber) -> Self {
+        match block.checked_sub(1) {
+            Some(prev) => BlockPos::At {
+                block: prev,
+                log_index: LogIdx::MAX,
+            },
+            None => BlockPos::Bottom,
+        }
+    }
+
+    fn end_of_block(block: BlockNumber) -> Self {
+        BlockPos::At {
+            block,
+            log_index: LogIdx::MAX,
+        }
+    }
+
+    fn fetch_bounds(start: Self, end: Self) -> BlockRange {
+        let from = match start {
+            BlockPos::Bottom => BlockNumber::ZERO,
+            BlockPos::At { block, log_index } => {
+                if log_index == LogIdx::MAX {
+                    block.saturating_add(1)
+                } else {
+                    block
+                }
+            }
+        };
+        let to = match end {
+            BlockPos::Bottom => BlockNumber::ZERO,
+            BlockPos::At { block, .. } => block,
+        };
+        BlockRange::new(from, to)
     }
 }
 
@@ -99,8 +118,10 @@ impl LogRef {
 // LogPage — input to insert_page
 // ============================================================
 
-/// A page of logs covering `(from_block, to_block]` from one
-/// `eth_getLogs` call (or a subscription delivery).
+/// A page of logs covering the inclusive block range
+/// `[from_block, to_block]` from one `eth_getLogs` call (or a subscription
+/// delivery). In position space that is `(before_block(from_block),
+/// end_of_block(to_block)]`.
 ///
 /// `end_block_hash` lets the consumer record the matching scanned-range
 /// entry in `LogCache::record_scanned_range`.

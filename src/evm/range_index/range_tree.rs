@@ -1,17 +1,18 @@
 //! The [`Range`] tree-entry type and the operations that mutate the tree:
 //! page insertion (with the four late-item cases), the lazy per-window load
-//! of scanned ranges from `LogCache`, and the gap placeholder helper.
+//! of scanned ranges from the durable store, and the gap placeholder helper.
+//!
+//! All generic over a [`RangeSpec`](super::spec::RangeSpec) `S`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use alloy::rpc::types::Log;
 use tokio::sync::Notify;
 
-use super::LogIndex;
-use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
+use super::RangeIndex;
+use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::HistoryError;
-use crate::evm::types::BlockRange;
+use crate::evm::types::{BlockRange, ChunkSize};
 
 // ============================================================
 // Range — one entry in the tree
@@ -27,15 +28,15 @@ use crate::evm::types::BlockRange;
 /// `fetch` is set while a sibling task is filling this range from the
 /// fetcher — peer iterators clone the [`Notify`] and `await` it instead
 /// of refetching.
-pub(super) struct Range {
-    pub(super) start: BlockPos,
-    pub(super) end: BlockPos,
-    pub(super) item: Option<LogRef>,
+pub(super) struct Range<S: RangeSpec> {
+    pub(super) start: S::Pos,
+    pub(super) end: S::Pos,
+    pub(super) item: Option<S::Item>,
     pub(super) fetch: Option<Arc<Notify>>,
 }
 
-impl Range {
-    pub(super) fn empty(start: BlockPos, end: BlockPos) -> Self {
+impl<S: RangeSpec> Range<S> {
+    pub(super) fn empty(start: S::Pos, end: S::Pos) -> Self {
         debug_assert!(start <= end, "empty range with end < start");
         Self {
             start,
@@ -45,9 +46,9 @@ impl Range {
         }
     }
 
-    pub(super) fn filled(start: BlockPos, end: BlockPos, item: LogRef) -> Self {
+    pub(super) fn filled(start: S::Pos, end: S::Pos, item: S::Item) -> Self {
         debug_assert!(start <= end, "filled range with end < start");
-        debug_assert_eq!(item.pos(), end, "filled item must sit at range end");
+        debug_assert_eq!(S::item_pos(&item), end, "filled item must sit at range end");
         Self {
             start,
             end,
@@ -62,34 +63,35 @@ impl Range {
     }
 }
 
-impl LogIndex {
+impl<S: RangeSpec> RangeIndex<S> {
     // --------------------------------------------------------
     // Page insertion (addPage + addGapItems)
     // --------------------------------------------------------
 
-    /// Install a freshly fetched page into the tree. Items in `page.items`
-    /// MUST be in ascending `(block_number, log_index)` order. Items
-    /// strictly past the existing tail are appended; items at-or-before
+    /// Install a freshly fetched page into the tree. Items the page carries
+    /// (via [`RangeSpec::page_items`]) MUST be in ascending position order.
+    /// Items strictly past the existing tail are appended; items at-or-before
     /// the tail go through the late-item path (the four cases in
     /// [`Self::insert_late_item`]).
-    pub fn insert_page(&self, page: &LogPage) {
-        assert_increasing(&page.items);
+    pub fn insert_page(&self, page: &S::Page) {
+        let items = S::page_items(page);
+        assert_increasing::<S>(&items);
 
         let mut tree = self.tree.lock().unwrap();
-        let page_start = BlockPos::before_block(page.from_block.get());
-        let page_end = BlockPos::end_of_block(page.to_block.get());
+        let page_bounds = S::page_bounds(page);
+        let page_start = S::Pos::before_block(page_bounds.from);
+        let page_end = S::Pos::end_of_block(page_bounds.to);
 
         // Tail = last range currently in the tree (max by key = max by end).
         let tail_end = tree.keys().next_back().copied();
 
-        let mut new_ranges: Vec<Range> = Vec::new();
-        let mut range_start: BlockPos = page_start;
+        let mut new_ranges: Vec<Range<S>> = Vec::new();
+        let mut range_start = page_start;
         // Predecessor used for late items that chain together.
-        let mut late_prev: BlockPos = page_start;
+        let mut late_prev = page_start;
 
-        for log in &page.items {
-            let item = log_ref_from(log).expect("page items must have block_hash");
-            let item_pos = item.pos();
+        for item in &items {
+            let item_pos = S::item_pos(item);
 
             let strictly_past_tail = tail_end.is_none_or(|t| item_pos > t);
             let strictly_before_tail = tail_end.is_some_and(|t| item_pos < t);
@@ -98,9 +100,9 @@ impl LogIndex {
             // at that position.
 
             if strictly_past_tail {
-                new_ranges.push(Range::filled(range_start, item_pos, item));
+                new_ranges.push(Range::filled(range_start, item_pos, *item));
             } else if strictly_before_tail {
-                Self::insert_late_item(&mut tree, item, late_prev);
+                Self::insert_late_item(&mut tree, *item, late_prev);
             }
             range_start = item_pos;
             late_prev = item_pos;
@@ -127,10 +129,10 @@ impl LogIndex {
         }
         drop(tree);
 
-        // Async drain to LogCache — see attach_drain. Cloning the page is
-        // necessary because `page: &LogPage` is borrowed; the drain task
-        // owns its copy. In-memory tree update above is the source of truth
-        // for navigation; persistence is best-effort.
+        // Async drain to the durable store — see attach_drain. Cloning the
+        // page is necessary because `page: &S::Page` is borrowed; the drain
+        // task owns its copy. In-memory tree update above is the source of
+        // truth for navigation; persistence is best-effort.
         if let Some(tx) = self.drain_tx.lock().unwrap().as_ref() {
             let _ = tx.send(page.clone());
         }
@@ -138,22 +140,22 @@ impl LogIndex {
 
     /// Insert an item that arrived strictly before the current tail.
     ///
-    /// Four cases over the range whose end is the next key `>= item.pos`:
-    /// 1. None / range.start > item.pos → item sits in a gap →
-    ///    insert `(rangeStart, item.pos, item)`.
-    /// 2. range.end == item.pos and range filled → duplicate, no-op.
-    /// 3. range.end == item.pos and range empty → upgrade to filled.
-    /// 4. range.start <= item.pos < range.end → split the range around
-    ///    `item.pos`, preserving the original tail.
+    /// Four cases over the range whose end is the next key `>= item_pos`:
+    /// 1. None / `range.start > item_pos` → item sits in a gap →
+    ///    insert `(range_start, item_pos, item)`.
+    /// 2. `range.end == item_pos` and range filled → duplicate, no-op.
+    /// 3. `range.end == item_pos` and range empty → upgrade to filled.
+    /// 4. `range.start <= item_pos < range.end` → split the range around
+    ///    `item_pos`, preserving the original tail.
     ///
     /// A range with a live `fetch` notify is left alone — the in-flight
     /// fetcher will deliver authoritative state.
     pub(super) fn insert_late_item(
-        tree: &mut BTreeMap<BlockPos, Range>,
-        item: LogRef,
-        range_start: BlockPos,
+        tree: &mut BTreeMap<S::Pos, Range<S>>,
+        item: S::Item,
+        range_start: S::Pos,
     ) {
-        let item_pos = item.pos();
+        let item_pos = S::item_pos(&item);
         let existing_key = tree.range(item_pos..).next().map(|(k, _)| *k);
         let existing = existing_key.and_then(|k| tree.get(&k));
 
@@ -185,7 +187,7 @@ impl LogIndex {
         }
 
         if existing_start <= item_pos {
-            // Case 4: split around item.pos.
+            // Case 4: split around item_pos.
             tree.remove(&existing_end);
             tree.insert(item_pos, Range::filled(existing_start, item_pos, item));
             // Right half preserves the original tail item.
@@ -198,7 +200,7 @@ impl LogIndex {
             return;
         }
 
-        // existing.start > item.pos → item in a gap before existing.
+        // existing.start > item_pos → item in a gap before existing.
         tree.insert(item_pos, Range::filled(range_start, item_pos, item));
     }
 
@@ -206,16 +208,15 @@ impl LogIndex {
     // Lazy per-window load
     // --------------------------------------------------------
 
-    /// Materialize any `scanned_ranges` rows from `LogCache` that overlap
-    /// the requested block window into the in-memory tree, if not already
+    /// Materialize any cached spans from the durable store that overlap the
+    /// requested block window into the in-memory tree, if not already
     /// pulled. Idempotent.
     ///
     /// The window is widened to align with [`Self::chunk_size`] so peer
-    /// processes observing the same filter at the same chunk granularity
+    /// processes observing the same source at the same chunk granularity
     /// see the same tree shape.
-    pub fn ensure_window_loaded(&self, from_block: u64, to_block: u64) -> Result<(), HistoryError> {
-        let window = align_window(from_block, to_block, self.chunk_size);
-        let (aligned_from, aligned_to) = window.as_u64();
+    pub fn ensure_window_loaded(&self, range: BlockRange) -> Result<(), HistoryError> {
+        let window = align_window(range, self.chunk_size);
 
         {
             let loaded = self.loaded_windows.lock().unwrap();
@@ -227,45 +228,30 @@ impl LogIndex {
             }
         }
 
-        // Scanned ranges come straight off SQLite as raw `(u64, u64)` rows.
-        let scanned = self
-            .store
-            .get_scanned_ranges(&self.filter_hash)
-            .map_err(|e| HistoryError::internal(format!("get_scanned_ranges: {e}")))?;
-
-        // For each scanned range overlapping the aligned window, materialize
-        // its tree entries — one filled Range per cached log, plus an
-        // empty tail Range if the scanned region extends past the last log.
+        let spans = self.spec.load_window(window)?;
         let mut tree = self.tree.lock().unwrap();
-        for (s_start, s_end) in scanned {
-            if s_end < aligned_from || s_start > aligned_to {
-                continue;
-            }
-            // Skip if any range with key in (Bottom, end_of_block(s_end)] is
-            // already present and matches — naive check via the end key.
-            let scanned_end_pos = BlockPos::end_of_block(s_end);
-            if tree.contains_key(&scanned_end_pos) {
-                // Either an empty tail or a filled-at-end-of-block range is
-                // already there. Treat as loaded.
+        for LoadedSpan {
+            range: span_range,
+            items,
+        } in spans
+        {
+            let span_start = S::Pos::before_block(span_range.from);
+            let span_end = S::Pos::end_of_block(span_range.to);
+            // Skip if a range ending at this span's end is already present —
+            // either an empty tail or a filled-at-end-of-block range is
+            // already there. Treat as loaded.
+            if tree.contains_key(&span_end) {
                 continue;
             }
 
-            let logs = self
-                .store
-                .get_logs_in_range(&self.filter_hash, s_start, s_end)
-                .map_err(|e| HistoryError::internal(format!("get_logs_in_range: {e}")))?;
-
-            let mut prev_pos = BlockPos::before_block(s_start);
-            for log in &logs {
-                let Some(item) = log_ref_from(log) else {
-                    continue;
-                };
-                let pos = item.pos();
-                tree.insert(pos, Range::filled(prev_pos, pos, item));
+            let mut prev_pos = span_start;
+            for item in &items {
+                let pos = S::item_pos(item);
+                tree.insert(pos, Range::filled(prev_pos, pos, *item));
                 prev_pos = pos;
             }
-            if scanned_end_pos > prev_pos {
-                tree.insert(scanned_end_pos, Range::empty(prev_pos, scanned_end_pos));
+            if span_end > prev_pos {
+                tree.insert(span_end, Range::empty(prev_pos, span_end));
             }
         }
         drop(tree);
@@ -278,10 +264,10 @@ impl LogIndex {
 /// Install an in-flight fetch placeholder at `end` covering `(start, end]`
 /// and return its [`Notify`]. Caller fills `(start, end]` via the fetcher
 /// and replaces the placeholder in `finalize_gap_fill`.
-pub(super) fn install_gap_placeholder(
-    tree: &mut BTreeMap<BlockPos, Range>,
-    start: BlockPos,
-    end: BlockPos,
+pub(super) fn install_gap_placeholder<S: RangeSpec>(
+    tree: &mut BTreeMap<S::Pos, Range<S>>,
+    start: S::Pos,
+    end: S::Pos,
 ) -> Arc<Notify> {
     let notify = Arc::new(Notify::new());
     tree.insert(
@@ -296,24 +282,25 @@ pub(super) fn install_gap_placeholder(
     notify
 }
 
-/// Align `[from, to]` outward to a multiple of `chunk` so peer processes
-/// scanning the same filter at the same chunk size hit identical
+/// Align `[range.from, range.to]` outward to a multiple of `chunk` so peer
+/// processes scanning the same source at the same chunk size hit identical
 /// scanned-range boundaries.
-pub(super) fn align_window(from: u64, to: u64, chunk: u64) -> BlockRange {
+///
+/// The alignment math drops to `u64` at this seam ([`ChunkSize`] and
+/// [`BlockNumber`](crate::evm::types::BlockNumber) don't do division).
+pub(super) fn align_window(range: BlockRange, chunk: ChunkSize) -> BlockRange {
+    let (from, to, chunk) = (range.from.get(), range.to.get(), chunk.get());
     let aligned_from = (from / chunk) * chunk;
     let aligned_to = (to / chunk + 1) * chunk - 1;
     BlockRange::from_u64(aligned_from, aligned_to)
 }
 
-fn assert_increasing(logs: &[Log]) {
-    let mut prev: Option<(u64, u64)> = None;
-    for log in logs {
-        let cur = (log.block_number.unwrap_or(0), log.log_index.unwrap_or(0));
+fn assert_increasing<S: RangeSpec>(items: &[S::Item]) {
+    let mut prev: Option<S::Pos> = None;
+    for item in items {
+        let cur = S::item_pos(item);
         if let Some(p) = prev {
-            assert!(
-                cur > p,
-                "LogPage items must be in ascending (block, log_index) order"
-            );
+            assert!(cur > p, "page items must be in ascending position order");
         }
         prev = Some(cur);
     }

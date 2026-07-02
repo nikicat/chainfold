@@ -31,8 +31,6 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use futures_util::stream::unfold;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 // ============================================================
 // Core type aliases
@@ -106,23 +104,31 @@ impl HistoryError {
 /// A position is the gap *between* (or at the boundary of) items — never an
 /// item itself. The natural lower bound (analogous to "before any item") is
 /// the type's own [`Default`] value; e.g. EVM uses `EvmPosition { block: 0,
-/// log_index: 0 }`. This sentinel is what [`crate::merge::ErasedHistStore`]
-/// substitutes when a saved [`crate::merge::MergedPos`] lacks an entry for
-/// a newly-added source.
+/// log_index: 0 }`. This sentinel is what the vector-clock interleave
+/// ([`crate::merge::interleave_hist_stores`]) substitutes when a saved
+/// [`crate::merge::MergedPos`] lacks an entry for a newly-added source.
 ///
 /// **Source-local.** Positions from different sources are not comparable
 /// and the trait does not provide source identity — that concern lives on
-/// [`HistStore`]. Heterogeneous merge wraps per-source positions in a keyed
+/// [`HistStore`]. Sources sharing one position space merge via
+/// [`crate::merge::merge_hist_stores`] on `P`'s own order; disjoint-space
+/// interleave wraps per-source positions in a keyed
 /// [`crate::merge::MergedPos`] and never compares them across sources.
 pub trait Position: Clone + Default + Eq + Ord + std::fmt::Debug + Send + Sync + 'static {
-    /// Serialize for persistence. Reconstruct with [`unmarshal`](Self::unmarshal).
-    fn marshal(&self) -> Vec<u8>;
-
-    /// Deserialize a previously marshalled position. Returns `None` on
-    /// invalid data.
-    fn unmarshal(bytes: &[u8]) -> Option<Self>
-    where
-        Self: Sized;
+    /// Serialize to a structured [`serde_json::Value`] for persistence.
+    ///
+    /// A *structured* value (not opaque bytes) so composite positions nest
+    /// trivially — `MergedPos` is a JSON object of its sources' values,
+    /// `MatcherAnchors` a `{src, dst}` object — with no hand-rolled framing.
+    /// Dump it to JSON or any other serde format at the storage boundary.
+    ///
+    /// Deserialization is deliberately **not** on this trait — it lives on the
+    /// owning store as [`HistStore::load`]. A position can only serialize
+    /// *itself* (a behaviour of a concrete instance), whereas `load` must
+    /// exist *before* any instance does and, for heterogeneous merge, needs
+    /// the source identities the store holds. Mirrors the reference
+    /// `history.ts`'s `pos.serialize()` / `store.load(json)` split.
+    fn marshal(&self) -> serde_json::Value;
 }
 
 // ============================================================
@@ -187,36 +193,6 @@ impl<T: Clone + Send + Sync + 'static> Store<T> {
                 Some((val, (rx, false)))
             }
         }))
-    }
-}
-
-// ============================================================
-// AsyncDisposable
-// ============================================================
-
-/// Handle that cancels a background task on drop.
-///
-/// Returned by [`HistStore::subscribe`] and similar push-based APIs.
-pub struct AsyncDisposable {
-    cancel: CancellationToken,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl AsyncDisposable {
-    pub fn new(cancel: CancellationToken, handle: JoinHandle<()>) -> Self {
-        Self {
-            cancel,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for AsyncDisposable {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
     }
 }
 
@@ -353,28 +329,20 @@ impl<T: Send + Sync + 'static, P: Position> HistStore<T, P> {
         self.backend.next().await
     }
 
-    /// Push-based variant of [`snapshots`](Self::snapshots) — invokes `cb`
-    /// with each new snapshot. Drop the returned handle to cancel.
-    pub fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable {
-        self.backend.subscribe(cb)
-    }
-
     /// Estimate a position at a wall-clock time. Used as a cut point in
     /// [`Hist::split`] when resuming from a time instead of an anchor.
     pub async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {
         self.backend.time_pos(time).await
     }
 
-    /// Reactive tip stores (best-effort; sources without finality wiring
-    /// fall back to `latest`).
-    pub fn latest(&self) -> &Store<P> {
-        self.backend.latest()
-    }
-    pub fn best(&self) -> &Store<P> {
-        self.backend.best()
-    }
-    pub fn safe(&self) -> &Store<P> {
-        self.backend.safe()
+    /// Reconstruct a position from a [`serde_json::Value`] produced by
+    /// [`Position::marshal`].
+    ///
+    /// The store — which knows the concrete `P` (and, for merge, the source
+    /// identities) — owns deserialization. Resume by loading a saved anchor
+    /// here, then [`Hist::split`]ting at it. Returns `None` on invalid input.
+    pub fn load(&self, value: serde_json::Value) -> Option<P> {
+        self.backend.load(value)
     }
 }
 
@@ -390,9 +358,9 @@ pub trait HistBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// Clamp `p` to lie within `[start, end]`. Default implementation uses
     /// [`Ord`] on `P`. Override for positions whose canonical `Ord` does
     /// not reflect the window-containment semantics needed by
-    /// [`Hist::split`] — e.g. the keyed [`crate::merge::MergedPos`] uses a
-    /// byte-lex `Ord` for total order but clamps component-wise to honor
-    /// per-source containment.
+    /// [`Hist::split`] — e.g. the keyed [`crate::merge::MergedPos`] has a
+    /// lexicographic total order over its per-source components but clamps
+    /// each component separately to honor per-source containment.
     fn clamp_pos(&self, p: P, start: &P, end: &P) -> P {
         if &p < start {
             start.clone()
@@ -414,15 +382,13 @@ pub trait HistStoreBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// Current snapshot.
     async fn next(&self) -> Hist<T, P>;
 
-    /// Push-based variant of [`snapshots`](Self::snapshots).
-    fn subscribe(&self, cb: Box<dyn Fn(Hist<T, P>) + Send + Sync>) -> AsyncDisposable;
-
     /// Estimate a position at a wall-clock time.
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;
 
-    fn latest(&self) -> &Store<P>;
-    fn best(&self) -> &Store<P>;
-    fn safe(&self) -> &Store<P>;
+    /// Deserialize a position from a [`Position::marshal`] value. The store
+    /// owns deserialization because it knows the concrete `P` (and, for
+    /// merge, the per-source identities). Returns `None` on invalid input.
+    fn load(&self, value: serde_json::Value) -> Option<P>;
 }
 
 // ============================================================

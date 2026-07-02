@@ -10,8 +10,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::arch::{
-    AsyncDisposable, Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError,
-    ItemStream, Position, Positioned, Store, Timestamp,
+    Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
+    Positioned, Timestamp,
 };
 
 /// Item emitted by a mapped history. Carries both the transformed value and
@@ -73,28 +73,12 @@ where
         wrap_hist(&self.upstream.next().await, self.f.clone())
     }
 
-    fn subscribe(
-        &self,
-        cb: Box<dyn Fn(Hist<MappedItem<Src, Dst>, P>) + Send + Sync>,
-    ) -> AsyncDisposable {
-        let f = self.f.clone();
-        self.upstream.subscribe(Box::new(move |hist| {
-            cb(wrap_hist(&hist, f.clone()));
-        }))
-    }
-
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {
         self.upstream.time_pos(time).await
     }
 
-    fn latest(&self) -> &Store<P> {
-        self.upstream.latest()
-    }
-    fn best(&self) -> &Store<P> {
-        self.upstream.best()
-    }
-    fn safe(&self) -> &Store<P> {
-        self.upstream.safe()
+    fn load(&self, value: serde_json::Value) -> Option<P> {
+        self.upstream.load(value)
     }
 }
 
@@ -190,14 +174,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn map_proxies_tip_store_from_upstream() {
+    async fn map_proxies_tip_from_upstream() {
         let src = MockSource::new(vec![MockEvent("a".into())]);
         let mapped = map_hist_store(src.hist_store(), |e: &MockEvent| e.0.clone());
-        // tip is item count
-        assert_eq!(mapped.latest().get(), MockPos(1));
+        // The mapped store's tip (the current snapshot's `end`) proxies from
+        // upstream — finality accessors are gone, so read it via `next().end()`.
+        assert_eq!(*mapped.next().await.end(), MockPos(1));
         src.append(MockEvent("b".into()));
-        // Update is synchronous on watch::Sender, so the change is visible
-        // without polling.
-        assert_eq!(mapped.latest().get(), MockPos(2));
+        // `next()` re-reads the upstream tip, which `append` bumped synchronously.
+        assert_eq!(*mapped.next().await.end(), MockPos(2));
     }
 }
