@@ -221,7 +221,7 @@ flowchart LR
     Positioned["<b>Positioned&lt;T,P&gt;</b><br/>item + post-cut position"]
     Hist["<b>Hist&lt;T,P&gt;</b><br/>finite snapshot (start, end]<br/>iter · split · is_empty"]
     HistStore["<b>HistStore&lt;T,P&gt;</b><br/>reactive stream of Hists<br/>snapshots · next · time_pos · load"]
-    Store["<b>Store&lt;T&gt;</b><br/>reactive value<br/>get · subscribe"]
+    Signal["<b>Signal&lt;T&gt;</b><br/>reactive value<br/>get · subscribe"]
 
     Position --> Hist
     Position --> HistStore
@@ -301,10 +301,12 @@ not a per-store one, so it lives on the source's chain entity —
 `EvmChain::head(Finality)` — and a store carries a single neutral end/tip
 signal exposed through `snapshots()`/`next()`. See [§13](#13-reorg--finality-model).
 
-### `Store<T>` — a reactive value
+### `Signal<T>` — a reactive value
 
-A Svelte/Zustand-style reactive value over a `tokio::sync::watch`.
+A reactive value over a `tokio::sync::watch` (à la SolidJS/Leptos signals).
 `get()` is non-blocking; `subscribe()`'s first emission is the current value.
+Named `Signal`, not `Store`, to keep the reactive *value* distinct from the
+`*Store` backing stores (`HistStore`, `AnchorStore`, `RangeIndexStore`).
 
 ### Free functions & the resume model
 
@@ -505,7 +507,7 @@ struct LogFilter { address: Address, topics: [Option<Topic>; 4] }   // the "quer
 struct HeadEvent { number: BlockNumber, hash: BlockHash }
 
 EvmChain::new(provider: ChainProvider<P>, config: EvmChainConfig).await  // one head fetch
-chain.head(tier)          -> Store<HeadEvent>                  // the chain-wide clock
+chain.head(tier)          -> Signal<HeadEvent>                 // the chain-wide clock
 chain.logs(&filter, tier) -> HistStore<EvmEvent, EvmPosition>  // sync, no RPC
 chain.refresh_head().await -> BlockNumber                      // one-shot poll (non-follow)
 // chain.blocks(tier) — planned (M1)
@@ -530,7 +532,7 @@ false-coverage soundness rule.
 
 ### Finality lives on the chain
 
-`head(tier): Store<HeadEvent>` is the chain-wide clock (pre-R3 it was
+`head(tier): Signal<HeadEvent>` is the chain-wide clock (pre-R3 it was
 redundantly on every history). The chain holds **one**
 `watch::Sender<HeadEvent>`; `head(Best/Safe)` mirror `Latest` until Phase 7
 wires their producers into the head clock (per-tier channels — a
@@ -571,7 +573,7 @@ The sketch that lived here proposed a source-agnostic `Source` trait +
 | Reactive `HistStore` | per source | generic | **`RangeIndexStore<S>` — generic, written once** |
 | Live / follow | ad-hoc `EvmLogSubscriber` | `Source::subscribe(callbacks)` | **one chain head clock + per-store wiring tasks** |
 | Tip w/ no events | inline `update_tip_to` | `HistoryCallbacks::on_bump` | **`RangeIndexStore::on_bump`** (single nullable watch tip) |
-| Finality tips | `latest/best/safe` on every backend | `Chain::head(tier)` | **`EvmChain::head(Finality) -> Store<HeadEvent>`** |
+| Finality tips | `latest/best/safe` on every backend | `Chain::head(tier)` | **`EvmChain::head(Finality) -> Signal<HeadEvent>`** |
 | Backfill unit | items (`iter`) | pages (`fetch` → `Page`) | **`RangeSpec::Page` + injected `Fetcher<Page>`** |
 | Position (de)serialization | `marshal`/`unmarshal: Vec<u8>` on `Position` | — | **`marshal -> serde_json::Value`; `load` on the store** |
 | Task guard | `AsyncDisposable` (token + abort) | `AbortOnDropHandle` | **`AbortOnDropHandle` + `Weak` back-refs** (R7) |

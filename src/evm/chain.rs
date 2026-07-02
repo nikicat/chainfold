@@ -39,7 +39,7 @@ use alloy::providers::Provider;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::arch::{HistStore, HistoryError, Store, Timestamp};
+use crate::arch::{HistStore, HistoryError, Signal, Timestamp};
 use crate::evm::cache::{LogCache, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::range_index::{LogSpec, RangeIndex, RangeIndexStore, TimePosFn};
@@ -146,9 +146,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
 
     /// Reactive chain head for a finality tier. **All tiers currently
     /// mirror `Latest`** — `best`/`safe` producers land with Phase 7.
-    pub fn head(&self, tier: Finality) -> Store<HeadEvent> {
+    pub fn head(&self, tier: Finality) -> Signal<HeadEvent> {
         let _ = tier; // Latest-only until Phase 7.
-        Store::new(self.head.subscribe())
+        Signal::new(self.head.subscribe())
     }
 
     /// One-shot head poll: fetch the latest block number and, if it

@@ -199,7 +199,33 @@ the Hists via `next()`, bypassing `snapshots()` entirely.
   drop the `latest()`-tick + `next()`-refetch. Collapses the two subscription
   systems and removes the last `latest()` consumer.
 
-## R5 — `Store<T>`: keep the reactive value, shed the Svelte-ism (post-R3/R4)
+## R5 — `Store<T>`: keep the reactive value, shed the Svelte-ism — DONE (2026-07-02)
+
+**Shipped as a pure rename: `Store<T>` → `Signal<T>` (`arch.rs`).** Grounding
+the decision on the *actual* post-R3/R4 surface showed it had shrunk even
+further than predicted — the **entire** public use is `EvmChain::head(tier) ->
+Signal<HeadEvent>`; `Signal::subscribe()` (the boxed stream) had **zero**
+non-test callers, and `get()` is the load-bearing sync read (used by
+`bridge_matcher`/`bridge_explorer` as `chain.head(tier).get().number`). So:
+
+- **Renamed, kept the newtype and `get()`.** `Signal` (à la SolidJS/Leptos)
+  removes the mental collision with the four `*Store` types (`HistStore`,
+  `AnchorStore`, `RangeIndexStore`, the cache stores) — it was the only
+  reactive *value* among them.
+- **Did NOT unbox `subscribe()`** (considered, rejected): `impl Stream` off an
+  `unfold` is `!Unpin`, forcing `std::pin::pin!` at every call site — noisy for
+  a **test-only, non-hot-path** method with zero production callers. The alloc
+  it would save is negligible here. Kept `Subscription<T>` (boxed, `Unpin`).
+- **Did NOT drop the wrapper** for a raw `watch::Receiver` (the analysis below
+  already ruled this out — leaks `tokio`, regresses `.get()` to a `.borrow()`
+  `Ref` guard).
+- **Rider (user-requested):** folded the confusing double-`.subscribe()` in the
+  test mocks (`Signal::new(self.tip.subscribe()).subscribe()`) behind a
+  per-mock `tip_signal()` helper → `self.tip_signal().subscribe()`.
+- Docs synced (`ARCHITECTURE.md` §5 `Signal<T>` + §5A head-clock rows). Clippy
+  clean; full suite green (125 lib + 62 CLI + integration).
+
+<details><summary>Original analysis (kept for context)</summary>
 
 **R3/R4 landed (2026-07-02); this is now unblocked.** The public `Store`
 surface shrank as predicted: `latest()/best()/safe()` and `changes()` are
@@ -233,6 +259,8 @@ hood; only the surface is TS-flavoured.
   `snapshots()`, possibly a small `.tip() -> Store<P>` on views. **Decide
   `Store`'s fate after R3/R4**, against whatever public reactive-value remains —
   renaming/unboxing it now buffs a surface about to shrink ~70%.
+
+</details>
 
 ## R6 — Shared-index concurrency test coverage
 
