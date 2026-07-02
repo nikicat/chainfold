@@ -356,9 +356,9 @@ pub trait HistBackend<T: Send + Sync + 'static, P: Position>: Send + Sync {
     /// Clamp `p` to lie within `[start, end]`. Default implementation uses
     /// [`Ord`] on `P`. Override for positions whose canonical `Ord` does
     /// not reflect the window-containment semantics needed by
-    /// [`Hist::split`] — e.g. the keyed [`crate::merge::MergedPos`] uses a
-    /// byte-lex `Ord` for total order but clamps component-wise to honor
-    /// per-source containment.
+    /// [`Hist::split`] — e.g. the keyed [`crate::merge::MergedPos`] has a
+    /// lexicographic total order over its per-source components but clamps
+    /// each component separately to honor per-source containment.
     fn clamp_pos(&self, p: P, start: &P, end: &P) -> P {
         if &p < start {
             start.clone()

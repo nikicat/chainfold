@@ -47,7 +47,15 @@ from `snapshots()` and had **no external consumers**.
 - **Direction:** make it a provided/default method over `snapshots()`, or demote
   to a free fn beside `watch_hist`, or drop it. Prefer the default method.
 
-## R2 — `best`/`safe` tip stores are dead on both ends
+## R2 — `best`/`safe` tip stores are dead on both ends — DONE (2026-07-02, via R3)
+
+Shipped inside R3: the `latest()/best()/safe()` accessors are gone from
+`HistStore`/`HistStoreBackend` and every combinator; merge's `TipKind` +
+`build_tip_store` aggregator tasks are deleted. Finality is now the
+`Finality` tier on `EvmChain::head`/`EvmChain::logs` (all tiers mirror
+`Latest` until Phase 7 wires producers).
+
+<details><summary>Original analysis</summary>
 
 `latest` is the only live tip; `best`/`safe` have no producer and no consumer.
 
@@ -66,7 +74,36 @@ from `snapshots()` and had **no external consumers**.
   merge aggregators go with `TipKind` removal). Tracked separately in case R3
   slips: at minimum, suppress the dead merge aggregators until a producer exists.
 
-## R3 — Extract a `Chain` entity; finality lives on it, not on `HistStore`
+</details>
+
+## R3 — Extract a `Chain` entity; finality lives on it, not on `HistStore` — DONE (2026-07-02)
+
+**Shipped** on `refactor/reactive-core` as `EvmChain` (`src/evm/chain.rs` +
+`chain/{config,head_clock,wiring,rpc}.rs`), the generic reactive layer
+`RangeIndexStore<S: RangeSpec>` (`src/evm/range_index/store.rs`), and the
+finished generic `RangeIndex` (was `log_index/`, whose `nav.rs` died unported
+— no consumer since Phase 3). `EvmLogHistory`, `log_index/`, `subscriber.rs`
+deleted. Deltas vs. the sketch below, all deliberate:
+
+- The store's tip is reference-style: one `watch::Sender<Option<PubPos>>`
+  named `end` (nullable until the source seeds it; monotonic `on_bump`;
+  `on_events` = insert page + bump to `page_tip`). No `Store` pair, no
+  initial-tip constructor parameter.
+- **No source-agnostic `Source` trait yet** (concrete-first, rule #6): the
+  leaf seam is `RangeSpec` (storage/resolve/persist) + the concrete wiring in
+  `chain/wiring.rs`. Lift a trait when the blocks source (M1) lands.
+- Follow mode is fixed at `EvmChain::new` (`EvmChainConfig::follow`); log
+  delivery stays per-filter (`eth_subscribe(logs)` can't express OR-topics,
+  decision #11), only the **head clock** is chain-wide. The ws wiring keeps
+  the old subscriber's soundness invariant (empty coverage pages only while
+  the log subscription is live) and strengthens it: reconnect gap-fill must
+  succeed before push delivery resumes.
+- `ChainProvider` became the chain-scoped RPC seam: carries the `LogCache`,
+  internalizes `rpc_span`s + error mapping (inherent `get_block_number`/
+  `get_logs`), and owns the now-**singleflight** `ensure_block_header`.
+- `chain.blocks(tier)` not built yet (M1, as planned).
+
+<details><summary>Original design sketch</summary>
 
 **Refined 2026-07-01** (supersedes the earlier "finality views on HistStore"
 sketch). Finality (latest/best/safe/finalized) is a **chain-wide fact**, not a
@@ -118,6 +155,8 @@ Item  ─<  Hist  ─<  HistStore(tier [, filter])  ─<  Chain
   producers (confirmation-depth for best, `finalized` poll for safe) wire into
   `Chain`.
 
+</details>
+
 ## R4 — Matcher should fold the Hist it was triggered by — DONE (2026-07-01)
 
 **Shipped.** Split a pure `BaseMatcher::compute_with(src_hist, dst_hist,
@@ -162,6 +201,13 @@ the Hists via `next()`, bypassing `snapshots()` entirely.
 
 ## R5 — `Store<T>`: keep the reactive value, shed the Svelte-ism (post-R3/R4)
 
+**R3/R4 landed (2026-07-02); this is now unblocked.** The public `Store`
+surface shrank as predicted: `latest()/best()/safe()` and `changes()` are
+gone; internal tips hold a bare `watch::Sender` (see the mock-collapse
+commit). What survives publicly is `EvmChain::head(tier) -> Store<HeadEvent>`
+and `Store`'s use in a few tests. Line refs below predate R3 (`history.rs` is
+gone); the argument stands.
+
 `Store<T>` (`arch.rs:155`) is a thin newtype over `tokio::sync::watch::Receiver<T>`
 — a reactive **value**, not a stream. Do **not** "replace it with a `Stream`":
 its load-bearing half is `get()`, the *synchronous* current-value read a `Stream`
@@ -191,8 +237,9 @@ hood; only the surface is TS-flavoured.
 ## R6 — Shared-index concurrency test coverage
 
 One test exercises concurrent consumers over the same BTree today:
-`concurrent_searches_in_same_gap_fire_one_fetch` (`log_index.rs:586`) — 5
-`tokio::spawn`ed walkers over one `Arc<LogIndex>` and the *same* cold gap,
+`concurrent_searches_in_same_gap_fire_one_fetch` (now in `range_index.rs`
+tests; pre-R3 home was `log_index.rs:586`) — 5
+`tokio::spawn`ed walkers over one `Arc<RangeIndex<LogSpec>>` and the *same* cold gap,
 asserting all 5 see the item **and** exactly 1 fetch (singleflight coalescing
 via the per-range `Notify`). Good, but narrow. Gaps that matter because R3/R4
 change *who* reads the shared index (per-finality views, Hist-driven matcher all
@@ -226,7 +273,16 @@ Self-contained (pure test additions, no API change), but sequence *with* R3/R4:
 the reshaped reactive core is what these races run through, so write them against
 the new shape rather than the current one.
 
-## R7 — TS-ism cleanup: `AsyncDisposable` → `AbortOnDropHandle` (rides R3)
+## R7 — TS-ism cleanup: `AsyncDisposable` → `AbortOnDropHandle` (rides R3) — DONE (2026-07-02)
+
+Shipped with R3: `AsyncDisposable` is deleted; the head clock rides an
+`AbortOnDropHandle` on `EvmChain`, per-store wiring tasks ride
+`AbortOnDropHandle`s attached to their `RangeIndexStore` (Weak
+back-references, no cycles). `CancellationToken` left the codebase with
+`subscriber.rs` — every task is abort-only; none needed graceful flush.
+`tokio-util` gained the `rt` feature.
+
+<details><summary>Original analysis</summary>
 
 `AsyncDisposable` (`arch.rs:200`) is a TS name (`Symbol.asyncDispose`) for a
 cancel-on-drop task guard: it holds a `CancellationToken` + `JoinHandle` and, on
@@ -249,6 +305,8 @@ feature.
 - **Sibling TS-isms** (same shed-the-Svelte/TS-name theme): R5 `Store<T>` →
   `Signal`/`Watched`. Already shed: `subscribe(cb)` drop (R1), `gen()` →
   `snapshots()`, `changes()` removal (R4).
+
+</details>
 
 ## R8+ — (incoming)
 
