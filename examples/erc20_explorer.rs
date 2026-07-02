@@ -1,4 +1,4 @@
-//! ERC20 transfer explorer with running balance, over the new
+//! ERC20 transfer explorer with running balance, over the
 //! `Hist` / `HistStore` API.
 //!
 //! Post-Phase 5 follow-up: the `--owner` path now uses [`OwnedErc20`],
@@ -22,20 +22,19 @@
 //!     --owner 0xYourAddress \
 //!     --from 2025-01-15 --to 2025-01-16
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::time::Duration;
 
-use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::{Position, Timestamp, watch_hist};
+use chainfold::Shared;
+use chainfold::arch::{HistStore, Position, Timestamp, watch_hist};
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, Erc20Metadata, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY,
-    OUT_KEY, OwnedErc20, SubscribeTransport, TransferDirection, apply_transfer, decode_transfer,
-    fetch_erc20_metadata, rpc_retry_layer, versioned_path,
+    CacheDb, ChainProvider, ChunkSize, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent,
+    EvmPosition, IN_KEY, OUT_KEY, OwnedErc20, SubscribeTransport, TransferDirection,
+    apply_transfer, decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use chrono::NaiveDate;
@@ -94,11 +93,10 @@ fn parse_datetime(s: &str) -> Result<Timestamp, String> {
         .map_err(|e| format!("invalid date: {e}"))
 }
 
-async fn resolve_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
+async fn resolve_range(
     args: &Args,
-    backend: &Arc<EvmLogHistory<P>>,
+    hs: &HistStore<EvmEvent, EvmPosition>,
 ) -> Result<(EvmPosition, EvmPosition), Box<dyn std::error::Error>> {
-    let hs = backend.hist_store();
     match (&args.from, &args.to, args.from_block) {
         (Some(from_str), Some(to_str), None) => {
             let from_ts = parse_datetime(from_str)?;
@@ -244,12 +242,17 @@ fn print_transfer(
 /// Build the two-key `MergedPos` representing position `p` for both the
 /// `in` and `out` sub-histories. Used to bracket the merged stream when
 /// the caller has only an [`EvmPosition`] (e.g. from `resolve_range`).
-fn merged_pos_for(p: EvmPosition) -> MergedPos {
-    let bytes = p.marshal();
-    let mut m = BTreeMap::new();
-    m.insert(IN_KEY.into(), bytes.clone());
-    m.insert(OUT_KEY.into(), bytes);
-    MergedPos::new(m)
+/// Positions are reconstructed by the merged store itself (`load`), which
+/// owns deserialization for its source set.
+fn merged_pos_for(
+    merged: &HistStore<MergedItem<EvmEvent>, MergedPos>,
+    p: EvmPosition,
+) -> Option<MergedPos> {
+    let value = p.marshal();
+    let mut m = serde_json::Map::new();
+    m.insert(IN_KEY.to_owned(), value.clone());
+    m.insert(OUT_KEY.to_owned(), value);
+    merged.load(serde_json::Value::Object(m))
 }
 
 #[tokio::main]
@@ -269,15 +272,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    let provider = ProviderBuilder::new().connect_client(client);
     let db_path = versioned_path(&args.db);
-    let cache = CacheDb::open(&db_path)?;
+    let cache_db = CacheDb::open(&db_path)?;
     // Per-concern views over the one shared cache connection.
-    let erc20_cache = cache.erc20();
-    let log_cache = Arc::new(cache.logs());
+    let erc20_cache = cache_db.erc20();
+    let log_cache = Shared::new(cache_db.logs());
 
-    let chain_id = ChainId::new(provider.get_chain_id().await?);
-    let provider = ChainProvider::new(provider, chain_id);
+    let provider =
+        ChainProvider::discover(ProviderBuilder::new().connect_client(client), log_cache).await?;
+    let chain_id = provider.chain_id();
     let base_url = explorer_base_url(chain_id.get());
     println!("Fetching token metadata...");
     let meta_futures = addresses
@@ -308,26 +311,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  DB:       {db_path}");
     println!();
 
+    // One chain per example run; follow mode is fixed at construction. In
+    // follow mode the chain's head clock drives every log store's tip.
+    let chain = EvmChain::new(
+        provider,
+        EvmChainConfig {
+            chunk_size: ChunkSize::new(args.chunk_size),
+            follow: args.follow.then(|| SubscribeTransport::Poll {
+                interval: Duration::from_secs(2),
+            }),
+            ..Default::default()
+        },
+    )
+    .await?;
+
     for address in &addresses {
-        let owned = OwnedErc20::with_options(
-            provider.clone(),
-            log_cache.clone(),
-            owner,
-            *address,
-            args.chunk_size,
-            12,
-        )
-        .await?;
-        // Update both inner histories' tips so the merged HistStore knows
-        // the current end-of-chain. Required before iterating without an
-        // active `subscribe()`.
-        owned.update_tips().await?;
+        let owned = OwnedErc20::new(&chain, owner, *address);
         let meta = metadata.get(address).expect("metadata fetched above");
 
-        // Use the outgoing inner history as the reference for time-pos /
-        // block-tip resolution. Both inner histories share the same chain
+        // Use the outgoing inner store as the reference for time-pos /
+        // block-tip resolution. Both inner stores share the same chain
         // and anchor block.
-        let (start, end) = resolve_range(&args, owned.out_history()).await?;
+        let (start, end) = resolve_range(&args, owned.out_transfers()).await?;
         println!(
             "── {} transfers (owner only, IN/OUT merged), block {}..{} ──",
             meta.symbol, start.block, end.block
@@ -339,21 +344,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut count = 0;
 
         if args.follow {
-            // Both inner histories drive the merged tip independently;
-            // subscribe each.
-            let _sub_out = owned
-                .out_history()
-                .subscribe(SubscribeTransport::Poll {
-                    interval: Duration::from_secs(2),
-                })
-                .await?;
-            let _sub_in = owned
-                .in_history()
-                .subscribe(SubscribeTransport::Poll {
-                    interval: Duration::from_secs(2),
-                })
-                .await?;
-            let mut stream = watch_hist(&merged_hs, merged_pos_for(start));
+            // Both inner stores drive the merged tip independently, fed by
+            // the chain's head clock.
+            let start_pos =
+                merged_pos_for(&merged_hs, start).ok_or("could not build merged start position")?;
+            let mut stream = watch_hist(&merged_hs, start_pos);
             while let Some(item) = stream.next().await {
                 let item = item?;
                 let mi: &MergedItem<EvmEvent> = &item.item;
@@ -381,9 +376,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Bracket the window: split at start (drop head), then at end
             // (drop tail). The middle window iterates only owner-involved
             // events within the requested range.
+            let start_pos =
+                merged_pos_for(&merged_hs, start).ok_or("could not build merged start position")?;
+            let end_pos =
+                merged_pos_for(&merged_hs, end).ok_or("could not build merged end position")?;
             let hist = merged_hs.next().await;
-            let (_, after_start) = hist.split(merged_pos_for(start));
-            let (window, _) = after_start.split(merged_pos_for(end));
+            let (_, after_start) = hist.split(start_pos);
+            let (window, _) = after_start.split(end_pos);
             let mut stream = window.iter();
             while let Some(item) = stream.next().await {
                 let item = item?;

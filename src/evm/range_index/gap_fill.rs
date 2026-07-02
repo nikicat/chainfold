@@ -14,6 +14,8 @@ use tokio::sync::Notify;
 
 use super::RangeIndex;
 use super::range_tree::{Range, install_gap_placeholder};
+#[cfg(test)]
+use super::spec::Fetcher;
 use super::spec::{IndexPos, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
 use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};

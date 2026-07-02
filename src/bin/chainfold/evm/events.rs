@@ -1,15 +1,11 @@
-use std::sync::Arc;
-use std::time::Duration;
-
 use alloy::dyn_abi::{DecodedEvent, DynSolValue, EventExt};
 use alloy::json_abi::Event;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
-use chainfold::arch::{Hist, HistBackend, Positioned, watch_hist};
+use chainfold::arch::{Positioned, watch_hist};
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, DEFAULT_BLOCK_TIME, EvmEvent, EvmLogHistory, EvmPosition,
-    SubscribeTransport, Topic,
+    CacheDb, ChainId, EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, Topic,
 };
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
@@ -46,17 +42,17 @@ struct PrintOpts {
 }
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
-    provider: &ChainProvider<P>,
+    chain: &EvmChain<P>,
     cache: &CacheDb,
     db_path: &str,
     config: &Config,
     evm_args: &EvmArgs,
     events_args: &EventsArgs,
-    chain_id: ChainId,
     _direction: Direction,
     follow: FollowMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let address = parse_hex_address(&events_args.address)?;
+    let chain_id = chain.chain_id();
     let resolved = resolve_lookup(cache, config, chain_id, address, events_args).await?;
 
     let decoder = if events_args.decode {
@@ -70,17 +66,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     };
 
     let topics: [Option<Topic>; 4] = [Some(Topic::from(resolved.topic0)), None, None, None];
-    let backend = EvmLogHistory::with_options(
-        provider.clone(),
-        Arc::new(cache.logs()),
-        address,
-        topics,
-        evm_args.chunk_size,
-        DEFAULT_BLOCK_TIME,
-    )
-    .await?;
-    let hist_store = backend.hist_store();
-    let (start, end) = resolve_range(evm_args, &hist_store).await?;
+    let store = chain.logs(&LogFilter::new(address, topics), Finality::Latest);
+    let (start, end) = resolve_range(evm_args, &store).await?;
 
     println!("  Address:  {address:#x}");
     if let Some(sig) = &resolved.signature {
@@ -93,13 +80,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     println!();
 
     if follow.is_follow() {
+        // The chain was built with a poll transport, so the store's tip is
+        // already driven live; just consume items past `start`.
         println!("Following new events (Ctrl+C to stop)...\n");
-        let _subscriber = backend
-            .subscribe(SubscribeTransport::Poll {
-                interval: Duration::from_secs(2),
-            })
-            .await?;
-        let mut stream = watch_hist(&hist_store, start);
+        let mut stream = watch_hist(&store, start);
         let mut count = 0;
         while let Some(item) = stream.next().await {
             let item = item?;
@@ -108,9 +92,12 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         }
         println!("\nHistory closed ({count} events).");
     } else {
-        let backend_dyn: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
-        let hist = Hist::new(backend_dyn, start, end);
-        let mut stream = hist.iter();
+        // Window the current snapshot to (start, end]; split clamps to the
+        // snapshot's bounds (the chain head).
+        let hist = store.next().await;
+        let (_, after_start) = hist.split(start);
+        let (window, _) = after_start.split(end);
+        let mut stream = window.iter();
         let mut count = 0;
         while let Some(item) = stream.next().await {
             let item = item?;

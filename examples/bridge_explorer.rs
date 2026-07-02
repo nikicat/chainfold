@@ -1,11 +1,11 @@
 //! Cross-chain event explorer over `merge_hist_stores`.
 //!
 //! Pairs a `--chain` key with `--rpc-url` and `--address` (repeated). Builds
-//! an [`EvmLogHistory`] per chain, erases per-chain positions into
-//! [`MergedPos`], and merges by `EvmEvent.timestamp`. Prints events in
-//! interleaved chronological order with a `[chain:block:idx]` prefix —
-//! verifies end-to-end that the Phase 5 merge primitive works against real
-//! RPC.
+//! an [`EvmChain`] per chain, opens one log store each, erases per-chain
+//! positions into [`MergedPos`], and merges by `EvmEvent.timestamp`. Prints
+//! events in interleaved chronological order with a `[chain:block:idx]`
+//! prefix — verifies end-to-end that the Phase 5 merge primitive works
+//! against real RPC.
 //!
 //! Manual smoke test (USDC on Ethereum + Arbitrum):
 //!
@@ -18,16 +18,16 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use alloy::primitives::Address;
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
+use chainfold::Shared;
 use chainfold::arch::{HistStore, Position};
 use chainfold::evm::{
-    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, TRANSFER_TOPIC, Topic,
-    rpc_retry_layer, versioned_path,
+    CacheDb, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality,
+    LogFilter, TRANSFER_TOPIC, Topic, rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::{ErasedHistStore, MergedItem, MergedPos, SourceKey, merge_hist_stores};
 use clap::Parser;
@@ -107,37 +107,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Setting up '{}' from {}...", key, args.rpc_url[i]);
         let url: Url = args.rpc_url[i].parse()?;
         let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-        let provider =
-            ChainProvider::discover(ProviderBuilder::new().connect_client(client)).await?;
         let address: Address = args.address[i].parse()?;
 
         let db_dir = format!("{}/{}", args.db.trim_end_matches('/'), key);
         std::fs::create_dir_all(&db_dir).ok();
         let db_path = versioned_path(&format!("{db_dir}/log_store.db"));
-        let store = Arc::new(LogCache::open(&db_path)?);
+        let cache_db = CacheDb::open(&db_path)?;
 
-        let topics: [Option<Topic>; 4] = [Some(topic0), None, None, None];
-        let history = EvmLogHistory::with_options(
-            provider.clone(),
-            store,
-            address,
-            topics,
-            args.chunk_size,
-            12,
+        let provider = ChainProvider::discover(
+            ProviderBuilder::new().connect_client(client),
+            Shared::new(cache_db.logs()),
         )
         .await?;
-        let chain_id = provider.get_chain_id().await?;
-        let tip = history.latest_store().get();
-        println!("  chain_id={chain_id} tip_block={}", tip.block);
+
+        // One-shot flow: the head is fetched once at chain construction.
+        let chain = EvmChain::new(
+            provider,
+            EvmChainConfig {
+                chunk_size: ChunkSize::new(args.chunk_size),
+                follow: None,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let topics: [Option<Topic>; 4] = [Some(topic0), None, None, None];
+        let store = chain.logs(&LogFilter::new(address, topics), Finality::Latest);
+        let chain_id = chain.chain_id();
+        let tip = chain.head(Finality::Latest).get().number;
+        println!("  chain_id={chain_id} tip_block={tip}");
 
         // Pre-cache the window so merge doesn't fight cold fetches per chain.
-        let from_block = tip.block.saturating_sub(args.num_blocks);
+        let from_block = tip.saturating_sub(args.num_blocks);
         let from_pos = EvmPosition::new(from_block.saturating_sub(1).get(), u32::MAX);
-        let hs = history.hist_store();
-        let hist = hs.next().await;
+        let hist = store.next().await;
         let (_, _tail) = hist.split(from_pos);
 
-        let erased = ErasedHistStore::new(history.hist_store());
+        let erased = ErasedHistStore::new(store);
         sources.insert(key.clone().into(), erased);
     }
 
@@ -145,20 +151,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         merge_hist_stores(sources, cmp_by_time);
 
     // Build a starting anchor: each source's current_tip - num_blocks. Combine
-    // into a MergedPos by collecting each source's window-start position.
-    let mut start_positions = BTreeMap::new();
+    // into a MergedPos by collecting each source's window-start position and
+    // loading it back through the merged store.
+    let tip = merged.next().await.end().clone();
+    let mut start_positions = serde_json::Map::new();
     for key in &args.chain {
-        let tip = merged.latest().get();
-        let key_bytes = tip
-            .get(key)
-            .expect("source must contribute to tip")
-            .to_vec();
-        let pos = EvmPosition::unmarshal(&key_bytes)
-            .ok_or_else(|| format!("could not unmarshal position for {key}"))?;
+        let pos: EvmPosition = tip
+            .get_as(key)
+            .ok_or_else(|| format!("source {key} must contribute to tip"))?;
         let from = EvmPosition::new(pos.block.saturating_sub(args.num_blocks).get(), u32::MAX);
-        start_positions.insert(key.clone().into(), from.marshal());
+        start_positions.insert(key.clone(), from.marshal());
     }
-    let start = MergedPos::new(start_positions);
+    let start = merged
+        .load(serde_json::Value::Object(start_positions))
+        .ok_or("could not load merged start position")?;
 
     let hist = merged.next().await;
     let (_, tail) = hist.split(start);

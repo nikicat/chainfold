@@ -1,4 +1,4 @@
-//! CLI to manually test `EvmLogHistory` navigation over the new
+//! CLI to manually test [`EvmChain`] log-store navigation over the
 //! `Hist` / `HistStore` API.
 //!
 //! Usage:
@@ -13,20 +13,17 @@
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --from 2025-01-15 --to 2025-01-16
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use alloy::network::Ethereum;
 use alloy::primitives::Address;
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::arch::{
-    Hist, HistBackend, HistStore, HistoryError, Positioned, Timestamp, watch_hist,
-};
+use chainfold::Shared;
+use chainfold::arch::{HistStore, HistoryError, Positioned, Timestamp, watch_hist};
 use chainfold::evm::{
-    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, LogCache, SubscribeTransport, Topic,
-    rpc_retry_layer, versioned_path,
+    CacheDb, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality,
+    LogFilter, SubscribeTransport, Topic, rpc_retry_layer, versioned_path,
 };
 use chrono::NaiveDate;
 use clap::Parser;
@@ -165,21 +162,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    let provider = ChainProvider::discover(ProviderBuilder::new().connect_client(client)).await?;
     let db_path = versioned_path(&args.db);
-    let store = Arc::new(LogCache::open(&db_path)?);
+    let cache_db = CacheDb::open(&db_path)?;
+    let provider = ChainProvider::discover(
+        ProviderBuilder::new().connect_client(client),
+        Shared::new(cache_db.logs()),
+    )
+    .await?;
 
-    println!("Building EvmLogHistory...");
+    println!("Building EvmChain...");
     println!("  Address:  {address:#x}");
     if let Some(t) = &args.topic0 {
         println!("  Topic0:   {t}");
     }
 
-    let backend =
-        EvmLogHistory::with_options(provider, store, address, topics, args.chunk_size, 12).await?;
-    let hist_store = backend.hist_store();
+    // Follow mode is fixed at chain construction; --measure ignores --follow.
+    let config = EvmChainConfig {
+        chunk_size: ChunkSize::new(args.chunk_size),
+        follow: (args.follow && !args.measure).then(|| SubscribeTransport::Poll {
+            interval: Duration::from_secs(2),
+        }),
+        ..Default::default()
+    };
+    let chain = EvmChain::new(provider, config.clone()).await?;
+    let filter = LogFilter::new(address, topics);
+    let hist_store = chain.logs(&filter, Finality::Latest);
 
-    let chain_id = backend.chain_id();
+    let chain_id = chain.chain_id();
     let (start, end) = resolve_range(&args, &hist_store).await?;
 
     println!("  Chain:    {chain_id}");
@@ -191,13 +200,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::time::Instant;
 
         async fn walk_window(
-            backend: &Arc<EvmLogHistory<impl Provider<Ethereum> + Clone + 'static>>,
+            store: &HistStore<EvmEvent, EvmPosition>,
             start: EvmPosition,
             end: EvmPosition,
         ) -> Result<usize, HistoryError> {
-            let backend: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
-            let hist = Hist::new(backend, start, end);
-            let mut s = hist.iter();
+            let hist = store.next().await;
+            let (_, tail) = hist.split(start);
+            let (window, _) = tail.split(end);
+            let mut s = window.iter();
             let mut n = 0;
             while let Some(item) = s.next().await {
                 let _ = item?;
@@ -206,30 +216,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(n)
         }
 
-        // Cold: against the current backend (may fetch RPC if DB is empty).
+        // Cold: against the current store (may fetch RPC if DB is empty).
         let t0 = Instant::now();
-        let cold_n = walk_window(&backend, start, end).await?;
+        let cold_n = walk_window(&hist_store, start, end).await?;
         let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Warm: drop + reopen against the same DB. Same provider client —
         // should never reach RPC since every gap is already in scanned_ranges.
-        drop(backend);
-        let store2 = Arc::new(LogCache::open(&db_path)?);
+        drop(hist_store);
+        drop(chain);
+        let cache_db2 = CacheDb::open(&db_path)?;
         let url2: Url = args.rpc_url.parse()?;
         let client2 = ClientBuilder::default().layer(rpc_retry_layer()).http(url2);
-        let provider2 =
-            ChainProvider::discover(ProviderBuilder::new().connect_client(client2)).await?;
-        let backend2 =
-            EvmLogHistory::with_options(provider2, store2, address, topics, args.chunk_size, 12)
-                .await?;
+        let provider2 = ChainProvider::discover(
+            ProviderBuilder::new().connect_client(client2),
+            Shared::new(cache_db2.logs()),
+        )
+        .await?;
+        let chain2 = EvmChain::new(provider2, config).await?;
+        let hist_store2 = chain2.logs(&filter, Finality::Latest);
         let t1 = Instant::now();
-        let warm_n = walk_window(&backend2, start, end).await?;
+        let warm_n = walk_window(&hist_store2, start, end).await?;
         let warm_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
-        // Hot: same backend2, second pass — should be pure BTreeMap walk +
+        // Hot: same store, second pass — should be pure BTreeMap walk +
         // get_log_by_ref lookups.
         let t2 = Instant::now();
-        let hot_n = walk_window(&backend2, start, end).await?;
+        let hot_n = walk_window(&hist_store2, start, end).await?;
         let hot_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
         println!(
@@ -249,13 +262,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.follow {
+        // Live wiring runs from construction (`follow` in the config); the
+        // chain's head clock drives the store's tip while both stay alive.
         println!("Following new events (Ctrl+C to stop)...\n");
-        let _subscriber = backend
-            .subscribe(SubscribeTransport::Poll {
-                interval: Duration::from_secs(2),
-            })
-            .await?;
-
         let mut stream = watch_hist(&hist_store, start);
         let mut count = 0;
         while let Some(item) = stream.next().await {
@@ -266,9 +275,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nHistory closed ({count} events).");
     } else {
         println!("Navigating forward from block {}:\n", start.block);
-        let backend_dyn: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = backend.clone();
-        let hist = Hist::new(backend_dyn, start, end);
-        let mut s = hist.iter();
+        let hist = hist_store.next().await;
+        let (_, tail) = hist.split(start);
+        let (window, _) = tail.split(end);
+        let mut s = window.iter();
         let mut count = 0;
         while let Some(item) = s.next().await {
             let item = item?;

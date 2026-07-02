@@ -11,15 +11,16 @@
 
 mod common;
 
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::time::Duration;
 
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
-use chainfold::arch::{Hist, HistBackend, Position};
+use chainfold::Shared;
+use chainfold::arch::{HistStore, Position};
 use chainfold::evm::{
-    ChainProvider, EvmEvent, EvmLogHistory, EvmPosition, IN_KEY, LogCache, OUT_KEY, OwnedErc20,
-    TRANSFER_TOPIC, Topic,
+    ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, IN_KEY,
+    LogCache, LogFilter, OUT_KEY, OwnedErc20, TRANSFER_TOPIC, Topic,
 };
 use chainfold::merge::{MergedItem, MergedPos};
 use futures_util::StreamExt;
@@ -30,13 +31,24 @@ use common::{
     fixtures::{FORK_BLOCK, USDC},
 };
 
-fn merged_pos_for(p: EvmPosition) -> MergedPos {
-    let bytes = p.marshal();
-    let mut m = BTreeMap::new();
-    m.insert(IN_KEY.into(), bytes.clone());
-    m.insert(OUT_KEY.into(), bytes);
-    MergedPos::new(m)
+/// A merged cut with the same `EvmPosition` on both direction components,
+/// reconstructed through the merged store's own `load` (positions can only
+/// be deserialized by the store that owns the source identities).
+fn merged_pos_for(store: &HistStore<MergedItem<EvmEvent>, MergedPos>, p: EvmPosition) -> MergedPos {
+    let v = p.marshal();
+    let mut obj = serde_json::Map::new();
+    obj.insert(IN_KEY.to_string(), v.clone());
+    obj.insert(OUT_KEY.to_string(), v);
+    store
+        .load(serde_json::Value::Object(obj))
+        .expect("merged store loads its own key layout")
 }
+
+const TEST_CONFIG: EvmChainConfig = EvmChainConfig {
+    chunk_size: ChunkSize::new(10),
+    block_time: Duration::from_secs(12),
+    follow: None,
+};
 
 #[tokio::test]
 #[ignore = "fork-mainnet integration: spawns anvil + hits external RPC"]
@@ -49,30 +61,28 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20.v3.db");
     let endpoint = anvil.endpoint_url();
-    let store = Arc::new(LogCache::open(db_path.to_str().unwrap()).expect("open store"));
-    let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint))
+    let cache = Shared::new(LogCache::open(db_path.to_str().unwrap()).expect("open cache"));
+    let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");
+    let chain = EvmChain::new(provider, TEST_CONFIG)
+        .await
+        .expect("EvmChain::new");
 
     // Phase A — broad filter to discover an active owner in the window.
-    let broad = EvmLogHistory::with_options(
-        provider.clone(),
-        store.clone(),
-        USDC,
-        [Some(TRANSFER_TOPIC), None, None, None],
-        10,
-        12,
-    )
-    .await
-    .expect("broad EvmLogHistory");
+    let broad = chain.logs(
+        &LogFilter::new(USDC, [Some(TRANSFER_TOPIC), None, None, None]),
+        Finality::Latest,
+    );
 
     let from_block = FORK_BLOCK - 5;
     let to_block = FORK_BLOCK;
     let start = EvmPosition::new(from_block - 1, u32::MAX);
     let end = EvmPosition::new(to_block, u32::MAX);
-    let backend: Arc<dyn HistBackend<EvmEvent, EvmPosition>> = broad.clone();
-    let hist = Hist::new(backend, start, end);
-    let mut stream = hist.iter();
+    let hist = broad.next().await;
+    let (_, after_start) = hist.split(start);
+    let (window, _) = after_start.split(end);
+    let mut stream = window.iter();
     let mut all_transfers: Vec<EvmEvent> = Vec::new();
     while let Some(item) = stream.next().await {
         all_transfers.push(item.expect("iter").item);
@@ -107,15 +117,13 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
         "first transfer's from must appear in its own filter"
     );
 
-    // Phase B — same range via OwnedErc20.
-    let owned = OwnedErc20::with_options(provider, store, owner, USDC, 10, 12)
-        .await
-        .expect("OwnedErc20");
-    owned.update_tips().await.expect("update_tips");
+    // Phase B — same range via OwnedErc20. The chain head was fetched at
+    // construction, so no tip refresh is needed for a one-shot walk.
+    let owned = OwnedErc20::new(&chain, owner, USDC);
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
-    let (_, after_start) = hist.split(merged_pos_for(start));
-    let (window, _) = after_start.split(merged_pos_for(end));
+    let (_, after_start) = hist.split(merged_pos_for(&merged_hs, start));
+    let (window, _) = after_start.split(merged_pos_for(&merged_hs, end));
     let mut stream = window.iter();
     let mut yields: Vec<MergedItem<EvmEvent>> = Vec::new();
     while let Some(item) = stream.next().await {
@@ -173,25 +181,26 @@ async fn owned_erc20_empty_for_inactive_address() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20_empty.v3.db");
     let endpoint = anvil.endpoint_url();
-    let store = Arc::new(LogCache::open(db_path.to_str().unwrap()).expect("open store"));
-    let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint))
+    let cache = Shared::new(LogCache::open(db_path.to_str().unwrap()).expect("open cache"));
+    let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");
+    let chain = EvmChain::new(provider, TEST_CONFIG)
+        .await
+        .expect("EvmChain::new");
 
     // An address with no real-world USDC activity (literally the zero
     // address — receivers of burns, but no transfers FROM it).
     let owner = Address::ZERO;
-    let owned = OwnedErc20::with_options(provider, store, owner, USDC, 10, 12)
-        .await
-        .expect("OwnedErc20");
-    owned.update_tips().await.expect("update_tips");
+    let owned = OwnedErc20::new(&chain, owner, USDC);
     let from_block = FORK_BLOCK - 2;
     let to_block = FORK_BLOCK;
     let start = EvmPosition::new(from_block - 1, u32::MAX);
     let end = EvmPosition::new(to_block, u32::MAX);
-    let hist = owned.transfers().next().await;
-    let (_, after_start) = hist.split(merged_pos_for(start));
-    let (window, _) = after_start.split(merged_pos_for(end));
+    let merged_hs = owned.transfers();
+    let hist = merged_hs.next().await;
+    let (_, after_start) = hist.split(merged_pos_for(&merged_hs, start));
+    let (window, _) = after_start.split(merged_pos_for(&merged_hs, end));
     let mut stream = window.iter();
     let mut count = 0;
     while let Some(item) = stream.next().await {

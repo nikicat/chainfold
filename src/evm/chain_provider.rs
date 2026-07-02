@@ -32,6 +32,7 @@
 use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
@@ -58,7 +59,7 @@ pub struct ChainProvider<P> {
 /// in-flight block fetch. Shared across every clone of the provider.
 struct HeaderSingleflight {
     store: Shared<LogCache>,
-    inflight: Mutex<HashMap<BlockNumber, Arc<tokio::sync::Mutex<()>>>>,
+    inflight: Mutex<HashMap<BlockNumber, Arc<AsyncMutex<()>>>>,
 }
 
 impl HeaderSingleflight {
@@ -68,7 +69,7 @@ impl HeaderSingleflight {
             .map_err(|e| HistoryError::internal(e.to_string()))
     }
 
-    fn gate(&self, block: BlockNumber) -> Arc<tokio::sync::Mutex<()>> {
+    fn gate(&self, block: BlockNumber) -> Arc<AsyncMutex<()>> {
         self.inflight
             .lock()
             .unwrap()

@@ -1,21 +1,20 @@
-//! Phase 2 acceptance: push-subscription path against local anvil.
+//! Phase 2 acceptance: live-follow path against local anvil.
 //!
-//! Both tests are `#[ignore]` because they require the `anvil` binary on
+//! All tests are `#[ignore]` because they require the `anvil` binary on
 //! `PATH`. Run with `cargo test --test phase2_push -- --ignored`.
 //!
 //! Coverage:
-//! - `live_event_latency_ws` — WS push transport delivers a mined block
-//!   to the tip store within a tight latency budget.
-//! - `poll_drain_populates_scanned_ranges` — Poll transport observes new
-//!   blocks, fires `on_page`, drains to `LogCache`, and the resulting
-//!   `scanned_ranges` cover the post-subscribe window.
-//! - `resume_seeds_from_current_tip` — a fresh `subscribe()` after blocks
-//!   were mined while disconnected seeds `latest_store` to the current
-//!   tip on its first cycle, so consumers wake up at the right place.
+//! - `live_event_latency_ws` — WS follow mode delivers a mined block to
+//!   the log store's tip within a tight latency budget.
+//! - `poll_drain_populates_scanned_ranges` — Poll follow mode observes new
+//!   blocks, gap-fills through the store's fetcher, and the resulting
+//!   `scanned_ranges` cover the post-construction window.
+//! - `resume_seeds_from_current_tip` — a fresh chain + store built after
+//!   blocks were mined while disconnected seeds its tip from the current
+//!   head, so consumers wake up at the right place.
 
 mod common;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, B256, U256};
@@ -23,15 +22,30 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
 
-use chainfold::evm::{ChainProvider, EvmLogHistory, LogCache, SubscribeTransport, Topic};
+use chainfold::Shared;
+use chainfold::evm::{
+    ChainProvider, EvmChain, EvmChainConfig, Finality, LogCache, LogFilter, SubscribeTransport,
+    Topic, compute_filter_hash,
+};
 
 use common::anvil::{local, skip_no_anvil};
 
-// Filter that matches no contract — push-path mechanics are exercised
+// Filter that matches no contract — live-follow mechanics are exercised
 // purely by new-head deliveries (empty pages). Independent of any
 // contract emitting events.
 const SENTINEL_TOPIC: Topic = Topic::new(B256::repeat_byte(0xCC));
 const SENTINEL_ADDR: Address = Address::repeat_byte(0xDE);
+
+fn sentinel_filter() -> LogFilter {
+    LogFilter::new(SENTINEL_ADDR, [Some(SENTINEL_TOPIC), None, None, None])
+}
+
+fn poll_config(interval: Duration) -> EvmChainConfig {
+    EvmChainConfig {
+        follow: Some(SubscribeTransport::Poll { interval }),
+        ..Default::default()
+    }
+}
 
 fn temp_db() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -61,30 +75,27 @@ async fn live_event_latency_ws() {
         .connect_ws(WsConnect::new(ws_url.as_str()))
         .await
         .expect("ws connect");
-    let provider = ChainProvider::discover(provider)
+    let (_tmp, db_path) = temp_db();
+    let cache = Shared::new(LogCache::open(&db_path).expect("LogCache::open"));
+    let provider = ChainProvider::discover(provider, cache)
         .await
         .expect("discover chain id");
 
-    let (_tmp, db_path) = temp_db();
-    let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
-
-    let history = EvmLogHistory::new(
+    let chain = EvmChain::new(
         provider.clone(),
-        store.clone(),
-        SENTINEL_ADDR,
-        [Some(SENTINEL_TOPIC), None, None, None],
+        EvmChainConfig {
+            follow: Some(SubscribeTransport::Ws),
+            ..Default::default()
+        },
     )
     .await
-    .expect("EvmLogHistory::new");
+    .expect("EvmChain::new");
+    let store = chain.logs(&sentinel_filter(), Finality::Latest);
 
-    let subscriber = history
-        .subscribe(SubscribeTransport::Ws)
-        .await
-        .expect("subscribe Ws");
-
-    let mut latest_rx = history.latest_store().subscribe();
-    // Drain the initial yield (current tip seeded by subscribe()).
-    let _initial = latest_rx.next().await;
+    let mut snapshots = store.snapshots();
+    // Drain the initial snapshot (tip seeded from the construction head).
+    let initial = snapshots.next().await.expect("initial snapshot");
+    let initial_end = *initial.end();
 
     // Give the WS subscriptions a beat to install.
     sleep(Duration::from_millis(150)).await;
@@ -92,10 +103,16 @@ async fn live_event_latency_ws() {
     let start = Instant::now();
     mine_blocks(&provider, 1).await;
 
-    let observed = timeout(Duration::from_secs(2), latest_rx.next())
-        .await
-        .expect("timeout waiting for tip advance")
-        .expect("latest_rx closed");
+    let observed = timeout(Duration::from_secs(2), async {
+        loop {
+            let hist = snapshots.next().await.expect("snapshots stream stays live");
+            if *hist.end() > initial_end {
+                break *hist.end();
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for tip advance");
     let latency = start.elapsed();
 
     assert!(
@@ -116,7 +133,9 @@ async fn live_event_latency_ws() {
         latency.as_millis()
     );
 
-    drop(subscriber);
+    // Live wiring dies with the store; the head clock with the chain.
+    drop(store);
+    drop(chain);
 }
 
 #[tokio::test]
@@ -127,50 +146,43 @@ async fn poll_drain_populates_scanned_ranges() {
         return;
     };
 
-    let provider =
-        ChainProvider::discover(ProviderBuilder::new().connect_http(anvil.endpoint_url()))
-            .await
-            .expect("discover chain id");
     let (_tmp, db_path) = temp_db();
-    let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
-
-    let history = EvmLogHistory::new(
-        provider.clone(),
-        store.clone(),
-        SENTINEL_ADDR,
-        [Some(SENTINEL_TOPIC), None, None, None],
+    let cache = Shared::new(LogCache::open(&db_path).expect("LogCache::open"));
+    let provider = ChainProvider::discover(
+        ProviderBuilder::new().connect_http(anvil.endpoint_url()),
+        cache,
     )
     .await
-    .expect("EvmLogHistory::new");
+    .expect("discover chain id");
 
-    let _sub = history
-        .subscribe(SubscribeTransport::Poll {
-            interval: Duration::from_millis(50),
-        })
+    let chain = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)))
         .await
-        .expect("subscribe Poll");
+        .expect("EvmChain::new");
+    let store = chain.logs(&sentinel_filter(), Finality::Latest);
 
-    let tip_before = history.latest_store().get().block;
+    let tip_before = store.next().await.end().block;
 
-    // Mine blocks while subscribed. Each batch yields a page on the next
-    // poll cycle, which the drain persists.
+    // Mine blocks while following. Each head advance is gap-filled through
+    // the store's fetcher on the next poll cycle, which persists coverage.
     mine_blocks(&provider, 5).await;
 
-    // Wait for poll cycle + drain flush.
+    // Wait for poll cycle + gap-fill.
     sleep(Duration::from_millis(400)).await;
 
-    let final_tip = history.latest_store().get().block;
+    let final_tip = store.next().await.end().block;
     assert!(
         final_tip >= tip_before + 5,
         "tip advanced (before={tip_before} final={final_tip})",
     );
 
-    let ranges = store
-        .get_scanned_ranges(&history.filter_hash())
+    let filter = sentinel_filter();
+    let ranges = chain
+        .cache()
+        .get_scanned_ranges(&compute_filter_hash(&filter.address, &filter.topics))
         .expect("get_scanned_ranges");
     assert!(
         !ranges.is_empty(),
-        "scanned_ranges populated by the push path (got 0)",
+        "scanned_ranges populated by the follow path (got 0)",
     );
     let max_end = ranges.iter().map(|(_, end)| *end).max().unwrap_or(0);
     assert!(
@@ -187,58 +199,48 @@ async fn resume_seeds_from_current_tip() {
         return;
     };
 
-    let provider =
-        ChainProvider::discover(ProviderBuilder::new().connect_http(anvil.endpoint_url()))
-            .await
-            .expect("discover chain id");
     let (_tmp, db_path) = temp_db();
-    let store = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
-
-    let history = EvmLogHistory::new(
-        provider.clone(),
-        store.clone(),
-        SENTINEL_ADDR,
-        [Some(SENTINEL_TOPIC), None, None, None],
+    let cache = Shared::new(LogCache::open(&db_path).expect("LogCache::open"));
+    let provider = ChainProvider::discover(
+        ProviderBuilder::new().connect_http(anvil.endpoint_url()),
+        cache,
     )
     .await
-    .expect("EvmLogHistory::new");
+    .expect("discover chain id");
 
-    // First subscription, drop after a brief moment.
-    let sub1 = history
-        .subscribe(SubscribeTransport::Poll {
-            interval: Duration::from_millis(50),
-        })
+    // First chain + store; drop both after a brief moment ("disconnect":
+    // the wiring dies with the store, the head clock with the chain).
+    let chain1 = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)))
         .await
-        .expect("subscribe sub1");
+        .expect("EvmChain::new chain1");
+    let store1 = chain1.logs(&sentinel_filter(), Finality::Latest);
     mine_blocks(&provider, 2).await;
     sleep(Duration::from_millis(200)).await;
-    let tip_at_disconnect = history.latest_store().get().block;
-    drop(sub1);
+    let tip_at_disconnect = store1.next().await.end().block;
+    drop(store1);
+    drop(chain1);
 
-    // Mine while no subscriber is active.
+    // Mine while nothing is following.
     mine_blocks(&provider, 4).await;
 
-    // Fresh subscription. Its initial seed should jump latest_store to
-    // the current tip (NOT remain at tip_at_disconnect).
-    let _sub2 = history
-        .subscribe(SubscribeTransport::Poll {
-            interval: Duration::from_millis(50),
-        })
+    // Fresh chain + store. Construction fetches the current head and the
+    // new store seeds its tip from it (NOT from tip_at_disconnect), so
+    // consumers wake up at the right place.
+    let chain2 = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)))
         .await
-        .expect("subscribe sub2");
+        .expect("EvmChain::new chain2");
+    let store2 = chain2.logs(&sentinel_filter(), Finality::Latest);
 
-    // subscribe() already called update_tip before returning, so the seed
-    // has already happened. Read the store directly.
-    let seeded_tip = history.latest_store().get().block;
+    let seeded_tip = store2.next().await.end().block;
     assert!(
         seeded_tip >= tip_at_disconnect + 4,
-        "fresh subscribe() seeds the current tip past the disconnect (seeded={seeded_tip} disconnect={tip_at_disconnect})",
+        "fresh chain seeds the current tip past the disconnect (seeded={seeded_tip} disconnect={tip_at_disconnect})",
     );
 
     // Newly mined block after resume should still flow through.
     mine_blocks(&provider, 1).await;
     sleep(Duration::from_millis(200)).await;
-    let after_one_more = history.latest_store().get().block;
+    let after_one_more = store2.next().await.end().block;
     assert!(
         after_one_more > seeded_tip,
         "post-resume mines still observed (after={after_one_more} seeded={seeded_tip})",

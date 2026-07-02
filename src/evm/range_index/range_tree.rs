@@ -141,11 +141,11 @@ impl<S: RangeSpec> RangeIndex<S> {
     /// Insert an item that arrived strictly before the current tail.
     ///
     /// Four cases over the range whose end is the next key `>= item_pos`:
-    /// 1. None / range.start > item_pos → item sits in a gap →
+    /// 1. None / `range.start > item_pos` → item sits in a gap →
     ///    insert `(range_start, item_pos, item)`.
-    /// 2. range.end == item_pos and range filled → duplicate, no-op.
-    /// 3. range.end == item_pos and range empty → upgrade to filled.
-    /// 4. range.start <= item_pos < range.end → split the range around
+    /// 2. `range.end == item_pos` and range filled → duplicate, no-op.
+    /// 3. `range.end == item_pos` and range empty → upgrade to filled.
+    /// 4. `range.start <= item_pos < range.end` → split the range around
     ///    `item_pos`, preserving the original tail.
     ///
     /// A range with a live `fetch` notify is left alone — the in-flight
