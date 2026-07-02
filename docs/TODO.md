@@ -20,46 +20,39 @@ lives in git history and in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   skips (`decode: bool`, chain-identifier lookup strings).
 - **CLI** — `ExitCode` + `Display` error rendering, `chains list`, testnet/
   red-flag advisories, default chain = `ethereum`, end-to-end `ChainId` typing.
+- **R6 — shared-index concurrency tests** — `RangeIndex` walk under true
+  parallelism (multi-thread runtime), disjoint/overlapping gaps (singleflight
+  tiles the union, no double-fetch), and reader-vs-writer (`insert_page` racing
+  a mid-walk `items()`: no dup / no drop / no panic). Test suite split out to
+  `src/evm/range_index/tests.rs`. Stretch goal **not** done: a `loom` model of
+  the singleflight handshake (needs a sync analog of the async `Notify` path).
 
 ---
 
 # Open work
 
-## R6 — Shared-index concurrency test coverage
+## R6 follow-up — `loom` model of the singleflight handshake
 
-One test exercises concurrent consumers over the same BTree today:
-`concurrent_searches_in_same_gap_fire_one_fetch` (in `range_index.rs` tests) —
-5 `tokio::spawn`ed walkers over one `Arc<RangeIndex<LogSpec>>` and the *same*
-cold gap, asserting all 5 see the item **and** exactly 1 fetch (singleflight
-coalescing via the per-range `Notify`). Good, but narrow. The gaps that matter,
-now that per-finality views and the Hist-driven matcher all walk one backend:
+The R6 concurrency tests (shipped — see the ledger) cover parallelism,
+disjoint/overlapping gaps, and reader-vs-writer behaviourally, but they don't
+*prove* the singleflight handshake race-free under all interleavings and weak
+memory. That's the `loom` model, and it's the one genuinely open R6 piece.
 
-- **Parallel, not just concurrent.** It's `#[tokio::test]` (current-thread), so
-  tasks interleave at await points but never run on two cores at once. The BTree
-  is behind a `Mutex`, so add a `#[tokio::test(flavor = "multi_thread",
-  worker_threads = N)]` variant (plus deterministic scheduling via
-  `tokio::task::yield_now` orchestration or `turmoil`) to catch true data races /
-  lost wakeups, not just cooperative interleaving. A **`loom` model** is the
-  gold standard for the lost-wakeup class but does **not** wrap the async
-  `tokio::sync::Notify` path directly — loom targets sync primitives
-  (`Mutex`/atomics/`loom::thread`). To use it, extract the *coordination
-  protocol* (install-placeholder → fetch → `notify_waiters`, vs. peer
-  register-wait) into a sync analog (`Mutex` + condvar/atomic flag) and
-  `loom::model` that, proving the handshake race-free under all interleavings
-  and weak memory; the async code is then a thin wrapper over the proven core.
-- **Disjoint / overlapping ranges.** Only the *identical-gap* case is covered.
-  Add walkers over different-but-overlapping and fully-disjoint ranges on one
-  BTree — verifies gap computation + placeholder installation don't corrupt the
-  tree or over/under-fetch when concurrent gaps touch adjacent ranges.
-- **Reader vs. writer.** No test drives a walk *in flight* while the subscriber's
-  `insert_page` (live path) mutates the same BTree. This is the real production
-  race (WS watcher writing while consumers walk, per §14 ownership) and is
-  currently unpinned. Add a test that interleaves `items()` iteration with
-  `insert_page`/late-item insertion and asserts no dropped/duplicated items and
-  no panic.
+- **`loom` doesn't wrap the async `tokio::sync::Notify` path directly** — it
+  targets sync primitives (`Mutex`/atomics/`loom::thread`). To use it, extract
+  the *coordination protocol* (install-placeholder → fetch → `notify_waiters`,
+  vs. peer register-wait) into a sync analog (`Mutex` + condvar/atomic flag) and
+  `loom::model` that, proving the handshake race-free; the async code is then a
+  thin wrapper over the proven core.
+- Behavioural coverage already in place (`src/evm/range_index/tests.rs`): the
+  `walk_step`-holds-no-lock-across-await invariant is exercised by the
+  multi-thread same-gap, disjoint, overlapping, and reader-vs-writer tests.
+- The **codecov/patch red** on the live WS/poll wiring (`chain/wiring.rs`,
+  `head_clock.rs`, `chain/rpc.rs`) is a *separate* gap — R6 exercises the
+  in-memory `RangeIndex`, not the subscriber plumbing. Closing it needs the
+  ignored anvil suites de-ignored or new wiring tests.
 
-Self-contained (pure test additions, no API change). Closing the reader-vs-writer
-gap also lifts the codecov/patch red on the live WS/poll path.
+Stretch goal; the behavioural tests are the load-bearing coverage.
 
 ## R8+ — (incoming)
 
