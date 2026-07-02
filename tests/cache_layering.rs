@@ -1,4 +1,5 @@
-//! Phase 1 integration tests: durable `LogCache` + in-memory range index.
+//! Cache-layering integration tests: durable `LogCache` + in-memory range
+//! index (Phase 1 acceptance in `docs/refactor.md`).
 //!
 //! These hit a real RPC (mainnet via the anvil fork harness) so the cold
 //! cache populates via actual `eth_getLogs` calls. After that we drop the
@@ -6,7 +7,7 @@
 //! answers from the durable cache without refetching.
 //!
 //! Marked `#[ignore]` because they spawn anvil + hit external RPC. Run
-//! with `cargo test --test phase1_layering -- --ignored`.
+//! with `cargo test --test cache_layering -- --ignored`.
 
 mod common;
 
@@ -125,7 +126,7 @@ async fn warm_store_then_drop_index_then_reopen() {
     );
 
     eprintln!(
-        "phase1_layering: count={cold_count}, cold={cold_elapsed:?}, warm={warm_elapsed:?}, speedup={:.1}x",
+        "cache_layering: count={cold_count}, cold={cold_elapsed:?}, warm={warm_elapsed:?}, speedup={:.1}x",
         cold_elapsed.as_secs_f64() / warm_elapsed.as_secs_f64()
     );
 }

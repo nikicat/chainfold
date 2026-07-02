@@ -1,4 +1,4 @@
-//! Phase 3 acceptance: Hist / `HistStore` split.
+//! `Hist` / `HistStore` split (Phase 3 acceptance in `docs/refactor.md`).
 //!
 //! These tests exercise the new `Hist` / `HistStore` types from
 //! `chainfold::arch` directly — they're source-agnostic and use a

@@ -1,7 +1,8 @@
-//! Phase 2 acceptance: live-follow path against local anvil.
+//! Live-follow path against local anvil (Phase 2 acceptance in
+//! `docs/refactor.md`).
 //!
 //! All tests are `#[ignore]` because they require the `anvil` binary on
-//! `PATH`. Run with `cargo test --test phase2_push -- --ignored`.
+//! `PATH`. Run with `cargo test --test live_follow -- --ignored`.
 //!
 //! Coverage:
 //! - `live_event_latency_ws` — WS follow mode delivers a mined block to

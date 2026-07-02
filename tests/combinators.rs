@@ -1,4 +1,5 @@
-//! Phase 4 acceptance: map / filter / since combinators.
+//! map / filter / since combinators (Phase 4 acceptance in
+//! `docs/refactor.md`).
 //!
 //! Source-agnostic — uses a synthetic `MockPos`/`MockSource` per the
 //! layering rule. Combinators must not reference any concrete source.
@@ -23,7 +24,7 @@ use futures_util::stream::{iter, poll_fn};
 use tokio::sync::watch;
 
 // ============================================================
-// MockPos / MockEvent / MockSource (mirror of phase3_hist_store.rs)
+// MockPos / MockEvent / MockSource (mirror of hist_store.rs)
 // ============================================================
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]

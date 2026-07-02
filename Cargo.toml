@@ -91,21 +91,21 @@ name = "mock_provider_smoke"
 required-features = ["evm"]
 
 [[test]]
-name = "phase1_layering"
+name = "cache_layering"
 required-features = ["evm"]
 
 [[test]]
-name = "phase2_push"
+name = "live_follow"
 required-features = ["evm"]
 
 [[test]]
-name = "phase3_hist_store"
+name = "hist_store"
 
 [[test]]
-name = "phase5_merge"
+name = "interleave"
 
 [[test]]
-name = "phase6_matcher"
+name = "matcher"
 
 [[test]]
 name = "owned_erc20"

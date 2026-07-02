@@ -1,4 +1,4 @@
-//! Phase 6 acceptance: `Matcher` abstraction.
+//! The `Matcher` abstraction (Phase 6 acceptance in `docs/refactor.md`).
 //!
 //! Source-agnostic — uses two independent `Source<SP=SrcPos>` and
 //! `Source<DP=DstPos>` mock backends so the cross-source nature is
