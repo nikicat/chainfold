@@ -247,6 +247,7 @@ pub fn decode_transfer(event: &EvmEvent) -> Option<TransferData> {
 
 /// Apply a Transfer event to `owner`'s running balance.
 ///
+/// * `from == to` → balance unchanged (a self-transfer moves nothing).
 /// * `to == owner` → balance grows by `amount`.
 /// * `from == owner` → balance shrinks by `amount` (saturating at zero).
 /// * otherwise → balance unchanged.
@@ -257,7 +258,9 @@ pub fn apply_transfer(owner: Address, balance: U256, event: &EvmEvent) -> U256 {
     let Some(t) = decode_transfer(event) else {
         return balance;
     };
-    if t.to == owner {
+    if t.from == t.to {
+        balance
+    } else if t.to == owner {
         balance.wrapping_add(t.amount)
     } else if t.from == owner {
         balance.checked_sub(t.amount).unwrap_or(U256::ZERO)
@@ -384,6 +387,18 @@ mod tests {
         let other = Address::repeat_byte(0x02);
         let event = make_transfer_event(owner, other, U256::from(100));
         assert_eq!(apply_transfer(owner, U256::from(50), &event), U256::ZERO);
+    }
+
+    #[test]
+    fn apply_self_transfer_is_balance_neutral() {
+        // owner == from == to: nothing moves. Guards against the to-branch
+        // winning and crediting the amount.
+        let owner = Address::repeat_byte(0x01);
+        let event = make_transfer_event(owner, owner, U256::from(100));
+        assert_eq!(
+            apply_transfer(owner, U256::from(50), &event),
+            U256::from(50)
+        );
     }
 
     #[test]
