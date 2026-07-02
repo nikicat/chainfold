@@ -15,21 +15,24 @@
 > | 2 — Push subscription | ✅ Done (2026-05-22) | WS latency ~3 ms on local anvil. |
 > | 3 — Hist / HistStore split | ✅ Done (2026-05-22) | Full cleanup, **no facade** — `Cursor`/`History` removed outright. |
 > | 4 — map / filter / since | ✅ Done (2026-05-22) | Pure proxies; no I/O. |
-> | 5 — Heterogeneous merge | ✅ Done (2026-05-22) | `MergedPos`, `ErasedHistStore`; `clamp_pos` override. |
+> | 5 — Heterogeneous merge | ✅ Done (2026-05-22) | `MergedPos`, `ErasedHistStore`; `clamp_pos` override. **Reshaped 2026-07-02** by the merge split: erasure deleted; ordered merge + vector-clock interleave (see `ARCHITECTURE.md` §7). |
 > | 5b — OwnedErc20 follow-up | ✅ Done (2026-05-23) | Two narrow filters + merge; `erc20_explorer --owner` rewired. |
 > | 6 — Matcher | ✅ Done (2026-05-23) | `BaseMatcher` / `AnchoredMatcher` / `AnchorStore` (in-mem + SQLite). |
 > | Structural cleanup | ✅ Done (2026-05-26) | Function-level dedup + module-tree splits + `mod.rs`→`foo.rs` migration (see below). |
 > | Reactive core (R1–R4, R7) | ✅ Done (2026-07-02) | `EvmChain` + generic `RangeIndexStore`; finality → chain; object positions + store-owned `load`. Canonical log: `TODO.md` R-series + `ARCHITECTURE.md` §5A. |
 > | **7 — Pruning + best/safe wiring** | ⏳ **Pending — next eligible chunk** | In-memory eviction + real `Best`/`Safe` producers on `EvmChain` (revised by R3, see below). |
 > | Bridge decoder | ⏳ Deferred | Generic `--match-on` extractor ships; ABI-aware impls per bridge are app-specific. |
-> | Same-`P` merge alias | ⏳ Deferred | Not load-bearing; `MergedItem.source_key` is useful as-is. |
+> | Same-`P` merge alias | ✅ Subsumed (2026-07-02) | The merge split made same-`P` the primary API: `merge_hist_stores` is the monomorphic ordered merge. |
 > | Reducer | ⏳ Deferred (Phase 6 spec) | Sibling of Matcher; `Erc20Balance` rebuild gates on it. |
 >
 > **Test suite (`cargo test --all-features`):** lib + CLI-bin unit + active
-> integration (anvil_smoke + mock_provider_smoke + phase3–6 suites), plus
-> anvil/fork-only ignored tests (owned_erc20, phase1_layering, phase2_push,
-> anvil_smoke) and an ignored `rpc_span` doctest. Run the command for the live
-> count — this file deliberately doesn't pin a number that goes stale.
+> integration (anvil_smoke + mock_provider_smoke + the hist_store /
+> combinators / interleave / matcher suites), plus anvil/fork-only ignored
+> tests (owned_erc20, cache_layering, live_follow, anvil_smoke) and an
+> ignored `rpc_span` doctest. (The suites were renamed from their historical
+> `phaseN_*` file names to subject names on 2026-07-02.) Run the command for
+> the live count — this file deliberately doesn't pin a number that goes
+> stale.
 >
 > **2026-06 follow-up work (shipped, not a numbered phase):** an
 > observability contract + CLI `--stats` summary (`src/evm/observe.rs`;
@@ -230,11 +233,15 @@ specific burn/mint (or send/receive) event shapes and pair on the real bridge
 ID. These are inherently app-specific and live downstream of the library;
 chainfold provides the `MatchFn` trait and `AnchoredMatcher` machinery.
 
-### Same-`P` typed merge alias (Phase 5 deferral)
+### Same-`P` typed merge alias (Phase 5 deferral) — subsumed 2026-07-02
 
-When every source shares one `P`, a typed `merge` convenience alias over the
-heterogeneous `merge_hist_stores` would avoid the `MergedItem.source_key`
-string indirection. Not load-bearing — `source_key` is useful as-is.
+Resolved by the merge split, which went further than an alias: the erased
+merge was deleted and same-`P` became the *primary* shape. `merge_hist_stores`
+is now the monomorphic **ordered merge** over one shared position space
+(anchor = `OrderedPos`, no user `cmp`); disjoint position spaces use
+`interleave_hist_stores` (vector-clock `MergedPos<P>`); cross-family position
+types unify via an app enum + the `map_positions` combinator. See
+`ARCHITECTURE.md` §7.
 
 ### Reducer (Phase 6 spec, not yet built)
 

@@ -308,7 +308,21 @@ feature.
 
 </details>
 
-## MergedPos: no typed constructor for consumers (post-R3 friction)
+## MergedPos: no typed constructor for consumers — DONE (2026-07-02, via the merge split)
+
+Resolved exactly the way the last paragraph predicted: the merge was split
+into a **monomorphic ordered merge** (`merge_hist_stores` over one position
+space; anchor = `OrderedPos<P>`, and the uniform-lower-bound case is just
+`OrderedPos::from(p)` — infallible, no load round-trip) and a **vector-clock
+interleave** (`interleave_hist_stores`; `MergedPos<P>` now holds typed
+positions and has public `FromIterator`/`From<[(K, P); N]>` construction +
+`get(&SourceKey)`). The `TODO(merge-erasure)` block and the whole
+`ErasedAnchor`/`ErasedHistStore` layer are deleted; `merged_pos_for` helpers
+in the explorers/CLI died with them. Cross-family position unification goes
+through an app-defined enum + the new `map_positions` combinator instead of
+erasure. See `ARCHITECTURE.md` §7.
+
+<details><summary>Original analysis</summary>
 
 Surfaced twice during the R3 consumer migration (erc20_explorer, CLI erc20):
 a consumer holding a concrete position (e.g. one `EvmPosition` meant as a
@@ -323,8 +337,10 @@ Candidate fix: a small public helper on the merge layer — e.g.
 `MergedHistStore::pos_for_all<P: Position>(p: P) -> MergedPos` (apply one
 typed position to every source key; anchor it per-key) or a public keyed
 builder taking `(SourceKey, impl Position)` pairs. Decide together with
-[[TODO(merge-erasure)]] in `src/merge.rs` — a monomorphic same-`P` merge
+`TODO(merge-erasure)` in `src/merge.rs` — a monomorphic same-`P` merge
 would dissolve this case entirely.
+
+</details>
 
 ## R8+ — (incoming)
 
@@ -449,7 +465,9 @@ items, landed:
   `MergedItem.source_key`. Only the *key* is newtyped; the value bytes stay
   `Vec<u8>` (the deliberately-generic erased positions). `#[serde(transparent)]`
   keeps the `MergedPos` marshal byte-identical; `Borrow<str>` keeps
-  `MergedPos::get(&str)` ergonomic.
+  `MergedPos::get(&str)` ergonomic. *(Update 2026-07-02: the merge split made
+  the values typed too — `MergedPos<P>` — and `get` now takes `&SourceKey`;
+  the `Borrow<str>` impl went away with its last caller.)*
 - **`BlockRange { from, to: BlockNumber }`** (Tier 3) — replaced the unnamed
   `(u64, u64)` in `compute_gaps`, `align_window`, and `loaded_windows`. The
   set/alignment arithmetic stays raw `u64` internally (BlockRange wraps only the
@@ -472,6 +490,8 @@ items, landed:
 
 ### Don't touch (intentionally generic)
 
-`MergedPos`'s `BTreeMap<String, Vec<u8>>` and `Position::marshal() -> Vec<u8>`:
-the type-erasure boundary is deliberately bytes/strings so the source-agnostic
-core can merge heterogeneous positions. Newtyping there fights the generic core.
+`Position::marshal() -> serde_json::Value`: the persistence boundary is
+deliberately a structured-but-untyped value so composite positions nest by
+pure composition. (The other entry that used to live here — `MergedPos`'s
+erased `Vec<u8>` values — was resolved on 2026-07-02: the merge split made
+`MergedPos<P>` fully typed, keyed by `SourceKey`.)
