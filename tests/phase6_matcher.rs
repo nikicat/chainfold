@@ -63,19 +63,16 @@ fn ev(bridge_id: u64, label: &str) -> Ev {
 
 struct MockSource {
     items: Mutex<Vec<Ev>>,
-    tip: Store<MockPos>,
-    tip_tx: watch::Sender<MockPos>,
+    tip: watch::Sender<MockPos>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl MockSource {
     fn new(initial: Vec<Ev>) -> Arc<Self> {
         let tip = MockPos(initial.len() as u64);
-        let (tx, rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
-            tip: Store::new(rx),
-            tip_tx: tx,
+            tip: watch::channel(tip).0,
             self_ref: std::sync::OnceLock::new(),
         });
         let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -88,7 +85,7 @@ impl MockSource {
             items.push(e);
             MockPos(items.len() as u64)
         };
-        let _ = self.tip_tx.send(new_tip);
+        self.tip.send_replace(new_tip);
     }
 
     fn arc_self(&self) -> Arc<Self> {
@@ -120,7 +117,7 @@ impl HistBackend<Ev, MockPos> for MockSource {
 impl HistStoreBackend<Ev, MockPos> for MockSource {
     fn snapshots(&self) -> HistStream<Ev, MockPos> {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-        let mut sub = self.tip.subscribe();
+        let mut sub = Store::new(self.tip.subscribe()).subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
@@ -130,7 +127,7 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
 
     async fn next(&self) -> Hist<Ev, MockPos> {
         let backend: Arc<dyn HistBackend<Ev, MockPos>> = self.arc_self();
-        Hist::new(backend, MockPos(0), self.tip.get())
+        Hist::new(backend, MockPos(0), *self.tip.borrow())
     }
 
     async fn time_pos(&self, _time: Timestamp) -> Result<MockPos, HistoryError> {

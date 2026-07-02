@@ -99,19 +99,16 @@ fn cmp_by_time(a: &MergedItem<CommonEvent>, b: &MergedItem<CommonEvent>) -> Orde
 
 struct Source<P: Position + FromValue + 'static> {
     items: Mutex<Vec<(P, CommonEvent)>>,
-    tip: Store<P>,
-    tip_tx: watch::Sender<P>,
+    tip: watch::Sender<P>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl<P: Position + FromValue + 'static> Source<P> {
     fn new(initial: Vec<(P, CommonEvent)>) -> Arc<Self> {
         let tip = initial.last().map(|(p, _)| p.clone()).unwrap_or_default();
-        let (tx, rx) = watch::channel(tip);
         let s = Arc::new(Self {
             items: Mutex::new(initial),
-            tip: Store::new(rx),
-            tip_tx: tx,
+            tip: watch::channel(tip).0,
             self_ref: std::sync::OnceLock::new(),
         });
         let _ = s.self_ref.set(Arc::downgrade(&s));
@@ -123,7 +120,7 @@ impl<P: Position + FromValue + 'static> Source<P> {
             let mut items = self.items.lock().unwrap();
             items.push((pos.clone(), e));
         }
-        let _ = self.tip_tx.send(pos);
+        self.tip.send_replace(pos);
     }
 
     fn arc_self(&self) -> Arc<Self> {
@@ -151,7 +148,7 @@ impl<P: Position + FromValue + 'static> HistBackend<CommonEvent, P> for Source<P
 impl<P: Position + FromValue + 'static> HistStoreBackend<CommonEvent, P> for Source<P> {
     fn snapshots(&self) -> HistStream<CommonEvent, P> {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
-        let mut sub = self.tip.subscribe();
+        let mut sub = Store::new(self.tip.subscribe()).subscribe();
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
@@ -161,7 +158,7 @@ impl<P: Position + FromValue + 'static> HistStoreBackend<CommonEvent, P> for Sou
 
     async fn next(&self) -> Hist<CommonEvent, P> {
         let backend: Arc<dyn HistBackend<CommonEvent, P>> = self.arc_self();
-        Hist::new(backend, P::default(), self.tip.get())
+        Hist::new(backend, P::default(), self.tip.borrow().clone())
     }
 
     async fn time_pos(&self, _time: Timestamp) -> Result<P, HistoryError> {
