@@ -1,19 +1,16 @@
 # Chainfold — Architecture
 
 > **This document** is the canonical architecture reference for chainfold —
-> the design, the shipped structure, and the rationale behind both, with
-> diagrams. For the *roadmap and phase status* see
-> [`refactor.md`](./refactor.md); for the *product pitch and quickstart* see
-> [`README.md`](../README.md); for the original pre-refactor design brainstorm
-> see [`blockchain_storage.md`](./blockchain_storage.md).
+> the design, its structure, and the rationale behind both, with diagrams.
+> For the *roadmap and phase status* see [`refactor.md`](./refactor.md); for
+> the *product pitch and quickstart* see [`README.md`](../README.md); for the
+> original pre-refactor design brainstorm see
+> [`blockchain_storage.md`](./blockchain_storage.md).
 >
-> **Status:** Phases 0–6 + the OwnedErc20 follow-up are shipped, and the
-> reactive-core refactor (R1–R4, R7 — `EvmChain` + the generic
-> `RangeIndexStore`, replacing `EvmLogHistory`/`LogIndex`/`EvmLogSubscriber`)
-> is fully landed on `refactor/reactive-core`, including the CLI, examples,
-> and test-suite migration. The **library** and **CLI** surfaces are live;
-> the **daemon** (`chainfoldd`) is planned. Phase 7 (memory pruning +
-> `best`/`safe` head producers) is the next eligible chunk.
+> **Status:** The **library** and **CLI** surfaces are live over the
+> `EvmChain` + generic `RangeIndexStore` core; the **daemon** (`chainfoldd`)
+> is planned. Phase 7 (memory pruning + `best`/`safe` head producers) is the
+> next eligible chunk.
 
 ---
 
@@ -24,7 +21,7 @@
 3. [Product surfaces](#3-product-surfaces)
 4. [Module map & layering](#4-module-map--layering)
 5. [Core abstractions](#5-core-abstractions)
-5A. [Client API vs. backend traits (shipped)](#5a-client-api-vs-backend-traits-shipped)
+5A. [Client API vs. backend traits](#5a-client-api-vs-backend-traits)
 6. [Combinators](#6-combinators)
 7. [Merge — ordered and interleaved](#7-merge--ordered-and-interleaved)
 8. [Matcher — correlation](#8-matcher--correlation)
@@ -296,7 +293,7 @@ impl<T, P: Position> HistStore<T, P> {
 }
 ```
 
-There are **no finality accessors** here (R3): finality is a chain-wide fact,
+There are **no finality accessors** here: finality is a chain-wide fact,
 not a per-store one, so it lives on the source's chain entity —
 `EvmChain::head(Finality)` — and a store carries a single neutral end/tip
 signal exposed through `snapshots()`/`next()`. See [§13](#13-reorg--finality-model).
@@ -324,8 +321,7 @@ async fn act_and_wait<T,P,R,...>(store, op, predicate)
 ```
 
 Background tasks are guarded by `tokio_util::task::AbortOnDropHandle` — drop
-the owner, the task aborts (R7; the old `AsyncDisposable` wrapper is deleted).
-See [§14](#14-ownership--lifetime).
+the owner, the task aborts. See [§14](#14-ownership--lifetime).
 
 ### The backend seam — `HistBackend` and `HistStoreBackend`
 
@@ -336,7 +332,7 @@ start, end }`; a `HistStore` is `{ backend: Arc<dyn HistStoreBackend> }`.
 `Arc<dyn HistBackend>`, so every snapshot of one source reads through the *same*
 index. A range-based source doesn't hand-write these traits anymore: it authors
 a `RangeSpec` and gets both impls from the generic `RangeIndexStore<S>`
-([§5A](#5a-client-api-vs-backend-traits-shipped)); non-range backends (merge,
+([§5A](#5a-client-api-vs-backend-traits)); non-range backends (merge,
 combinators, mocks) still implement them directly. Either way, combinators,
 merge, and matcher compose over the traits for free.
 
@@ -429,12 +425,7 @@ reader-vs-`insert_page` — noted in §18.)
 
 ---
 
-## 5A. Client API vs. backend traits (shipped)
-
-> **Status: shipped** (R3, 2026-07-02 — `5916497` core reshape + `dd6525c`
-> EVM, on `refactor/reactive-core`). This is the two-layer split as built;
-> [deviations from the pre-R3 sketch](#deviations-from-the-pre-r3-sketch)
-> below records where it landed differently.
+## 5A. Client API vs. backend traits
 
 Two layers. A range-based source authors a **`RangeSpec`** (what to store,
 resolve, persist) plus concrete wiring driving two entry points; everything
@@ -466,7 +457,7 @@ mirrors the reference [`history.ts`](../../reference/src/history.ts)'s
   `RangeSpec::load_pos`.
 - **Wiring lifetime** — background tasks attach via
   `attach_wiring(AbortOnDropHandle<()>)` and hold only `Weak` back-references:
-  they die with the store, and there is no `Arc` cycle (R7).
+  they die with the store, and there is no `Arc` cycle.
 
 ### Leaf seam — a source author implements `RangeSpec`
 
@@ -532,51 +523,13 @@ false-coverage soundness rule.
 
 ### Finality lives on the chain
 
-`head(tier): Signal<HeadEvent>` is the chain-wide clock (pre-R3 it was
-redundantly on every history). The chain holds **one**
+`head(tier): Signal<HeadEvent>` is the chain-wide clock. The chain holds **one**
 `watch::Sender<HeadEvent>`; `head(Best/Safe)` mirror `Latest` until Phase 7
 wires their producers into the head clock (per-tier channels — a
 confirmation-depth lag for `best`, a `finalized` poll for `safe`). Every
 published head has its block header persisted *first* — the **headers-present
 invariant** — so `LogSpec::resolve` can fill event timestamps synchronously.
 A log store's tip widens a head block to `EvmPosition(block, LogIdx::MAX)`.
-
-### Deviations from the pre-R3 sketch
-
-The sketch that lived here proposed a source-agnostic `Source` trait +
-`HistoryCallbacks` trait. What shipped deviates deliberately:
-
-- **No `Source` trait was added** (concrete-first, decision #6). The leaf
-  seam is `RangeSpec` + the concrete wiring in `chain/wiring.rs`. Lift a
-  trait when the blocks source (M1) arrives and shows what's actually common.
-- **`HistBackend`/`HistStoreBackend` survive** — the sketch had them collapse
-  away, but they remain the composition seam merge/combinators/mocks implement
-  directly. What changed: a range-based source no longer hand-writes them;
-  `RangeIndexStore<S>` implements both, once.
-- **`HistoryCallbacks` is not a trait** — `on_events`/`on_bump` are inherent
-  methods on `RangeIndexStore`; wiring holds a `Weak<RangeIndexStore<_>>` and
-  calls them directly.
-- **Follow is not a per-store `subscribe`/`follow` method** — it's fixed at
-  `EvmChain::new`; the chain owns one head clock, each store owns its wiring.
-- **`head(tier)` carries `HeadEvent { number, hash }`**, not a bare block
-  number — the hash rides along for reorg detection and the headers-present
-  invariant.
-- `watch(since)` never became a method — the free `watch_hist` already covers
-  it. `Page` is not a generic struct — it's `RangeSpec::Page` (concrete:
-  `LogPage`).
-
-### Sketch → shipped mapping
-
-| | pre-R3 shipped | R3 sketch | **R3 shipped** |
-|---|---|---|---|
-| Per-source contract | hand-written `HistBackend` + `HistStoreBackend` | one `Source` trait | **`RangeSpec` + concrete wiring** (trait deferred to M1) |
-| Reactive `HistStore` | per source | generic | **`RangeIndexStore<S>` — generic, written once** |
-| Live / follow | ad-hoc `EvmLogSubscriber` | `Source::subscribe(callbacks)` | **one chain head clock + per-store wiring tasks** |
-| Tip w/ no events | inline `update_tip_to` | `HistoryCallbacks::on_bump` | **`RangeIndexStore::on_bump`** (single nullable watch tip) |
-| Finality tips | `latest/best/safe` on every backend | `Chain::head(tier)` | **`EvmChain::head(Finality) -> Signal<HeadEvent>`** |
-| Backfill unit | items (`iter`) | pages (`fetch` → `Page`) | **`RangeSpec::Page` + injected `Fetcher<Page>`** |
-| Position (de)serialization | `marshal`/`unmarshal: Vec<u8>` on `Position` | — | **`marshal -> serde_json::Value`; `load` on the store** |
-| Task guard | `AsyncDisposable` (token + abort) | `AbortOnDropHandle` | **`AbortOnDropHandle` + `Weak` back-refs** (R7) |
 
 ---
 
@@ -609,10 +562,8 @@ mapper (still "on the store" from the consumer's point of view).
 ## 7. Merge — ordered and interleaved
 
 Two merge primitives for two semantically different operations, split by
-**position-space reasoning** (2026-07-02; replaced the erased heterogeneous
-merge — `ErasedAnchor`/`ErasedHistStore` had zero production users). Both
-are monomorphic over one shared item/position type and yield
-`MergedItem<T, P> { value, source_key, source_pos }`.
+**position-space reasoning**. Both are monomorphic over one shared
+item/position type and yield `MergedItem<T, P> { value, source_key, source_pos }`.
 
 | | `merge_hist_stores` (ordered) | `interleave_hist_stores` (vector clock) |
 |---|---|---|
@@ -1049,7 +1000,7 @@ flowchart LR
   queries filter them at read time. Nothing is truncated.
 - **Scanned ranges self-invalidate.** A range whose `end_block_hash` is
   reorged is refetched.
-- **Finality is chain-wide** (R3): the `Finality` tier on
+- **Finality is chain-wide**: the `Finality` tier on
   `EvmChain::head(tier)` / `EvmChain::logs(filter, tier)`, not per-store
   accessors. `Latest` is fully wired; `Best`/`Safe` mirror `Latest` until
   Phase 7 wires their producers (`latest − confirmation_depth`; RPC
@@ -1200,7 +1151,7 @@ swapped with a block number, a topic can't be confused with a hash.
 | `Topic` | newtype over `B256` | owns the address↔topic relationship (`From<Address>` left-pads, `.address()` extracts); unwraps to `B256` at the alloy `Filter`/`Log` boundary |
 | `ChainId` | `u64` | `#[serde(transparent)]` + `Ord` + `Display`; its `ToSql` lives in the *cache* layer so the domain type stays persistence-free |
 | `BlockNumber` | `u64` | **affine**: block ± u64 = block; block − block = u64 via `.get()`. `#[serde(transparent)]` keeps the `EvmPosition` marshal byte-identical |
-| `LogIdx` | `u32` | per-block log index. Named `LogIdx`, *not* `LogIndex` — that name belonged to the pre-R3 range tree (now `RangeIndex`) |
+| `LogIdx` | `u32` | per-block log index. Named `LogIdx`, *not* `LogIndex`, to avoid colliding with the `RangeIndex` range tree |
 | `FilterHash` | `[u8; 32]` | the BLAKE3 cache partition key; not an EVM hash, so a newtype (`ToSql` in the cache layer) |
 | `Timestamp` | `u64` | source-agnostic (lives in `arch.rs`); the unit `time_pos`/`act_and_wait` speak |
 | `SourceKey` | `String` | the merge-source / `MergedPos` clock / `MergedItem.source_key` key; `#[serde(transparent)]`; `MergedPos::get` speaks it |
@@ -1232,10 +1183,9 @@ remaining deliberately-generic boundary is `Position::marshal`'s
 | `tests/live_follow.rs` | anvil live-event latency | `#[ignore]` |
 | `tests/owned_erc20.rs` | fork OwnedErc20 vs broad-filter baseline | `#[ignore]` |
 
-(The integration suites carried `phaseN_*` names from the phased refactor
-until 2026-07-02; they're subject-named now. The ordered merge's own pins —
-min-frontier gating, same-position coalescing, plain-position anchors — live
-in `src/merge/ordered.rs` unit tests.)
+(The ordered merge's own pins — min-frontier gating, same-position
+coalescing, plain-position anchors — live in `src/merge/ordered.rs` unit
+tests.)
 
 ```bash
 cargo test --features evm             # fast lib + source-agnostic suite (~1s)
@@ -1271,7 +1221,7 @@ pieces:
   `LogCache::compact_ranges` (durable side) already exists and is tested;
   the in-memory eviction is what's missing.
 - **EVM blocks source** *(M1)*. A `BlockSpec: RangeSpec` reusing the same
-  `RangeIndex`/`RangeIndexStore` machinery (shipped generic with R3) to back
+  generic `RangeIndex`/`RangeIndexStore` machinery to back
   `chain.blocks(tier) -> HistStore<Block, BlockNumber>` — foundation for the
   histories-first `blocks` CLI command. When it lands, consider lifting a
   source-agnostic `Source` trait over the per-source wiring (deferred from
@@ -1280,18 +1230,13 @@ pieces:
   stream, positioned by a vector of source positions). `Erc20Balance` rebuild
   gates on it.
 - **Real bridge decoder** for `bridge_matcher` — ABI-aware `MatchFn` impls
-  (LayerZero ULN, OP `CrossDomainMessenger`, Arbitrum `Inbox`, …); the shipped
-  CLI uses a generic `--match-on` key extractor.
+  (LayerZero ULN, OP `CrossDomainMessenger`, Arbitrum `Inbox`, …); the CLI
+  uses a generic `--match-on` key extractor.
 - **`chainfoldd`** — the transparent caching JSON-RPC daemon (benefits from
   Phase 7's finality wiring).
 - **More source backends** — Solana / Bitcoin / CEX websockets all fit the
   `HistStoreBackend` shape; each gets its own `Position` type, and cross-source
   merge already supports it.
-- **Same-`P` typed merge alias** *(Phase 5 deferral)*. When every source
-  shares one `Position` (the `OwnedErc20` case), a typed `merge<T, P>`
-  returning `HistStore<T, P>` would skip the `MergedPos` erasure overhead. Not
-  load-bearing today — `MergedItem.source_key` is genuinely useful for
-  direction reporting.
 - **Reorg-aware `lca()` / `is_equiv()`** *(Phase 7 candidate)*. Centralize the
   consumer-side reorg recovery of [§13](#13-reorg--finality-model) into the API
   — `HistStore::lca(a, b)` to roll a stale anchor back to the canonical chain's

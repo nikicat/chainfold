@@ -1,114 +1,53 @@
 # Chainfold refactoring plan
 
-> **Status as of 2026-05-26.** Phases 0–6 + the OwnedErc20 follow-up + the
-> post-Phase-6 structural cleanup are all shipped on `main`. This file used to
-> carry the full per-phase specs for 0–6; those are now redundant with the
-> *shipped* design in [`ARCHITECTURE.md`](./ARCHITECTURE.md) and the per-phase notes in
-> `~/.claude-personal/projects/-home-nb-src-chainfold/memory/`
-> (`phase5_merge.md`, `phase6_matcher.md`, …). What remains here is the live
-> agenda: **Phase 7** plus the deferred follow-ups.
->
-> | Phase | Status | Notes |
-> |---|---|---|
-> | 0 — Housekeeping + CCPs | ✅ Done (2026-05-21) | Dead pre-arch code deleted; anvil + mock harnesses landed. |
-> | 1 — LogCache + LogIndex | ✅ Done (2026-05-21) | Layered cache split; 98.5× warm-vs-cold on fork. |
-> | 2 — Push subscription | ✅ Done (2026-05-22) | WS latency ~3 ms on local anvil. |
-> | 3 — Hist / HistStore split | ✅ Done (2026-05-22) | Full cleanup, **no facade** — `Cursor`/`History` removed outright. |
-> | 4 — map / filter / since | ✅ Done (2026-05-22) | Pure proxies; no I/O. |
-> | 5 — Heterogeneous merge | ✅ Done (2026-05-22) | `MergedPos`, `ErasedHistStore`; `clamp_pos` override. **Reshaped 2026-07-02** by the merge split: erasure deleted; ordered merge + vector-clock interleave (see `ARCHITECTURE.md` §7). |
-> | 5b — OwnedErc20 follow-up | ✅ Done (2026-05-23) | Two narrow filters + merge; `erc20_explorer --owner` rewired. |
-> | 6 — Matcher | ✅ Done (2026-05-23) | `BaseMatcher` / `AnchoredMatcher` / `AnchorStore` (in-mem + SQLite). |
-> | Structural cleanup | ✅ Done (2026-05-26) | Function-level dedup + module-tree splits + `mod.rs`→`foo.rs` migration (see below). |
-> | Reactive core (R1–R5, R7) | ✅ Done (2026-07-02) | `EvmChain` + generic `RangeIndexStore`; finality → chain; object positions + store-owned `load`; R5 = `Store<T>`→`Signal<T>` rename (kept newtype + `get()`; unbox declined). Canonical log: `TODO.md` R-series + `ARCHITECTURE.md` §5A. **R6 (concurrency tests) still open.** |
-> | **7 — Pruning + best/safe wiring** | ⏳ **Pending — next eligible chunk** | In-memory eviction + real `Best`/`Safe` producers on `EvmChain` (revised by R3, see below). |
-> | Bridge decoder | ⏳ Deferred | Generic `--match-on` extractor ships; ABI-aware impls per bridge are app-specific. |
-> | Same-`P` merge alias | ✅ Subsumed (2026-07-02) | The merge split made same-`P` the primary API: `merge_hist_stores` is the monomorphic ordered merge. |
-> | Reducer | ⏳ Deferred (Phase 6 spec) | Sibling of Matcher; `Erc20Balance` rebuild gates on it. |
+> **Live agenda: Phase 7 + the deferrals below.** Phases 0–6, the OwnedErc20
+> follow-up, the post-Phase-6 structural cleanup, and the reactive-core
+> refactor (R1–R5, R7) are all shipped on `main`; their design lives in
+> [`ARCHITECTURE.md`](./ARCHITECTURE.md) and the per-phase notes under
+> `~/.claude-personal/projects/-home-nb-src-chainfold/memory/`. Open backlog is
+> [`TODO.md`](./TODO.md). This file carries the forward plan.
 >
 > **Test suite (`cargo test --all-features`):** lib + CLI-bin unit + active
 > integration (anvil_smoke + mock_provider_smoke + the hist_store /
 > combinators / interleave / matcher suites), plus anvil/fork-only ignored
-> tests (owned_erc20, cache_layering, live_follow, anvil_smoke) and an
-> ignored `rpc_span` doctest. (The suites were renamed from their historical
-> `phaseN_*` file names to subject names on 2026-07-02.) Run the command for
-> the live count — this file deliberately doesn't pin a number that goes
-> stale.
->
-> **2026-06 follow-up work (shipped, not a numbered phase):** an
-> observability contract + CLI `--stats` summary (`src/evm/observe.rs`;
-> `block_timestamp` fast-path; the chain-id cross-check is config-gated via
-> `[evm] chain_id_check`), and a type-discipline pass replacing blind
-> primitives in the EVM layer with semantic types — `ChainId`, `Topic`,
-> `Address`/`B256` (+ alloy `TxHash`/`BlockHash` aliases), and `ChainProvider`
-> (bundles `chain_id` so the lib stops re-fetching `eth_chainId`). The sweep
-> was finished by three more newtypes — `FilterHash` (BLAKE3 cache key),
-> `LogIdx` (per-block log index), and the affine `BlockNumber` — so no bare
-> block-number/log-index/filter-hash primitives remain in the EVM layer.
-> Most targets are gated behind the non-default `evm` feature; the CLI binary
-> behind `cli`. Bare `cargo test` only exercises the 35 source-agnostic lib
-> tests + phases 3–6.
-
-## What shipped in the structural cleanup (done)
-
-The structural-debt inventory accumulated over Phases 0–6 has all landed:
-
-- **Function-level dedup:** `resolve_range`, `apply_topics`, `render_transfer`,
-  `install_gap_placeholder`, `merge_step` decomposition, `walk_step`
-  unification, `cached_navigate` forward/backward split, `tip_pos(TipKind)`
-  collapse, `find_event_item` extraction, stale-tag/citation removal.
-- **`arch::evm` types** (`EvmPosition`/`EvmEvent`/`Erc20*`/…) moved out of
-  `arch.rs` into `src/evm/types.rs` — the source-agnostic core no longer names
-  EVM.
-- **Module-tree splits:**
-  - `matcher.rs` → `src/matcher/` (extracting `SqliteAnchorStore` into
-    `anchor_store_sqlite.rs`).
-  - `evm/log_index.rs` → `src/evm/log_index/`
-    (`block_pos`/`range_tree`/`nav`/`gap_fill`).
-  - `evm/log_store.rs` → `src/evm/cache/` — a `CacheDb` opener vending
-    `LogCache` (logs + ranges + reorg + headers), `Erc20Cache`, and
-    `EventSignatureCache` over one shared `Arc<Mutex<Connection>>` (one SQLite
-    file). The misleading single-`LogStore` god-object is gone; each consumer
-    holds one narrow view.
-- **`mod.rs` → `foo.rs` migration (2026-05-26):** all six `*/mod.rs` files
-  converted to edition-2024-idiomatic `foo.rs` + `foo/` siblings. No `mod.rs`
-  files remain.
+> tests (owned_erc20, cache_layering, live_follow, anvil_smoke) and an ignored
+> `rpc_span` doctest. Run the command for the live count — this file
+> deliberately doesn't pin a number that goes stale.
 
 ---
 
 ## Design context (locked-in)
 
-A phased refactor aligning chainfold with the reference implementation's production-validated
+A refactor aligning chainfold with the reference implementation's production-validated
 layering. Built on three locked-in structural shifts:
 
 1. **Cache layering** — in-memory hot path (`RangeIndex`,
-   `src/evm/range_index/`; named `LogIndex` in `src/evm/log_index/` before
-   R3 generalized it) above SQLite backfill (`LogCache`, `src/evm/cache/`).
+   `src/evm/range_index/`) above SQLite backfill (`LogCache`, `src/evm/cache/`).
    SQLite never sits on the live-event critical path.
 2. **Snapshot + tip-stream split** — `Hist<T,P>` (finite, immutable snapshot)
    and `HistStore<T,P>` (yields a fresh `Hist` as the tip advances, via
    `snapshots()`). `Position` doubles as the anchor — there is **no** separate
-   `Anchor` trait, and the types are two-param `<T,P>`, not the `<T,P,A>`
-   sketched in the original plan.
+   `Anchor` trait, and the types are two-param `<T,P>`.
 3. **Two reducer shapes** — `Matcher` (pure correlation over src + dst tails)
    shipped in Phase 6. `Reducer` (monotonic fold over one stream) is still
    deferred. They address different problems; both are intended to stay.
 
-### As-built layout (the original plan predates these paths)
+### As-built layout
 
 - **Library core** (source-agnostic): `src/arch.rs` (`Position`, `Hist`,
-  `HistStore`, `Store`, `HistBackend`/`HistStoreBackend`), `src/merge.rs`,
-  `src/combinators/` (`mapped`/`filtered`/`since`), `src/matcher/`.
+  `HistStore`, `Signal`, `HistBackend`/`HistStoreBackend`), `src/merge/`,
+  `src/combinators/` (`mapped`/`filtered`/`since`/`map_positions`),
+  `src/matcher/`.
 - **EVM source** (concrete): `src/evm/` — `chain/` (`EvmChain`, head clock,
   per-store wiring), `range_index/` (generic tree + `RangeIndexStore` +
   `LogSpec`), `cache/`, `chain_provider.rs`, `erc20.rs`, `owned_erc20.rs`,
-  `types.rs`, `retry.rs`, `aligned_ranges.rs`, `signatures.rs`. (Pre-R3:
-  `history.rs`, `log_index/`, `subscriber.rs` — deleted 2026-07-02.)
+  `types.rs`, `retry.rs`, `aligned_ranges.rs`, `signatures.rs`.
 - **Product CLI:** `src/bin/chainfold/` (behind the `cli` feature) — the real
-  binary, carrying its own unit tests. This is distinct from the per-feature **demo
+  binary, carrying its own unit tests. Distinct from the per-feature **demo
   binaries** in `examples/` (`history_explorer`, `erc20_explorer`,
-  `bridge_explorer`, `bridge_matcher`), which exist to validate each phase
-  end-to-end against real RPC. When a section below says "CLI deliverable," it
-  means an `examples/` demo unless it names `src/bin/chainfold`.
+  `bridge_explorer`, `bridge_matcher`), which validate each phase end-to-end
+  against real RPC. When a section below says "CLI deliverable," it means an
+  `examples/` demo unless it names `src/bin/chainfold`.
 
 ### Reference reading for agents (reference patterns to translate)
 
@@ -144,11 +83,10 @@ layering. Built on three locked-in structural shifts:
 
 ## Phase 7 — Pruning + best/safe wiring (next eligible)
 
-**Estimated:** ~1 week. Opportunistic. **Prereqs:** Phases 1 + 2 — both
-shipped — plus the R3 reactive-core refactor (shipped 2026-07-02), which
-**relocated this phase's finality half**: there are no per-history
-`best_store`/`safe_store` anymore; finality is the chain-wide `Finality`
-tier on `EvmChain`.
+**Estimated:** ~1 week. Opportunistic. **Prereqs:** Phases 1 + 2 plus the R3
+reactive-core refactor — all shipped. R3 **relocated this phase's finality
+half**: there are no per-history `best_store`/`safe_store` anymore; finality is
+the chain-wide `Finality` tier on `EvmChain`.
 
 ### Goal
 
@@ -165,11 +103,8 @@ Bound long-running memory, and wire real `Best`/`Safe` producers into
   already exists and is tested (`compact_merges_finalized_ranges`,
   `compact_skips_reorged_ranges`). What's missing is **in-memory** eviction.
 - **`src/evm/range_index/range_tree.rs`** — empty-range tombstones are
-  already a first-class concept (the type doc mentions "preserved across
-  compaction"), but no prune/compact methods exist yet. The tree is generic
-  over `RangeSpec` since R3; prune/compact land once, for every source.
-- **No deprecated facade exists** — Phase 3 removed `Cursor`/`History` outright.
-  The original plan's "delete the deprecated facade" task is therefore moot.
+  already a first-class concept, but no prune/compact methods exist yet. The
+  tree is generic over `RangeSpec`; prune/compact land once, for every source.
 
 ### Deliverables
 
@@ -179,7 +114,7 @@ Bound long-running memory, and wire real `Best`/`Safe` producers into
   `Range` entry**; empty ranges stay as tombstones.
 - `compact_in_memory(up_to_block)` — merge adjacent empty ranges. Safety: only
   on ranges entirely below the `safe` tip (a tip reorg must never invalidate a
-  merged range — see locked-in decision #8).
+  merged range — locked-in decision #8).
 - On `items()` into a pruned range, repopulate from the durable store
   (cache-aside, via `RangeSpec::load_window`).
 
@@ -232,16 +167,6 @@ extractor — it correlates "two events that share value X." Production bridges
 specific burn/mint (or send/receive) event shapes and pair on the real bridge
 ID. These are inherently app-specific and live downstream of the library;
 chainfold provides the `MatchFn` trait and `AnchoredMatcher` machinery.
-
-### Same-`P` typed merge alias (Phase 5 deferral) — subsumed 2026-07-02
-
-Resolved by the merge split, which went further than an alias: the erased
-merge was deleted and same-`P` became the *primary* shape. `merge_hist_stores`
-is now the monomorphic **ordered merge** over one shared position space (no
-user `cmp`; same-position items coalesce, so anchors are plain `P`); disjoint
-position spaces use `interleave_hist_stores` (vector-clock `MergedPos<P>`);
-cross-family position types unify via an app enum + the `map_positions`
-combinator. See `ARCHITECTURE.md` §7.
 
 ### Reducer (Phase 6 spec, not yet built)
 
@@ -297,14 +222,9 @@ The first concrete steps toward the histories-first CLI:
      path distinct from the log subscriber).
    - **M3** — extend `cached_block_headers` with richer fields (gas used/limit,
      base fee, tx count, miner) for a `cast block`-like view (schema migration).
-2. **Default chain = `ethereum` when `--chain`/`--chain-id` omitted — DONE
-   (2026-06-30).** Both clap flags are now optional; resolution precedence is
-   `--chain-id` > `--chain` > env `CHAINFOLD_CHAIN` > config `[evm] default_chain`
-   > built-in `ethereum`, via a `ChainSelector` domain enum (`Id(ChainId)` /
-   `Name(ChainHandle)`) in `chains.rs`. `EvmConfig.default_chain` deserializes
-   straight into `Option<ChainSelector>` (empty → unset); `ChainResolver::resolve`
-   now takes `&ChainHandle`. A one-line stderr `note:` fires when fully
-   defaulting. Unit-tested (`select_chain` precedence + `ChainSelector::parse`).
+2. **Default chain = `ethereum`** when `--chain`/`--chain-id` omitted — shipped.
+   Resolution precedence: `--chain-id` > `--chain` > env `CHAINFOLD_CHAIN` >
+   config `[evm] default_chain` > built-in `ethereum`.
 
 ## What success looks like (north star)
 
@@ -317,16 +237,17 @@ The first concrete steps toward the histories-first CLI:
 - `bridge_explorer` / `bridge_matcher` run against real cross-chain setups with
   no bespoke per-bridge code beyond a `MatchFn`.
 - Memory bounded under indefinite follow (Phase 7).
-- Usable as a dependency via: `Hist`, `HistStore`, `Position`, `Store`,
-  `Matcher` (+ `Reducer` once built), `merge_hist_stores`, `map_hist_store`,
-  `filter_hist_store`, `since_hist_store`. (`snapshots()` is the tip-stream
-  method; there is no separate `Anchor` trait — `Position` serves that role.)
+- Usable as a dependency via: `Hist`, `HistStore`, `Position`, `Signal`,
+  `Matcher` (+ `Reducer` once built), `merge_hist_stores`,
+  `interleave_hist_stores`, `map_hist_store`, `filter_hist_store`,
+  `since_hist_store`. (`snapshots()` is the tip-stream method; there is no
+  separate `Anchor` trait — `Position` serves that role.)
 
 ## How to use this plan
 
-- The live work is **Phase 7** + the three deferrals above. Phases 0–6 are
-  shipped; their design rationale lives in `ARCHITECTURE.md` and the per-phase memory
-  files, not here.
+- The live work is **Phase 7** + the deferrals above. Phases 0–6 and the
+  reactive-core refactor are shipped; their rationale lives in `ARCHITECTURE.md`
+  and the per-phase memory files, not here.
 - **Read the reference sources first** — they contain production-tested
   versions of every pattern. Translate, don't reinvent.
 - **"Decision to confirm" checkpoints happen before implementation**, per the

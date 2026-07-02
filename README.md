@@ -80,7 +80,7 @@ matcher then work automatically.
 |---|---|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | Architecture reference — diagrams, the client/backend trait layering, data flow, storage model, observability. |
 | [`docs/refactor.md`](./docs/refactor.md) | Phase status and roadmap (Phase 7 + deferrals). |
-| [`docs/TODO.md`](./docs/TODO.md) | Active backlog, incl. the reactive-core refactor plan (R-series). |
+| [`docs/TODO.md`](./docs/TODO.md) | Active backlog — open items only (a done-work ledger + R6 concurrency tests, CLI-table cleanup). |
 | [`docs/blockchain_storage.md`](./docs/blockchain_storage.md) | Original pre-refactor design brainstorm (historical). |
 
 The `chainfold` CLI also ships a `--stats` flag that reports RPC counts and
