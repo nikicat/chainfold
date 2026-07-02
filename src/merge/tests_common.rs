@@ -16,7 +16,7 @@ use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Store, Timestamp,
 };
-use crate::merge::{DiscretePosition, MergedItem, SourceKey};
+use crate::merge::{MergedItem, SourceKey};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Default)]
 pub struct MockPos(pub u64);
@@ -24,12 +24,6 @@ pub struct MockPos(pub u64);
 impl Position for MockPos {
     fn marshal(&self) -> serde_json::Value {
         serde_json::json!(self.0)
-    }
-}
-
-impl DiscretePosition for MockPos {
-    fn pred(&self) -> Self {
-        Self(self.0.saturating_sub(1))
     }
 }
 

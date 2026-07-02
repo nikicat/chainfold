@@ -8,7 +8,7 @@ use chainfold::evm::{
     CacheDb, Erc20Metadata, EvmChain, EvmEvent, EvmPosition, OwnedErc20, apply_transfer,
     fetch_erc20_metadata,
 };
-use chainfold::merge::{MergedItem, OrderedPos};
+use chainfold::merge::MergedItem;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 
@@ -89,30 +89,20 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
         let merged_hs = owned.transfers();
         let mut balance = U256::ZERO;
-        let mut last_pos: Option<EvmPosition> = None;
 
         if follow.is_follow() {
             // The chain was built with a poll transport, so both inner
             // stores' tips are already driven live by the head clock.
-            let mut stream = watch_hist(&merged_hs, OrderedPos::from(start));
+            let mut stream = watch_hist(&merged_hs, start);
             let mut count = 0;
             while let Some(item) = stream.next().await {
-                if render_transfer(
-                    &item?,
-                    &mut balance,
-                    &mut last_pos,
-                    count,
-                    &ctx,
-                    show_balance,
-                    owner,
-                ) {
-                    count += 1;
-                }
+                render_transfer(&item?, &mut balance, count, &ctx, show_balance, owner);
+                count += 1;
             }
         } else {
             let hist = merged_hs.next().await;
-            let (_, after_start) = hist.split(OrderedPos::from(start));
-            let (window, _) = after_start.split(OrderedPos::from(end));
+            let (_, after_start) = hist.split(start);
+            let (window, _) = after_start.split(end);
             let mut stream = window.iter();
             let mut count = 0;
             while let Some(item) = stream.next().await {
@@ -120,17 +110,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                     println!("... (limit reached, use --limit to show more)");
                     break;
                 }
-                if render_transfer(
-                    &item?,
-                    &mut balance,
-                    &mut last_pos,
-                    count,
-                    &ctx,
-                    show_balance,
-                    owner,
-                ) {
-                    count += 1;
-                }
+                render_transfer(&item?, &mut balance, count, &ctx, show_balance, owner);
+                count += 1;
             }
             if count == 0 {
                 println!("No transfers involving owner.");
@@ -143,34 +124,25 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     Ok(())
 }
 
-/// Render one merged transfer: dedupe on event position (the in/out
-/// pre-filter yields the same log twice when owner == from == to is
-/// theoretically possible, and reorg-edge cases can re-emit), fold the
-/// running balance when enabled, and print. Returns `true` if printed —
-/// the caller increments its count on `true`.
+/// Render one merged transfer: fold the running balance when enabled, and
+/// print. The merge yields each log once (same-position copies coalesce),
+/// so no dedupe is needed here.
 fn render_transfer(
-    item: &Positioned<MergedItem<EvmEvent, EvmPosition>, OrderedPos<EvmPosition>>,
+    item: &Positioned<MergedItem<EvmEvent, EvmPosition>, EvmPosition>,
     balance: &mut U256,
-    last_pos: &mut Option<EvmPosition>,
     count: usize,
     ctx: &FmtContext<'_>,
     show_balance: bool,
     owner: Address,
-) -> bool {
+) {
     let mi = &item.item;
-    let event_pos = mi.value.position();
-    if Some(event_pos) == *last_pos {
-        return false;
-    }
-    *last_pos = Some(event_pos);
     if show_balance {
         *balance = apply_transfer(owner, *balance, &mi.value);
     }
-    let positioned = Positioned::new(mi.value.clone(), event_pos);
+    let positioned = Positioned::new(mi.value.clone(), item.pos);
     if show_balance {
         fmt::print_balance(&positioned, *balance, count, ctx);
     } else {
         fmt::print_transfer(&positioned, count, ctx);
     }
-    true
 }

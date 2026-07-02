@@ -1,5 +1,5 @@
 //! The ordered merge: sources sharing one position space, stream order =
-//! `P`'s total order, single-position resume anchors ([`OrderedPos`]).
+//! `P`'s total order, plain-`P` resume anchors, same-position coalescing.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,112 +16,28 @@ use super::kway::{MergeStream, take_first_error};
 use super::types::{MergedItem, SourceKey, Sources, TaggedEnd};
 
 // ============================================================
-// DiscretePosition
-// ============================================================
-
-/// A [`Position`] whose total order is *discrete*: every non-[`Default`]
-/// position has an immediate predecessor.
-///
-/// Required by [`merge_hist_stores`] only. The core iteration protocol is
-/// strictly exclusive-start (`(start, end]`), so resuming an ordered merge at
-/// an [`At`](SourceBound::At)-tagged anchor — where later-keyed sources still
-/// owe their item *at* `start.pos` — needs a fetch window opening strictly
-/// below `start.pos`. `pred` names that opening; the merge drops the overlap
-/// item-exactly, so a **conservative (lower) `pred` is still correct, just
-/// over-fetches**. Returning `self` unchanged for a non-default position is
-/// the one wrong answer (the boundary item would be silently skipped).
-///
-/// The vector-clock [`interleave_hist_stores`](super::interleave_hist_stores)
-/// does not need this — its [`MergedPos`](super::MergedPos) anchors carry
-/// each source's own last position, which is already strictly below anything
-/// that source still owes.
-pub trait DiscretePosition: Position {
-    /// The greatest position strictly below `self`; saturates at
-    /// [`Default`] (`P::default().pred() == P::default()`).
-    fn pred(&self) -> Self;
-}
-
-// ============================================================
-// OrderedPos — the ordered merge's anchor
-// ============================================================
-
-/// Position in an ordered-merge stream: an inner position plus a
-/// [`SourceBound`] locating the cut *within* the set of items sitting
-/// exactly at `pos`. Total order: `(pos, bound)` lexicographic.
-///
-/// * Yielded items carry `bound: At(source_key)` — exact resume among
-///   equal-position duplicates.
-/// * [`From<P>`](Self::from) builds `bound: After` — "everything at or
-///   before `pos`, all sources" — the one-conversion anchor for callers
-///   holding a plain inner position (e.g. a `--from-block` bound).
-/// * [`Default`] is `(P::default(), Before)`: strictly before every real
-///   item, even one sitting exactly at `P::default()`.
-///
-/// The tri-state (rather than a bare `(P, SourceKey)` pair) exists because
-/// tips/boundary cuts must sit strictly *after* every real item at that
-/// `pos`, and `Default` strictly *before* them — `After`/`Before` express
-/// both without magic key sentinels.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
-pub struct OrderedPos<P: Position> {
-    pub pos: P,
-    pub bound: SourceBound,
-}
-
-/// Where an [`OrderedPos`] cut sits among the items at exactly its `pos`:
-/// before all of them, after the item of one tagged source, or after all of
-/// them. Derived `Ord`: `Before < At(key) < After`, `At`s by key order —
-/// matching the merge's cross-source tie order.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
-pub enum SourceBound {
-    #[default]
-    Before,
-    At(SourceKey),
-    After,
-}
-
-impl<P: Position> From<P> for OrderedPos<P> {
-    /// Anchor covering everything at or before `pos`, from all sources.
-    fn from(pos: P) -> Self {
-        Self {
-            pos,
-            bound: SourceBound::After,
-        }
-    }
-}
-
-impl<P: Position> Position for OrderedPos<P> {
-    /// `{"pos": .., "bound": "before"|"after"}` or `{"pos": .., "at": "<key>"}`.
-    /// Deserialization lives on the merged store's `load` (any source's
-    /// `load` parses the inner `pos` — all sources share `P`).
-    fn marshal(&self) -> serde_json::Value {
-        let mut obj = serde_json::Map::new();
-        obj.insert("pos".to_owned(), self.pos.marshal());
-        match &self.bound {
-            SourceBound::Before => obj.insert("bound".to_owned(), "before".into()),
-            SourceBound::After => obj.insert("bound".to_owned(), "after".into()),
-            SourceBound::At(key) => obj.insert("at".to_owned(), key.as_str().into()),
-        };
-        serde_json::Value::Object(obj)
-    }
-}
-
-// ============================================================
 // merge_hist_stores
 // ============================================================
 
 /// Merge `sources` sharing one position space into a single [`HistStore`]
-/// over [`MergedItem<T, P>`], ordered by `P`'s own total order (ties across
-/// sources resolve in [`SourceKey`] order, stable and deterministic).
+/// over [`MergedItem<T, P>`], ordered by `P`'s own total order. The merged
+/// store's positions are plain `P` — an anchor saved from the merged stream
+/// is an ordinary position, interchangeable with the inner stores'.
+///
+/// **Coalescing:** within one position space a position *identifies* an
+/// item, so sources carrying an item at the identical position (overlapping
+/// filters — e.g. a self-transfer matching both `OwnedErc20` filters) are
+/// reporting the same item. The merged stream yields each position **once**,
+/// from the lowest [`SourceKey`]; the other copies are dropped.
 ///
 /// The merged snapshot end is the minimum of the sources' ends — see the
-/// [module docs](crate::merge). Resume anchors are [`OrderedPos`]; a plain
-/// `P` converts via `OrderedPos::from`.
+/// [module docs](crate::merge).
 pub fn merge_hist_stores<T, P>(
     sources: BTreeMap<SourceKey, HistStore<T, P>>,
-) -> HistStore<MergedItem<T, P>, OrderedPos<P>>
+) -> HistStore<MergedItem<T, P>, P>
 where
     T: Clone + Send + Sync + 'static,
-    P: DiscretePosition,
+    P: Position,
 {
     HistStore::new(Arc::new(OrderedHistStoreBackend {
         sources: Arc::new(sources),
@@ -132,20 +48,16 @@ struct OrderedHistStoreBackend<T, P: Position> {
     sources: Sources<T, P>,
 }
 
-/// Build an ordered merged [`Hist`] spanning `(Default, (end, After)]`.
-fn build_ordered_hist<T, P>(
-    sources: &Sources<T, P>,
-    end: P,
-) -> Hist<MergedItem<T, P>, OrderedPos<P>>
+/// Build an ordered merged [`Hist`] spanning `(P::default(), end]`.
+fn build_ordered_hist<T, P>(sources: &Sources<T, P>, end: P) -> Hist<MergedItem<T, P>, P>
 where
     T: Clone + Send + Sync + 'static,
-    P: DiscretePosition,
+    P: Position,
 {
-    let backend: Arc<dyn HistBackend<MergedItem<T, P>, OrderedPos<P>>> =
-        Arc::new(OrderedHistBackend {
-            sources: sources.clone(),
-        });
-    Hist::new(backend, OrderedPos::default(), OrderedPos::from(end))
+    let backend: Arc<dyn HistBackend<MergedItem<T, P>, P>> = Arc::new(OrderedHistBackend {
+        sources: sources.clone(),
+    });
+    Hist::new(backend, P::default(), end)
 }
 
 /// The min-over-sources frontier: the greatest position *all* sources have
@@ -173,13 +85,10 @@ enum OrderedSnapState<T, P: Position> {
 
 async fn ordered_snap_step<T, P>(
     state: OrderedSnapState<T, P>,
-) -> Option<(
-    Hist<MergedItem<T, P>, OrderedPos<P>>,
-    OrderedSnapState<T, P>,
-)>
+) -> Option<(Hist<MergedItem<T, P>, P>, OrderedSnapState<T, P>)>
 where
     T: Clone + Send + Sync + 'static,
-    P: DiscretePosition,
+    P: Position,
 {
     match state {
         OrderedSnapState::Seed {
@@ -243,12 +152,12 @@ where
 }
 
 #[async_trait::async_trait]
-impl<T, P> HistStoreBackend<MergedItem<T, P>, OrderedPos<P>> for OrderedHistStoreBackend<T, P>
+impl<T, P> HistStoreBackend<MergedItem<T, P>, P> for OrderedHistStoreBackend<T, P>
 where
     T: Clone + Send + Sync + 'static,
-    P: DiscretePosition,
+    P: Position,
 {
-    fn snapshots(&self) -> HistStream<MergedItem<T, P>, OrderedPos<P>> {
+    fn snapshots(&self) -> HistStream<MergedItem<T, P>, P> {
         let sources = self.sources.clone();
         let tagged: Vec<Subscription<TaggedEnd<P>>> = sources
             .iter()
@@ -264,7 +173,7 @@ where
         ))
     }
 
-    async fn next(&self) -> Hist<MergedItem<T, P>, OrderedPos<P>> {
+    async fn next(&self) -> Hist<MergedItem<T, P>, P> {
         let mut ends: BTreeMap<SourceKey, P> = BTreeMap::new();
         for (k, s) in self.sources.iter() {
             ends.insert(k.clone(), s.next().await.end().clone());
@@ -272,11 +181,10 @@ where
         build_ordered_hist(&self.sources, min_end(&ends))
     }
 
-    async fn time_pos(&self, time: Timestamp) -> Result<OrderedPos<P>, HistoryError> {
+    async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {
         // Sources share the position space, so their estimates should agree;
-        // take the minimum and cut Before it, so an item at the estimated
-        // position stays in the resumable tail (estimates are approximate —
-        // err toward re-including, never toward missing).
+        // take the minimum — estimates are approximate, err toward
+        // re-including, never toward missing.
         let mut min: Option<P> = None;
         for s in self.sources.values() {
             let p = s.time_pos(time).await?;
@@ -285,51 +193,29 @@ where
                 _ => p,
             });
         }
-        Ok(OrderedPos {
-            pos: min.unwrap_or_default(),
-            bound: SourceBound::Before,
-        })
+        Ok(min.unwrap_or_default())
     }
 
-    fn load(&self, value: serde_json::Value) -> Option<OrderedPos<P>> {
-        let obj = value.as_object()?;
-        // All sources share `P`, so any store's `load` parses the inner pos.
-        let pos = self
-            .sources
-            .values()
-            .next()?
-            .load(obj.get("pos")?.clone())?;
-        let bound = if let Some(at) = obj.get("at") {
-            SourceBound::At(SourceKey::new(at.as_str()?))
-        } else {
-            match obj.get("bound")?.as_str()? {
-                "before" => SourceBound::Before,
-                "after" => SourceBound::After,
-                _ => return None,
-            }
-        };
-        Some(OrderedPos { pos, bound })
+    fn load(&self, value: serde_json::Value) -> Option<P> {
+        // All sources share `P`, so any store's `load` parses the position.
+        self.sources.values().next()?.load(value)
     }
 }
 
 // ============================================================
-// Ordered hist backend (iter; default Ord clamp is correct)
+// Ordered hist backend (iter; default Ord clamp is exact)
 // ============================================================
 
 struct OrderedHistBackend<T, P: Position> {
     sources: Sources<T, P>,
 }
 
-impl<T, P> HistBackend<MergedItem<T, P>, OrderedPos<P>> for OrderedHistBackend<T, P>
+impl<T, P> HistBackend<MergedItem<T, P>, P> for OrderedHistBackend<T, P>
 where
     T: Clone + Send + Sync + 'static,
-    P: DiscretePosition,
+    P: Position,
 {
-    fn iter(
-        &self,
-        start: OrderedPos<P>,
-        end: OrderedPos<P>,
-    ) -> ItemStream<MergedItem<T, P>, OrderedPos<P>> {
+    fn iter(&self, start: P, end: P) -> ItemStream<MergedItem<T, P>, P> {
         Box::pin(unfold(
             OrderedIterState::Init {
                 sources: self.sources.clone(),
@@ -340,21 +226,21 @@ where
         ))
     }
 
-    // No `clamp_pos` override: `OrderedPos`'s `(pos, bound)` order is the
-    // real containment order (one shared position space), so the default
-    // Ord-based clamp is exact.
+    // No `clamp_pos` override: positions are the space's own `P`, whose
+    // `Ord` is the containment order.
 }
 
 enum OrderedIterState<T, P: Position> {
     Init {
         sources: Sources<T, P>,
-        start: OrderedPos<P>,
-        end: OrderedPos<P>,
+        start: P,
+        end: P,
     },
     Run {
         streams: Vec<MergeStream<T, P>>,
-        start: OrderedPos<P>,
-        end: OrderedPos<P>,
+        /// The last yielded position — heads at-or-below it are coalesced
+        /// duplicates of an already-yielded item and get dropped.
+        last: Option<P>,
     },
 }
 
@@ -362,12 +248,12 @@ enum OrderedIterState<T, P: Position> {
 async fn ordered_iter_step<T, P>(
     state: OrderedIterState<T, P>,
 ) -> Option<(
-    Result<Positioned<MergedItem<T, P>, OrderedPos<P>>, HistoryError>,
+    Result<Positioned<MergedItem<T, P>, P>, HistoryError>,
     OrderedIterState<T, P>,
 )>
 where
     T: Clone + Send + Sync + 'static,
-    P: DiscretePosition,
+    P: Position,
 {
     let mut state = match state {
         OrderedIterState::Init {
@@ -375,19 +261,11 @@ where
             start,
             end,
         } => {
-            // Unless the start bound already excludes everything at
-            // `start.pos` (`After`), later-keyed sources may still owe their
-            // item exactly *at* it — open the fetch window one discrete step
-            // below and let the per-item bound filter drop the overlap.
-            let fetch_start = match &start.bound {
-                SourceBound::After => start.pos.clone(),
-                SourceBound::Before | SourceBound::At(_) => start.pos.pred(),
-            };
             let mut streams = Vec::with_capacity(sources.len());
             for (key, store) in sources.iter() {
                 let hist = store.next().await;
-                let (_, tail) = hist.split(fetch_start.clone());
-                let (window, _) = tail.split(end.pos.clone());
+                let (_, tail) = hist.split(start.clone());
+                let (window, _) = tail.split(end.clone());
                 if window.is_empty() {
                     continue;
                 }
@@ -396,26 +274,20 @@ where
                     stream: window.iter(),
                     head: None,
                     exhausted: false,
-                    end_pos: end.pos.clone(),
+                    end_pos: end.clone(),
                 });
             }
             OrderedIterState::Run {
                 streams,
-                start,
-                end,
+                last: None,
             }
         }
         run @ OrderedIterState::Run { .. } => run,
     };
-    let OrderedIterState::Run {
-        streams,
-        start,
-        end,
-    } = &mut state
-    else {
+    let OrderedIterState::Run { streams, last } = &mut state else {
         unreachable!("Init transitions to Run above")
     };
-    fill_heads_ordered(streams, start, end).await;
+    fill_heads_ordered(streams, last.as_ref()).await;
     if let Some(err) = take_first_error(streams) {
         return Some((Err(err), state));
     }
@@ -426,52 +298,40 @@ where
         .expect("winner head set")
         .expect("error case handled");
     let key = streams[idx].key.clone();
-    let merged_pos = OrderedPos {
-        pos: p.pos.clone(),
-        bound: SourceBound::At(key.clone()),
-    };
+    *last = Some(p.pos.clone());
     let item = MergedItem {
         value: p.item,
         source_key: key,
-        source_pos: p.pos,
+        source_pos: p.pos.clone(),
     };
-    Some((Ok(Positioned::new(item, merged_pos)), state))
+    Some((Ok(Positioned::new(item, p.pos)), state))
 }
 
-/// Pull a head from any ordered stream that doesn't have one yet, dropping
-/// items outside the `(start, end]` bound window (the pre-window overlap
-/// from the `pred()` widening, and anything past the end bound — streams
-/// ascend, so the first past-end item exhausts its stream).
-async fn fill_heads_ordered<T, P>(
-    streams: &mut [MergeStream<T, P>],
-    start: &OrderedPos<P>,
-    end: &OrderedPos<P>,
-) where
+/// Pull a head for any ordered stream that doesn't have one, dropping items
+/// at-or-below the last yielded position — those are the same item reported
+/// by another source (one position space ⇒ one item per position), already
+/// yielded from a lower key. Also clears an already-buffered head that the
+/// last yield revealed to be such a duplicate.
+async fn fill_heads_ordered<T, P>(streams: &mut [MergeStream<T, P>], last: Option<&P>)
+where
     T: Send + Sync + 'static,
     P: Position,
 {
+    let is_dup = |pos: &P| last.is_some_and(|l| pos <= l);
     for s in streams {
+        if let Some(Ok(head)) = &s.head
+            && is_dup(&head.pos)
+        {
+            s.head = None;
+        }
         if s.head.is_some() || s.exhausted {
             continue;
         }
         while let Some(next) = s.stream.next().await {
             match next {
-                Ok(p) => {
-                    let opos = OrderedPos {
-                        pos: p.pos.clone(),
-                        bound: SourceBound::At(s.key.clone()),
-                    };
-                    if opos <= *start {
-                        continue;
-                    }
-                    if opos > *end {
-                        break;
-                    }
-                    s.head = Some(Ok(p));
-                    break;
-                }
-                Err(e) => {
-                    s.head = Some(Err(e));
+                Ok(p) if is_dup(&p.pos) => {}
+                other => {
+                    s.head = Some(other);
                     break;
                 }
             }
@@ -521,24 +381,22 @@ mod tests {
     #[tokio::test]
     async fn merges_by_position_across_sources() {
         let a = MockSource::new(vec![(1, ev(10, "a1")), (3, ev(30, "a2"))]);
-        let b = MockSource::new(vec![(2, ev(20, "b1")), (3, ev(35, "b2"))]);
+        let b = MockSource::new(vec![(2, ev(20, "b1")), (4, ev(35, "b2"))]);
+        // b leads (tip 4), a lags (tip 3) — the min frontier is 3.
         let merged = merge_hist_stores(two_sources(&a, &b));
         let items = collect(merged.next().await).await;
-        assert_eq!(labels(&items), vec!["a1", "b1", "a2", "b2"]);
-        // Item anchors carry the source tag.
-        assert_eq!(
-            items[0].pos,
-            OrderedPos {
-                pos: MockPos(1),
-                bound: SourceBound::At("a".into())
-            }
-        );
+        assert_eq!(labels(&items), vec!["a1", "b1", "a2"]);
+        // Anchors are the items' own plain positions.
+        assert_eq!(items[0].pos, MockPos(1));
         let keys: Vec<&str> = items.iter().map(|p| p.item.source_key.as_str()).collect();
-        assert_eq!(keys, vec!["a", "b", "a", "b"]);
+        assert_eq!(keys, vec!["a", "b", "a"]);
     }
 
     #[tokio::test]
-    async fn cross_source_tie_resolves_in_key_order() {
+    async fn same_position_coalesces_to_lowest_key() {
+        // One position space ⇒ one item per position: the copy from "z" is
+        // the same item as the copy from "a" (the self-transfer shape) and
+        // is dropped.
         let a = MockSource::new(vec![(5, ev(10, "a1"))]);
         let z = MockSource::new(vec![(5, ev(10, "z1"))]);
         let mut sources = std::collections::BTreeMap::new();
@@ -546,49 +404,35 @@ mod tests {
         sources.insert("a".into(), a.hist_store());
         let merged = merge_hist_stores(sources);
         let items = collect(merged.next().await).await;
-        assert_eq!(labels(&items), vec!["a1", "z1"]);
+        assert_eq!(labels(&items), vec!["a1"]);
+        assert_eq!(items[0].item.source_key.as_str(), "a");
     }
 
     #[tokio::test]
-    async fn duplicate_position_exact_resume() {
-        // The self-transfer shape: both sources carry an item at the
-        // identical position. An anchor between the two copies resumes
-        // exactly at the second copy.
+    async fn coalesced_stream_resumes_from_plain_position() {
+        // Duplicates at 5 and 7; the merged stream has exactly one item per
+        // position, and a saved anchor is a plain position that resumes it.
         let a = MockSource::new(vec![(5, ev(10, "a1")), (7, ev(30, "a2"))]);
         let b = MockSource::new(vec![(5, ev(10, "b1")), (7, ev(31, "b2"))]);
         let merged = merge_hist_stores(two_sources(&a, &b));
         let hist = merged.next().await;
         let all = collect(hist.clone()).await;
-        assert_eq!(labels(&all), vec!["a1", "b1", "a2", "b2"]);
+        assert_eq!(labels(&all), vec!["a1", "a2"]);
 
-        // Anchor after the first copy at pos 5 (source "a").
-        let anchor = all[0].pos.clone();
-        assert_eq!(anchor.bound, SourceBound::At("a".into()));
+        let anchor = all[0].pos;
+        assert_eq!(anchor, MockPos(5));
         let (head, tail) = hist.split(anchor);
         assert_eq!(labels(&collect(head).await), vec!["a1"]);
-        assert_eq!(labels(&collect(tail).await), vec!["b1", "a2", "b2"]);
-    }
-
-    #[tokio::test]
-    async fn from_position_anchor_covers_whole_position() {
-        // `OrderedPos::from(p)` = everything at or before p, all sources:
-        // both copies at pos 5 land in the head; the tail starts past 5.
-        let a = MockSource::new(vec![(5, ev(10, "a1")), (7, ev(30, "a2"))]);
-        let b = MockSource::new(vec![(5, ev(10, "b1")), (7, ev(31, "b2"))]);
-        let merged = merge_hist_stores(two_sources(&a, &b));
-        let hist = merged.next().await;
-        let (head, tail) = hist.split(OrderedPos::from(MockPos(5)));
-        assert_eq!(labels(&collect(head).await), vec!["a1", "b1"]);
-        assert_eq!(labels(&collect(tail).await), vec!["a2", "b2"]);
+        assert_eq!(labels(&collect(tail).await), vec!["a2"]);
     }
 
     #[tokio::test]
     async fn merged_end_is_min_over_source_ends() {
-        // a's tip is ahead (pos 3), b's lags (pos 1): the merged window
-        // must not claim coverage past 1 — a2 stays outside until b
+        // a's tip is ahead (pos 3), b's lags (pos 2): the merged window
+        // must not claim coverage past 2 — a2 stays outside until b
         // catches up.
         let a = MockSource::new(vec![(1, ev(10, "a1")), (3, ev(30, "a2"))]);
-        let b = MockSource::new(vec![(1, ev(11, "b1"))]);
+        let b = MockSource::new(vec![(2, ev(11, "b1"))]);
         let merged = merge_hist_stores(two_sources(&a, &b));
         let items = collect(merged.next().await).await;
         assert_eq!(labels(&items), vec!["a1", "b1"]);
@@ -602,7 +446,7 @@ mod tests {
         let mut snaps = merged.snapshots();
 
         let h1 = snaps.next().await.expect("first snapshot");
-        assert_eq!(h1.end(), &OrderedPos::from(MockPos(1)));
+        assert_eq!(h1.end(), &MockPos(1));
 
         // Advancing the *leading* source doesn't move the min frontier —
         // no snapshot.
@@ -620,8 +464,9 @@ mod tests {
             .await
             .expect("snapshot within timeout")
             .expect("snapshot stream not closed");
-        assert_eq!(h2.end(), &OrderedPos::from(MockPos(2)));
-        assert_eq!(labels(&collect(h2).await), vec!["a1", "b1", "a2", "b2"]);
+        assert_eq!(h2.end(), &MockPos(2));
+        // Position 1 coalesces (a1 wins over b1); position 2 has only a2.
+        assert_eq!(labels(&collect(h2).await), vec!["a1", "a2"]);
     }
 
     #[tokio::test]
@@ -637,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn marshal_round_trips_all_bound_forms() {
+    async fn anchors_marshal_as_plain_positions() {
         use crate::arch::Position;
 
         let a = MockSource::new(vec![(1, ev(10, "a1"))]);
@@ -645,12 +490,10 @@ mod tests {
         let merged = merge_hist_stores(two_sources(&a, &b));
         let items = collect(merged.next().await).await;
 
-        let at = items[0].pos.clone();
-        let after = OrderedPos::from(MockPos(1));
-        let before = OrderedPos::<MockPos>::default();
-        for pos in [at, after, before] {
-            let restored = merged.load(pos.marshal()).expect("load");
-            assert_eq!(restored, pos);
-        }
+        // The merged anchor IS an inner-store position — same wire form,
+        // loadable by the merged store (or any inner store).
+        let pos = items[0].pos;
+        assert_eq!(pos.marshal(), serde_json::json!(1));
+        assert_eq!(merged.load(pos.marshal()), Some(pos));
     }
 }

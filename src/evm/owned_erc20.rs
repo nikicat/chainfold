@@ -22,11 +22,11 @@
 //! ## Self-transfers
 //!
 //! A transfer with `from == to == owner` is one log matched by both
-//! filters, so it surfaces twice — once per direction — at the identical
-//! [`EvmPosition`]. Each copy's anchor carries its direction tag
-//! ([`OrderedPos`]`::bound`), so a resume anchored *between* the two copies
-//! is exact: it replays the second copy and nothing else. (Before the
-//! ordered merge this was a known resume edge; the tagged anchor closed it.)
+//! filters. The ordered merge coalesces same-position items (a position
+//! identifies a log chain-wide), so it surfaces **once**, tagged with the
+//! lower source key — [`IN_KEY`]. Detect the case via the event itself
+//! (`from == to`); it is balance-neutral
+//! ([`apply_transfer`](crate::evm::apply_transfer) treats it as a no-op).
 //!
 //! ## Re-entry
 //!
@@ -44,7 +44,7 @@ use alloy::providers::Provider;
 
 use crate::arch::HistStore;
 use crate::evm::{EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, TRANSFER_TOPIC, Topic};
-use crate::merge::{MergedItem, OrderedPos, SourceKey, merge_hist_stores};
+use crate::merge::{MergedItem, SourceKey, merge_hist_stores};
 
 /// Direction of an owned-ERC20 transfer relative to the tracked owner.
 ///
@@ -149,14 +149,12 @@ impl OwnedErc20 {
 
     /// Merged in/out transfer stream, ordered by `(block_number,
     /// log_index)`. Yielded items carry the direction on
-    /// `MergedItem::source_key` ([`OUT_KEY`] or [`IN_KEY`]).
+    /// `MergedItem::source_key` ([`OUT_KEY`] or [`IN_KEY`]); each log
+    /// surfaces exactly once (self-transfers coalesce — see module docs).
     ///
-    /// Anchor a window from a plain [`EvmPosition`] with
-    /// `OrderedPos::from(pos)`; saved item anchors resume exactly, including
-    /// between the two copies of a self-transfer (see the module docs).
-    pub fn transfers(
-        &self,
-    ) -> HistStore<MergedItem<EvmEvent, EvmPosition>, OrderedPos<EvmPosition>> {
+    /// Positions are plain [`EvmPosition`]s: window anchors and saved
+    /// resume anchors are ordinary chain positions.
+    pub fn transfers(&self) -> HistStore<MergedItem<EvmEvent, EvmPosition>, EvmPosition> {
         let mut sources: BTreeMap<SourceKey, HistStore<EvmEvent, EvmPosition>> = BTreeMap::new();
         sources.insert(OUT_KEY.into(), self.out_transfers.clone());
         sources.insert(IN_KEY.into(), self.in_transfers.clone());

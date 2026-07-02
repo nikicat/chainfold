@@ -7,10 +7,10 @@
 //! owner-relevant logs; direction is delivered via
 //! `MergedItem.source_key` ("in" or "out").
 //!
-//! Self-transfers (from == to == owner) appear twice in the merged stream
-//! by design — once with `source_key="in`", once with `source_key="out`". The
-//! explorer dedupes by position so balance updates and printout happen
-//! once.
+//! Self-transfers (from == to == owner) match both filters but surface
+//! once — the ordered merge coalesces same-position items (a position
+//! identifies a log), tagged with the lower key (`"in"`). They are
+//! balance-neutral (`apply_transfer` no-ops on `from == to`).
 //!
 //! Multi-token support: each `--address` is processed independently and
 //! its transfers print in its own section. Cross-token merge is a
@@ -36,7 +36,7 @@ use chainfold::evm::{
     EvmPosition, OwnedErc20, SubscribeTransport, TransferDirection, apply_transfer,
     decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
 };
-use chainfold::merge::{MergedItem, OrderedPos};
+use chainfold::merge::MergedItem;
 use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
@@ -324,22 +324,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let merged_hs = owned.transfers();
         let mut balance = U256::ZERO;
-        let mut last_pos: Option<EvmPosition> = None;
         let mut count = 0;
 
         if args.follow {
             // Both inner stores are fed by the chain's head clock; the
             // merged tip advances on their common (min) frontier.
-            let mut stream = watch_hist(&merged_hs, OrderedPos::from(start));
+            let mut stream = watch_hist(&merged_hs, start);
             while let Some(item) = stream.next().await {
                 let item = item?;
                 let mi: &MergedItem<EvmEvent, EvmPosition> = &item.item;
-                let event_pos = mi.value.position();
-                if Some(event_pos) == last_pos {
-                    // Self-transfer duplicate yield: already applied.
-                    continue;
-                }
-                last_pos = Some(event_pos);
                 balance = apply_transfer(owner, balance, &mi.value);
                 print_transfer(
                     &mi.value,
@@ -359,17 +352,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (drop tail). The middle window iterates only owner-involved
             // events within the requested range.
             let hist = merged_hs.next().await;
-            let (_, after_start) = hist.split(OrderedPos::from(start));
-            let (window, _) = after_start.split(OrderedPos::from(end));
+            let (_, after_start) = hist.split(start);
+            let (window, _) = after_start.split(end);
             let mut stream = window.iter();
             while let Some(item) = stream.next().await {
                 let item = item?;
                 let mi: &MergedItem<EvmEvent, EvmPosition> = &item.item;
-                let event_pos = mi.value.position();
-                if Some(event_pos) == last_pos {
-                    continue;
-                }
-                last_pos = Some(event_pos);
                 balance = apply_transfer(owner, balance, &mi.value);
                 if count >= args.limit {
                     println!("... (limit reached, use --limit to show more)");

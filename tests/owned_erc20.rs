@@ -21,7 +21,7 @@ use chainfold::evm::{
     ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache,
     LogFilter, OwnedErc20, TRANSFER_TOPIC, Topic,
 };
-use chainfold::merge::{MergedItem, OrderedPos};
+use chainfold::merge::MergedItem;
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
@@ -108,8 +108,8 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let owned = OwnedErc20::new(&chain, owner, USDC);
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
-    let (_, after_start) = hist.split(OrderedPos::from(start));
-    let (window, _) = after_start.split(OrderedPos::from(end));
+    let (_, after_start) = hist.split(start);
+    let (window, _) = after_start.split(end);
     let mut stream = window.iter();
     let mut yields: Vec<MergedItem<EvmEvent, EvmPosition>> = Vec::new();
     while let Some(item) = stream.next().await {
@@ -134,24 +134,24 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
         }
     }
 
-    // Dedupe self-transfers (owner == from == to). The merged stream
-    // emits those twice by design — once per direction.
+    // The merge coalesces same-position copies (a self-transfer matches
+    // both filters but is one log), so every yield must be unique.
     let mut seen: HashSet<EvmPosition> = HashSet::new();
-    let mut unique = Vec::new();
     for y in &yields {
-        if seen.insert(y.value.position()) {
-            unique.push(y);
-        }
+        assert!(
+            seen.insert(y.value.position()),
+            "merge must yield each log once"
+        );
     }
 
-    // Owner-involved events from OwnedErc20 (deduped) match the
-    // client-side filter set 1:1, in (block, log_index) order.
+    // Owner-involved events from OwnedErc20 match the client-side filter
+    // set 1:1, in (block, log_index) order.
     assert_eq!(
-        unique.len(),
+        yields.len(),
         expected.len(),
-        "OwnedErc20 + dedupe should match client-side filter count"
+        "OwnedErc20 should match client-side filter count"
     );
-    for (u, e) in unique.iter().zip(expected.iter()) {
+    for (u, e) in yields.iter().zip(expected.iter()) {
         assert_eq!(u.value.block_number, e.block_number);
         assert_eq!(u.value.log_index, e.log_index);
     }
@@ -185,8 +185,8 @@ async fn owned_erc20_empty_for_inactive_address() {
     let end = EvmPosition::new(to_block, u32::MAX);
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
-    let (_, after_start) = hist.split(OrderedPos::from(start));
-    let (window, _) = after_start.split(OrderedPos::from(end));
+    let (_, after_start) = hist.split(start);
+    let (window, _) = after_start.split(end);
     let mut stream = window.iter();
     let mut count = 0;
     while let Some(item) = stream.next().await {

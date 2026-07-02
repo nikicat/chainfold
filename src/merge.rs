@@ -6,9 +6,9 @@
 //! * [`merge_hist_stores`] — **ordered merge**, for sources that share one
 //!   *position space* (N filters on one chain: `OwnedErc20` in/out, a DEX
 //!   pool's Mint/Burn/Swap/Sync, generic contract-state tracking). The
-//!   space's total order *is* the stream order — no user `cmp` — and a
-//!   single per-source position is a valid resume anchor for all sources at
-//!   once. Anchor type: [`OrderedPos`] (position + [`SourceBound`] tag).
+//!   space's total order *is* the stream order — no user `cmp` — and the
+//!   merged store's positions are the space's own plain `P`: an anchor
+//!   saved from the merged stream is an ordinary position.
 //! * [`interleave_hist_stores`] — **vector-clock interleave**, for sources
 //!   with *disjoint* position spaces (cross-chain / cross-family: a wallet
 //!   tracking a runtime-configured set of EVM/Tron/BTC/Solana addresses).
@@ -29,12 +29,15 @@
 //!
 //! ## Resume semantics — ordered merge
 //!
-//! Every yielded item carries `OrderedPos { pos: item_pos, bound: At(key) }`.
-//! Because all sources live in one position space, that single tagged
-//! position orders against *every* source's items: resume via
-//! `hist.split(saved).1` is exact even between two items at the identical
-//! inner position (e.g. the two copies of a self-transfer, which is the same
-//! log surfacing through both the in- and the out-filter).
+//! Within one position space a position *identifies* an item, so when
+//! several sources carry an item at the identical position (overlapping
+//! filters — e.g. a self-transfer, which is one log surfacing through both
+//! the `OwnedErc20` in- and out-filter), they are reporting **the same
+//! item**: the merged stream yields each position once, from the lowest
+//! [`SourceKey`], and drops the other copies. With one item per position,
+//! every yielded item's plain position is an exact resume anchor —
+//! `hist.split(saved).1` is the standard core convention, nothing
+//! merge-specific.
 //!
 //! The merged snapshot `end` is the **minimum over the sources' ends** — the
 //! frontier where *all* sources are complete. A snapshot must not claim
@@ -86,5 +89,5 @@ mod types;
 mod tests_common;
 
 pub use interleave::{MergedPos, interleave_hist_stores};
-pub use ordered::{DiscretePosition, OrderedPos, SourceBound, merge_hist_stores};
+pub use ordered::merge_hist_stores;
 pub use types::{MergedCmp, MergedItem, SourceKey};

@@ -12,7 +12,6 @@ use alloy::primitives::{Address, B256};
 pub use alloy::primitives::{BlockHash, TxHash};
 
 use crate::arch::{Position, Timestamp};
-use crate::merge::DiscretePosition;
 
 // ============================================================
 // ChainId
@@ -449,20 +448,6 @@ impl EvmPosition {
 impl Position for EvmPosition {
     fn marshal(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("EvmPosition serialization cannot fail")
-    }
-}
-
-impl DiscretePosition for EvmPosition {
-    /// Immediate predecessor in the `(block, log_index)` lexicographic
-    /// space; saturates at [`earliest`](Self::earliest). Lets the ordered
-    /// merge ([`crate::merge::merge_hist_stores`]) reopen a fetch window
-    /// just below a resume anchor without re-scanning from genesis.
-    fn pred(&self) -> Self {
-        match (self.block.get(), self.log_index.get()) {
-            (0, 0) => *self,
-            (b, 0) => Self::new(b - 1, u32::MAX),
-            (b, i) => Self::new(b, i - 1),
-        }
     }
 }
 
