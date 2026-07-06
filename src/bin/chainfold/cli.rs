@@ -80,7 +80,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Print resolved config (API key masked)
+    /// Validate and print the effective config as TOML (defaults filled in,
+    /// API keys masked) — what an actual run would use.
     Show,
     /// Validate config and test RPC connectivity
     Check,

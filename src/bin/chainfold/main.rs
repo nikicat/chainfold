@@ -63,13 +63,14 @@ fn stats_env_enabled() -> bool {
 async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
         Command::Config { action } => {
-            let config = Config::load(cli.config.as_deref().map(std::path::Path::new))?;
+            let (config, source) =
+                Config::load_resolved(cli.config.as_deref().map(std::path::Path::new))?;
             match action {
                 ConfigCommand::Show => {
-                    config.show();
+                    config.show(source.as_deref());
                 }
                 ConfigCommand::Check => {
-                    config.show();
+                    config.show(source.as_deref());
                     println!("\nConfig is valid.");
                     // Could add RPC connectivity test here later
                 }
