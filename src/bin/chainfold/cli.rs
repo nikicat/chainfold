@@ -103,9 +103,9 @@ pub enum ChainsCommand {
 
 #[derive(Parser)]
 pub struct ChainsListArgs {
-    /// Show only chains flagged as testnets.
+    /// Include chains flagged as testnets (excluded by default).
     #[arg(long)]
-    pub testnet: bool,
+    pub testnets: bool,
 
     /// Show only chains Alchemy hosts (those with an Alchemy URL slug).
     #[arg(long)]

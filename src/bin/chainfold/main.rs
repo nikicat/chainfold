@@ -79,7 +79,7 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             ChainsCommand::List(list_args) => {
                 let resolver = ChainResolver::load_or_fetch().await?;
                 let filter = ListFilter {
-                    testnet_only: list_args.testnet,
+                    include_testnets: list_args.testnets,
                     alchemy_only: list_args.alchemy_supported,
                 };
                 print_chain_list(&resolver.list(filter));

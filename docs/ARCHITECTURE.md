@@ -1117,7 +1117,7 @@ flowchart TB
     root --> evm["evm (EvmArgs: --chain/--chain-id, --rpc-url,<br/>--from/--to/--from-block/--num-blocks, --db, --stats)"]
     config --> cshow["show — print resolved config"]
     config --> ccheck["check — validate + test RPC"]
-    chains --> clist["list — resolvable chain names (chainlist.org),<br/>--testnet / --alchemy-supported"]
+    chains --> clist["list — resolvable chain names (chainlist.org),<br/>testnets hidden unless --testnets / --alchemy-supported"]
     evm --> erc20["erc20 --address… --owner…"]
     evm --> events["events --address --event/--event-sig/--topic0<br/>[--decode] [--full]"]
     erc20 --> transfers["transfers"]

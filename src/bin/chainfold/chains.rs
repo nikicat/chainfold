@@ -171,12 +171,13 @@ pub enum ChainResolveError {
     },
 }
 
-/// Filters for [`ChainResolver::list`] (the `chains list` subcommand). Both
-/// default to `false`, i.e. "no filter — list everything."
+/// Filters for [`ChainResolver::list`] (the `chains list` subcommand). The
+/// default lists every mainnet: testnets are excluded until asked for, and
+/// `alchemy_only` is off.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListFilter {
-    /// Keep only chains flagged `isTestnet: true`.
-    pub testnet_only: bool,
+    /// Also keep chains flagged `isTestnet: true` (excluded by default).
+    pub include_testnets: bool,
     /// Keep only chains Alchemy hosts (an [`alchemy_chain_slug`] exists).
     pub alchemy_only: bool,
 }
@@ -310,7 +311,7 @@ impl ChainResolver {
         let mut out: Vec<&ChainlistEntry> = self
             .entries
             .iter()
-            .filter(|e| !filter.testnet_only || e.is_testnet())
+            .filter(|e| filter.include_testnets || !e.is_testnet())
             .filter(|e| !filter.alchemy_only || alchemy_chain_slug(e.chain_id).is_some())
             .collect();
         out.sort_by_key(|e| e.chain_id);
@@ -917,32 +918,43 @@ mod tests {
     }
 
     #[test]
-    fn list_unfiltered_returns_all_sorted_by_chain_id() {
+    fn list_default_excludes_testnets_sorted_by_chain_id() {
         let r = ChainResolver::from_entries(list_fixture());
+        // sepolia (11155111) is a testnet and stays hidden by default.
         assert_eq!(
             ids(&r.list(ListFilter::default())),
-            [1, 99999, 11_155_111].map(ChainId::new)
+            [1, 99999].map(ChainId::new)
         );
     }
 
     #[test]
-    fn list_testnet_only_keeps_flagged_chains() {
+    fn list_include_testnets_returns_full_list() {
         let r = ChainResolver::from_entries(list_fixture());
         let filter = ListFilter {
-            testnet_only: true,
+            include_testnets: true,
             alchemy_only: false,
         };
-        assert_eq!(ids(&r.list(filter)), [ChainId::new(11_155_111)]);
+        assert_eq!(
+            ids(&r.list(filter)),
+            [1, 99999, 11_155_111].map(ChainId::new)
+        );
     }
 
     #[test]
     fn list_alchemy_only_keeps_alchemy_hosted_chains() {
         let r = ChainResolver::from_entries(list_fixture());
         let filter = ListFilter {
-            testnet_only: false,
+            include_testnets: false,
             alchemy_only: true,
         };
         // eth (1) and sepolia (11155111) have Alchemy slugs; 99999 does not.
+        // sepolia is additionally dropped as a testnet.
+        assert_eq!(ids(&r.list(filter)), [ChainId::new(1)]);
+
+        let filter = ListFilter {
+            include_testnets: true,
+            alchemy_only: true,
+        };
         assert_eq!(ids(&r.list(filter)), [1, 11_155_111].map(ChainId::new));
     }
 
