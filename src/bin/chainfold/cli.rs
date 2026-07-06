@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// Iteration direction — funneled from the global `--reverse` flag, so the two
+/// Iteration direction — funneled from the `evm` `--reverse` flag, so the two
 /// run-fn plumbing args (`Direction`, [`FollowMode`]) can't be silently swapped
 /// the way two adjacent `bool`s could.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +24,7 @@ impl Direction {
     }
 }
 
-/// Whether to block at the tip for live events — funneled from the global
+/// Whether to block at the tip for live events — funneled from the `evm`
 /// `--follow` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowMode {
@@ -51,14 +51,6 @@ pub struct Cli {
     /// Path to config file
     #[arg(long, global = true)]
     pub config: Option<String>,
-
-    /// Navigate backwards instead of forwards
-    #[arg(long, global = true)]
-    pub reverse: bool,
-
-    /// Follow (block at tip for new events)
-    #[arg(long, global = true)]
-    pub follow: bool,
 
     /// Print a session summary at exit: RPC calls by method (+ wall-time),
     /// `SQLite` read time, and cache hit/miss counts. Also enabled by setting
@@ -158,6 +150,16 @@ pub struct EvmArgs {
     /// Max events to print
     #[arg(long, default_value = "20")]
     pub limit: usize,
+
+    /// Navigate backwards instead of forwards. `global` here scopes the flag
+    /// to the `evm` subtree — direction means nothing to `chains`/`config`.
+    #[arg(long, global = true)]
+    pub reverse: bool,
+
+    /// Follow (block at tip for new events). Scoped to the `evm` subtree,
+    /// like `--reverse`.
+    #[arg(long, global = true)]
+    pub follow: bool,
 
     #[command(subcommand)]
     pub command: EvmCommand,

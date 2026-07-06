@@ -90,8 +90,8 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             evm::run(
                 &config,
                 evm_args,
-                Direction::from_reverse(cli.reverse),
-                FollowMode::from_follow(cli.follow),
+                Direction::from_reverse(evm_args.reverse),
+                FollowMode::from_follow(evm_args.follow),
             )
             .await?;
         }
