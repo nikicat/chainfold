@@ -53,7 +53,7 @@ impl RangeSpec for LogSpec {
     fn page_tip(page: &LogPage) -> EvmPosition {
         // End-of-block cut: a Hist ending here iterates every log up to and
         // including the last one in `to_block`.
-        EvmPosition::new(page.to_block.get(), u32::MAX)
+        EvmPosition::new(page.to_block, LogIdx::MAX)
     }
 
     fn resolve(&self, item: &LogRef) -> Result<Positioned<EvmEvent, EvmPosition>, HistoryError> {

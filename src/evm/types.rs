@@ -365,6 +365,16 @@ impl Add<u64> for BlockNumber {
     }
 }
 
+/// Block + a typed count of blocks = block — the affine algebra extended to
+/// [`BlockCount`], so window arithmetic reads
+/// `from_block + num_blocks - 1` with no `.get()` unwrapping.
+impl Add<BlockCount> for BlockNumber {
+    type Output = Self;
+    fn add(self, rhs: BlockCount) -> Self {
+        Self(self.0 + rhs.get())
+    }
+}
+
 impl Sub<u64> for BlockNumber {
     type Output = Self;
     fn sub(self, rhs: u64) -> Self {
@@ -612,10 +622,14 @@ pub struct EvmPosition {
 }
 
 impl EvmPosition {
-    pub const fn new(block: u64, log_index: u32) -> Self {
+    /// Coordinate constructor. `impl Into` on both parameters so call sites
+    /// pass domain values (`BlockNumber`, `LogIdx`) directly *and* raw
+    /// `u64`/`u32` literals keep working in tests — no `.get()` unwrapping
+    /// on either side.
+    pub fn new(block: impl Into<BlockNumber>, log_index: impl Into<LogIdx>) -> Self {
         Self {
-            block: BlockNumber::new(block),
-            log_index: LogIdx::new(log_index),
+            block: block.into(),
+            log_index: log_index.into(),
         }
     }
 

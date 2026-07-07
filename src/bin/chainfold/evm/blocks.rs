@@ -1,0 +1,157 @@
+//! `evm blocks` — the block-history command group. The reference instance
+//! of the histories-first CLI: the default output is the block *history*
+//! over a window (cached, resumable, followable); a single block is just a
+//! slice of it.
+
+use alloy::network::Ethereum;
+use alloy::providers::Provider;
+use chainfold::arch::{HistStore, Positioned, watch_hist};
+use chainfold::evm::{BlockNumber, EvmBlock, EvmChain, Finality};
+use futures_util::{StreamExt, TryStreamExt};
+
+use crate::cli::{BlocksArgs, BlocksCommand, BlocksListArgs, Direction, EvmArgs, FollowMode};
+use crate::fmt::{
+    explorer_base_url, format_base_fee, format_gas, format_timestamp, linked_addr,
+    linked_block_hash,
+};
+use crate::util::resolve_blocks_range;
+
+/// Which columns to render — driven by the `--full` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnSet {
+    /// BLOCK / TIME / TXS / GAS USED / BASE FEE / HASH.
+    Default,
+    /// The default set plus MINER and PARENT; full hashes.
+    Full,
+}
+
+impl ColumnSet {
+    fn from_full(full: bool) -> Self {
+        if full { Self::Full } else { Self::Default }
+    }
+
+    fn is_full(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
+    chain: &EvmChain<P>,
+    db_path: &str,
+    evm_args: &EvmArgs,
+    args: &BlocksArgs,
+    direction: Direction,
+    follow: FollowMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match &args.command {
+        BlocksCommand::List(list_args) => {
+            list(chain, db_path, evm_args, list_args, direction, follow).await
+        }
+    }
+}
+
+async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
+    chain: &EvmChain<P>,
+    db_path: &str,
+    evm_args: &EvmArgs,
+    args: &BlocksListArgs,
+    direction: Direction,
+    follow: FollowMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store: HistStore<EvmBlock, BlockNumber> = chain.blocks(Finality::Latest);
+    let (start, end) = resolve_blocks_range(evm_args, &store).await?;
+    let columns = ColumnSet::from_full(args.full);
+    let base_url = explorer_base_url(chain.chain_id().get());
+
+    println!("  Chain:    {}", chain.chain_id());
+    println!("  Range:    block {} ..= {}", start + 1, end);
+    println!("  DB:       {db_path}");
+    println!();
+    print_header(columns);
+
+    if follow.is_follow() {
+        if direction == Direction::Backward {
+            eprintln!("note: --reverse is ignored with --follow (append-only stream)");
+        }
+        // The chain was built with a poll transport, so the store's tip is
+        // already driven live; consume blocks past `start`.
+        println!("Following new blocks (Ctrl+C to stop)...\n");
+        let mut stream = watch_hist(&store, start);
+        let mut count: usize = 0;
+        while let Some(item) = stream.next().await {
+            print_block(&item?.item, columns, base_url);
+            count += 1;
+        }
+        println!("\nHistory closed ({count} blocks).");
+        return Ok(());
+    }
+
+    // Window the current snapshot to (start, end]; split clamps to the
+    // snapshot's bounds (the chain head). The window is bounded by the
+    // resolved range (≤ --num-blocks), so collecting it is fine — and lets
+    // --reverse print newest-first.
+    let hist = store.next().await;
+    let (_, after_start) = hist.split(start);
+    let (window, _) = after_start.split(end);
+    let items: Vec<Positioned<EvmBlock, BlockNumber>> = window.iter().try_collect().await?;
+
+    let total = items.len();
+    let shown = total.min(evm_args.limit);
+    match direction {
+        // Newest-first, keeping the newest `--limit` blocks.
+        Direction::Backward => {
+            for item in items.iter().rev().take(shown) {
+                print_block(&item.item, columns, base_url);
+            }
+        }
+        Direction::Forward => {
+            for item in items.iter().take(shown) {
+                print_block(&item.item, columns, base_url);
+            }
+        }
+    }
+
+    if total == 0 {
+        println!("No blocks found.");
+    } else if shown < total {
+        println!("... (limit reached, use --limit to show more)");
+        println!("\n{shown} of {total} blocks shown.");
+    } else {
+        println!("\n{total} blocks shown.");
+    }
+
+    Ok(())
+}
+
+fn print_header(columns: ColumnSet) {
+    let base = format!(
+        "{:>10}  {:<20}  {:>5}  {:>13}  {:>10}  {:<13}",
+        "BLOCK", "TIME", "TXS", "GAS USED", "BASE FEE", "HASH"
+    );
+    if columns.is_full() {
+        println!("{base}  {:<13}  PARENT", "MINER");
+    } else {
+        println!("{base}");
+    }
+}
+
+fn print_block(b: &EvmBlock, columns: ColumnSet, base_url: &str) {
+    let hash = linked_block_hash(b.number, &b.hash, base_url, columns.is_full());
+    let base = format!(
+        "{:>10}  {:<20}  {:>5}  {:>13}  {:>10}  {hash}",
+        b.number,
+        format_timestamp(b.timestamp),
+        b.tx_count,
+        format_gas(b.gas_used, b.gas_limit),
+        format_base_fee(b.base_fee),
+    );
+    if columns.is_full() {
+        println!(
+            "{base}  {:<13}  {:#x}",
+            linked_addr(&b.miner, base_url),
+            b.parent_hash,
+        );
+    } else {
+        println!("{base}");
+    }
+}

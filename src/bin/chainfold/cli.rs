@@ -168,10 +168,34 @@ pub struct EvmArgs {
 
 #[derive(Subcommand)]
 pub enum EvmCommand {
+    /// Block history commands
+    Blocks(BlocksArgs),
     /// ERC20 token commands
     Erc20(Erc20Args),
     /// Show all logs for one event of one contract
     Events(EventsArgs),
+}
+
+#[derive(Parser)]
+pub struct BlocksArgs {
+    #[command(subcommand)]
+    pub command: BlocksCommand,
+}
+
+#[derive(Subcommand)]
+pub enum BlocksCommand {
+    /// List blocks in a window as a table, or --follow the live tip.
+    /// Window flags (--from/--to/--from-block/--num-blocks) come from `evm`;
+    /// the default window is the latest --num-blocks ending at the chain
+    /// head.
+    List(BlocksListArgs),
+}
+
+#[derive(Parser)]
+pub struct BlocksListArgs {
+    /// Add the MINER and PARENT columns and print full hashes.
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Parser)]

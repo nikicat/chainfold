@@ -1,3 +1,4 @@
+pub mod blocks;
 pub mod erc20;
 pub mod events;
 
@@ -171,6 +172,9 @@ pub async fn run(
     .await?;
 
     match &args.command {
+        EvmCommand::Blocks(blocks_args) => {
+            blocks::run(&chain, &db_path, args, blocks_args, direction, follow).await
+        }
         EvmCommand::Erc20(erc20_args) => {
             erc20::run(
                 &chain, &cache, &db_path, args, erc20_args, direction, follow,

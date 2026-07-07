@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use alloy::primitives::{Address, U256};
 use chainfold::arch::{Positioned, Timestamp};
-use chainfold::evm::{Erc20Metadata, EvmEvent, EvmPosition, TxHash, decode_transfer};
+use chainfold::evm::{
+    BlockHash, BlockNumber, Erc20Metadata, EvmEvent, EvmPosition, Gas, GasPrice, TxHash,
+    decode_transfer,
+};
 
 pub fn explorer_base_url(chain_id: u64) -> &'static str {
     match chain_id {
@@ -27,9 +30,13 @@ pub fn abbrev_addr(addr: &Address) -> String {
     format!("0x{}…{}", hex::encode(&b[..3]), hex::encode(&b[18..]))
 }
 
-fn abbrev_tx_hash(hash: &TxHash) -> String {
-    let b = hash.as_slice();
+/// `0xdead…beef` head/tail preview of a 32-byte hash.
+fn abbrev_hash32(b: &[u8]) -> String {
     format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
+}
+
+fn abbrev_tx_hash(hash: &TxHash) -> String {
+    abbrev_hash32(hash.as_slice())
 }
 
 pub fn linked_addr(addr: &Address, base_url: &str) -> String {
@@ -40,6 +47,53 @@ pub fn linked_addr(addr: &Address, base_url: &str) -> String {
 fn linked_tx_hash(hash: &TxHash, base_url: &str) -> String {
     let url = format!("{base_url}/tx/{hash:#x}");
     osc8_link(&url, &abbrev_tx_hash(hash))
+}
+
+/// Block hash as an explorer link to the block page, abbreviated unless
+/// `full`.
+pub fn linked_block_hash(
+    number: BlockNumber,
+    hash: &BlockHash,
+    base_url: &str,
+    full: bool,
+) -> String {
+    let url = format!("{base_url}/block/{number}");
+    let text = if full {
+        format!("{hash:#x}")
+    } else {
+        abbrev_hash32(hash.as_slice())
+    };
+    osc8_link(&url, &text)
+}
+
+/// `14.9M ( 50%)` — gas used with its share of the block limit.
+pub fn format_gas(used: Gas, limit: Gas) -> String {
+    let pct = if limit.get() == 0 {
+        0
+    } else {
+        used.get() * 100 / limit.get()
+    };
+    format!("{:>6} ({pct:>3}%)", format_millions(used.get()))
+}
+
+/// `14.9M` — one decimal place, integer math (display only, no float cast).
+fn format_millions(units: u64) -> String {
+    format!("{}.{}M", units / 1_000_000, (units % 1_000_000) / 100_000)
+}
+
+/// Base fee in gwei, 2 decimal places; `-` on pre-EIP-1559 blocks.
+pub fn format_base_fee(fee: Option<GasPrice>) -> String {
+    fee.map_or_else(
+        || "-".to_string(),
+        |f| {
+            let wei = f.get();
+            format!(
+                "{}.{:02} gwei",
+                wei / 1_000_000_000,
+                (wei % 1_000_000_000) / 10_000_000
+            )
+        },
+    )
 }
 
 pub fn format_timestamp(ts: Timestamp) -> String {
