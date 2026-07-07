@@ -61,6 +61,30 @@ memory. That's the `loom` model, and it's the one genuinely open R6 piece.
 
 Stretch goal; the behavioural tests are the load-bearing coverage.
 
+## Log fork tests — remove the real-RPC dependency
+
+Three `#[ignore]` integration suites still fork mainnet via
+`fork_mainnet(FORK_BLOCK)`, so anvil proxies `eth_getLogs` /
+`eth_getBlockByNumber` to a real upstream — flaky and rate-limited without a
+paid `MAINNET_RPC_URL` (free-tier Alchemy caps `eth_getLogs` at a 10-block
+range; the public fallback throttles):
+
+- `tests/cache_layering.rs::warm_store_then_drop_index_then_reopen` — cold/warm
+  USDC `Transfer` walk.
+- `tests/owned_erc20.rs` — the two `OwnedErc20` merge cases.
+- `tests/anvil_smoke.rs::fork_mainnet_reads_usdc_total_supply` — `totalSupply`
+  read at the pinned block.
+
+The blocks suite (`tests/blocks_history.rs`) was already converted to a plain
+`local()` anvil (mine synthetic tx-bearing blocks — no upstream). The log suites
+are harder because they validate decoding of **real mainnet USDC data** at a
+pinned block. To make them offline, deploy a mock ERC20 on local anvil and emit
+`Transfer`s (via `alloy::sol!` + a wallet-signing provider), then assert against
+the emitted events instead of real USDC. Trade-off: loses "real chain data at
+block N" coverage; the point becomes the cache/merge machinery, which is what
+these actually test. Keep one thin fork smoke test (behind an env gate) if real
+end-to-end coverage is still wanted.
+
 ## R8+ — (incoming)
 
 _Reserved for additional reactive-core points from the user._
