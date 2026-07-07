@@ -140,6 +140,28 @@ impl<S: RangeSpec> RangeIndexStore<S> {
             rx.changed().await.expect("tip sender lives with the store");
         }
     }
+
+    /// Await the *next* set tip strictly after `prev` — the change-driven
+    /// counterpart to [`seeded_end`], used by [`snapshots`](HistStoreBackend::snapshots)
+    /// for every emission after the first. Without this a consumer that loops
+    /// on `snapshots()` (e.g. `watch_hist`) would re-read the unchanged tip
+    /// immediately and busy-spin, starving the runtime — the tip only moves
+    /// when a *different* task (the head-clock wiring) gets to run.
+    async fn next_end_after(
+        &self,
+        rx: &mut watch::Receiver<Option<S::PubPos>>,
+        prev: &S::PubPos,
+    ) -> S::PubPos {
+        loop {
+            // The sender lives with the store, so this never errors on close.
+            rx.changed().await.expect("tip sender lives with the store");
+            if let Some(tip) = rx.borrow_and_update().clone()
+                && tip > *prev
+            {
+                return tip;
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -174,12 +196,22 @@ impl<S: RangeSpec> HistStoreBackend<S::Event, S::PubPos> for RangeIndexStore<S> 
     fn snapshots(&self) -> HistStream<S::Event, S::PubPos> {
         let store = self.arc_self();
         let rx = self.end.subscribe();
-        Box::pin(unfold((store, rx), |(store, mut rx)| async move {
-            let tip = store.seeded_end(&mut rx).await;
-            let backend: Arc<dyn HistBackend<S::Event, S::PubPos>> = store.clone();
-            let hist = Hist::new(backend, S::PubPos::default(), tip);
-            Some((hist, (store, rx)))
-        }))
+        // `prev` is the last tip emitted; the first emission seeds it. Every
+        // later emission waits for the tip to *advance* past `prev`, so a
+        // consumer looping on `snapshots()` blocks between advances instead
+        // of busy-spinning on an unchanged tip.
+        Box::pin(unfold(
+            (store, rx, None),
+            |(store, mut rx, prev): (_, _, Option<S::PubPos>)| async move {
+                let tip = match &prev {
+                    None => store.seeded_end(&mut rx).await,
+                    Some(prev) => store.next_end_after(&mut rx, prev).await,
+                };
+                let backend: Arc<dyn HistBackend<S::Event, S::PubPos>> = store.clone();
+                let hist = Hist::new(backend, S::PubPos::default(), tip.clone());
+                Some((hist, (store, rx, Some(tip))))
+            },
+        ))
     }
 
     async fn next(&self) -> Hist<S::Event, S::PubPos> {
@@ -195,5 +227,72 @@ impl<S: RangeSpec> HistStoreBackend<S::Event, S::PubPos> for RangeIndexStore<S> 
 
     fn load(&self, value: serde_json::Value) -> Option<S::PubPos> {
         self.index.spec().load_pos(value)
+    }
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures_util::StreamExt;
+    use tokio::time::timeout;
+
+    use super::super::gap_fill::never_fetch;
+    use super::super::{BlockSpec, RangeIndex};
+    use super::*;
+    use crate::evm::cache::LogCache;
+    use crate::evm::types::BlockNumber;
+    use crate::shared::Shared;
+
+    fn block_store() -> Arc<RangeIndexStore<BlockSpec>> {
+        let cache = Shared::new(LogCache::open_in_memory().unwrap());
+        let index = Arc::new(RangeIndex::new(
+            BlockSpec::new(cache),
+            never_fetch::<BlockSpec>(),
+        ));
+        RangeIndexStore::new(index, Arc::new(|_| Ok(BlockNumber::ZERO)))
+    }
+
+    /// Regression: `snapshots()` must emit only when the tip *advances*, never
+    /// re-emit an unchanged tip on the next poll. Before the fix, `seeded_end`
+    /// returned the current tip on every poll, so a consumer looping on
+    /// `snapshots()` (`watch_hist`) busy-spun on a static tip and starved the
+    /// runtime — the head-clock task could then never advance the tip, a
+    /// permanent live-lock on any quiet chain.
+    #[tokio::test]
+    async fn snapshots_wait_for_advance_not_busy_loop() {
+        let store = block_store();
+        store.on_bump(BlockNumber::new(5));
+        let mut snaps = store.snapshots();
+
+        // First emission is the current tip, immediately.
+        let first = snaps.next().await.expect("first snapshot");
+        assert_eq!(*first.end(), BlockNumber::new(5));
+
+        // The tip is static — the second emission must NOT arrive. With the
+        // busy-loop bug `snaps.next()` returns Ready at once and the timeout
+        // resolves `Ok`; with the fix it stays Pending and the timeout elapses.
+        let second = timeout(Duration::from_millis(100), snaps.next()).await;
+        assert!(
+            second.is_err(),
+            "snapshots() re-emitted an unchanged tip (busy-loop regression)"
+        );
+
+        // An advance delivers exactly once, promptly.
+        store.on_bump(BlockNumber::new(6));
+        let third = timeout(Duration::from_millis(100), snaps.next())
+            .await
+            .expect("advance delivered within budget")
+            .expect("snapshot after advance");
+        assert_eq!(*third.end(), BlockNumber::new(6));
+
+        // A non-advancing bump (≤ current tip) is not an emission either.
+        store.on_bump(BlockNumber::new(6));
+        let stale = timeout(Duration::from_millis(100), snaps.next()).await;
+        assert!(stale.is_err(), "a non-advancing bump must not emit");
     }
 }
