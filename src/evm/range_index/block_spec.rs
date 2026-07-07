@@ -310,4 +310,35 @@ mod tests {
             <BlockSpec as RangeSpec>::head_pos(bn(104))
         );
     }
+
+    #[tokio::test]
+    async fn walk_from_bottom_including_genesis() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Pre-seed the store with blocks 1..3 (as the poll wiring would),
+        // then walk from Bottom — which must also pull genesis (block 0).
+        let store = mk_cache();
+        BlockSpec::new(store.share())
+            .persist(&mk_page(1, 3))
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher: Fetcher<BlockPage> = {
+            let calls = calls.clone();
+            Arc::new(move |from: BlockNumber, to: BlockNumber| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(mk_page(from.get(), to.get())) })
+            })
+        };
+        let idx = Arc::new(RangeIndex::new(BlockSpec::new(store), fetcher));
+
+        let got = idx
+            .clone()
+            .items(BlockPos::bottom(), BlockPos::end_of_block(bn(3)))
+            .map(|r| r.expect("resolve").pos.get())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(got, vec![0, 1, 2, 3], "from Bottom yields genesis first");
+    }
 }

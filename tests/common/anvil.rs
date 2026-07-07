@@ -15,6 +15,7 @@ use std::process::Command;
 use std::sync::Once;
 
 use alloy_node_bindings::{Anvil, AnvilInstance};
+use chainfold::evm::BlockNumber;
 
 /// Load a gitignored `.env` from the repo root on first call. Contributors
 /// keep their `MAINNET_RPC_URL` (Alchemy etc.) there instead of editing
@@ -55,7 +56,7 @@ pub fn local() -> Option<AnvilInstance> {
 /// Returns `None` if anvil isn't on `PATH`. Panics with a clear message if
 /// spawning fails (e.g. RPC unreachable). The 60s startup timeout is
 /// deliberately generous because the public fallback RPC can be slow.
-pub fn fork_mainnet(block: u64) -> Option<AnvilInstance> {
+pub fn fork_mainnet(block: BlockNumber) -> Option<AnvilInstance> {
     if !anvil_available() {
         return None;
     }
@@ -63,7 +64,7 @@ pub fn fork_mainnet(block: u64) -> Option<AnvilInstance> {
     let rpc = std::env::var("MAINNET_RPC_URL").unwrap_or_else(|_| DEFAULT_FORK_RPC.to_string());
     let instance = Anvil::new()
         .fork(rpc.clone())
-        .fork_block_number(block)
+        .fork_block_number(block.get())
         .timeout(60_000)
         .try_spawn()
         .unwrap_or_else(|e| {

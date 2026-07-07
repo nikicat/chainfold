@@ -208,20 +208,28 @@ in particular benefits from Phase 7's finality wiring (it must answer
 
 The first concrete steps toward the histories-first CLI:
 
-1. **`blocks` command — cached block history.** A new `EvmBlockHistory` (a
-   concrete `HistStoreBackend<EvmBlock, BlockNumber>` in `src/evm/`, positioned
-   by block number) reusing the block-header cache; the CLI `chainfold evm …
-   blocks` drives it with the same window flags
-   (`--from`/`--to`/`--from-block`/`--num-blocks`) and `--follow`. The reference
-   instance of histories-first: default output is the block *history* over the
-   window; a single block is a slice. Concrete impl first — no `Block` trait
-   until a second source needs one. Milestones:
-   - **M1** — v1 fields only (`number`/`hash`/`parent_hash`/`timestamp`, what the
-     existing `cached_block_headers` table already holds); cached range walk.
-   - **M2** — `--follow` (live tip via `eth_subscribe newHeads`, a new subscriber
-     path distinct from the log subscriber).
-   - **M3** — extend `cached_block_headers` with richer fields (gas used/limit,
-     base fee, tx count, miner) for a `cast block`-like view (schema migration).
+1. **`blocks` command — cached block history.** ✅ **Shipped.** `BlockSpec`
+   (a `RangeSpec` in `src/evm/range_index/block_spec.rs` — the second instance
+   after `LogSpec`, not a bespoke `EvmBlockHistory`) backs
+   `EvmChain::blocks(tier) -> HistStore<EvmBlock, BlockNumber>` on the same
+   generic `RangeIndex`/`RangeIndexStore` machinery. The CLI `chainfold evm …
+   blocks list` drives it with the same window flags
+   (`--from`/`--to`/`--from-block`/`--num-blocks`) plus `--follow`/`--reverse`.
+   The reference instance of histories-first: default output is the block
+   *history* over the window; a single block is a slice. Concrete impl — no
+   `Block` trait until a second source needs one.
+   - **M1** — cached range walk. **Deviation from the plan below:** rather than
+     reusing `cached_block_headers` (whose three INSERT-OR-REPLACE writers only
+     know the four header fields), blocks get their own `cached_blocks` table
+     carrying the **full** field set from the first migration — the rich fields
+     the plan slated for M3 come free on the same `eth_getBlockByNumber(n,
+     false)` call, so M3's schema work folded into M1. Coverage rides
+     `scanned_ranges` under a typed `ScanPartition::Blocks` key.
+   - **M2** — `--follow` (live tip). No `newHeads` push path: the payload lacks
+     the tx count, so every head advance eager-gap-fills through the store's
+     batched fetcher (ws and poll follow behave identically here).
+   - **M3** — display polish only: the `--full` column set (MINER/PARENT + full
+     hashes), gas/base-fee formatting.
 2. **Default chain = `ethereum`** when `--chain`/`--chain-id` omitted — shipped.
    Resolution precedence: `--chain-id` > `--chain` > env `CHAINFOLD_CHAIN` >
    config `[evm] default_chain` > built-in `ethereum`.

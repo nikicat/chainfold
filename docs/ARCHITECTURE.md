@@ -500,8 +500,8 @@ struct HeadEvent { number: BlockNumber, hash: BlockHash }
 EvmChain::new(provider: ChainProvider<P>, config: EvmChainConfig).await  // one head fetch
 chain.head(tier)          -> Signal<HeadEvent>                 // the chain-wide clock
 chain.logs(&filter, tier) -> HistStore<EvmEvent, EvmPosition>  // sync, no RPC
+chain.blocks(tier)        -> HistStore<EvmBlock, BlockNumber>  // sync, no RPC (dense source)
 chain.refresh_head().await -> BlockNumber                      // one-shot poll (non-follow)
-// chain.blocks(tier) — planned (M1)
 ```
 
 `EvmChain` is concrete because it vends *many* item types (`logs`, `blocks`,
@@ -511,7 +511,13 @@ chain-wide concerns **once**: the `ChainProvider` (which carries the
 `time_pos` block-time anchor. `logs(filter, tier)` builds a `LogSpec` +
 fetcher + `RangeIndexStore`, seeds the tip from the current head, spawns the
 store's wiring, and hands back a plain `HistStore` — cheap and synchronous,
-no RPC; cached state materializes lazily.
+no RPC; cached state materializes lazily. `blocks(tier)` is the same shape
+over a `BlockSpec` (the second `RangeSpec` instance): a **dense** source
+where every height is an item, positioned by bare `BlockNumber`. It has no
+push path — `newHeads` lacks the tx count — so each head advance eager-gap-
+fills through a batched `eth_getBlockByNumber` fetcher; its `cached_blocks`
+coverage lives under `ScanPartition::Blocks` (a typed partition key beside
+the per-filter `ScanPartition::Filter`, §12).
 
 **Follow mode is fixed at construction** (`EvmChainConfig::follow`), not a
 per-store method: `None` = one-shot (head moves only via `refresh_head()`),
@@ -1220,12 +1226,13 @@ pieces:
   `EvmChain`'s head clock, bounded RSS under indefinite follow.
   `LogCache::compact_ranges` (durable side) already exists and is tested;
   the in-memory eviction is what's missing.
-- **EVM blocks source** *(M1)*. A `BlockSpec: RangeSpec` reusing the same
+- **EVM blocks source** ✅ *shipped*. `BlockSpec: RangeSpec` reuses the same
   generic `RangeIndex`/`RangeIndexStore` machinery to back
-  `chain.blocks(tier) -> HistStore<Block, BlockNumber>` — foundation for the
-  histories-first `blocks` CLI command. When it lands, consider lifting a
-  source-agnostic `Source` trait over the per-source wiring (deferred from
-  §5A per decision #6, concrete-first).
+  `chain.blocks(tier) -> HistStore<EvmBlock, BlockNumber>` — the
+  histories-first `blocks` CLI command (`evm blocks list`). Now that a second
+  `RangeSpec` exists, a source-agnostic `Source` trait over the per-source
+  wiring could be lifted (still deferred per decision #6 — two impls, no
+  client demanding it yet).
 - **Reducer** — the matcher's sibling (stateful monotonic fold over one
   stream, positioned by a vector of source positions). `Erc20Balance` rebuild
   gates on it.

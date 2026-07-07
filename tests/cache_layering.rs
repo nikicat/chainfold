@@ -19,8 +19,8 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::HistStore;
 use chainfold::evm::{
-    ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache,
-    LogFilter, TRANSFER_TOPIC,
+    BlockNumber, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition,
+    Finality, LogCache, LogFilter, TRANSFER_TOPIC,
 };
 use futures_util::StreamExt;
 use tempfile::TempDir;
@@ -61,13 +61,12 @@ async fn build_store(
 
 async fn walk_forward(
     store: &HistStore<EvmEvent, EvmPosition>,
-    from_block: u64,
-    to_block: u64,
+    from_block: BlockNumber,
+    to_block: BlockNumber,
 ) -> usize {
-    let start = if from_block == 0 {
-        EvmPosition::earliest()
-    } else {
-        EvmPosition::new(from_block - 1, u32::MAX)
+    let start = match from_block.checked_sub(1) {
+        None => EvmPosition::earliest(),
+        Some(prev) => EvmPosition::new(prev, u32::MAX),
     };
     let end = EvmPosition::new(to_block, u32::MAX);
     let hist = store.next().await;

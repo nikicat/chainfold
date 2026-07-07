@@ -56,7 +56,8 @@ async fn fork_mainnet_reads_usdc_total_supply() {
         .await
         .expect("anvil fork should answer get_block_number");
     assert_eq!(
-        block_number, FORK_BLOCK,
+        block_number,
+        FORK_BLOCK.get(),
         "anvil fork should be pinned at the requested block"
     );
 
