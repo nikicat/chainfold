@@ -124,7 +124,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
             follow: config.follow,
             head,
             anchor_block: head_number,
-            anchor_time: Timestamp::new(header.timestamp),
+            anchor_time: header.timestamp,
             block_time: config.block_time,
             _head_clock: clock,
         })
@@ -271,8 +271,8 @@ fn estimate_block_from_time(
 mod tests {
     use super::*;
     use crate::arch::{Hist, Position, Positioned};
-    use crate::evm::cache::compute_filter_hash;
-    use crate::evm::types::{BlockHash, FilterHash, LogIdx, Topic};
+    use crate::evm::cache::{ScanPartition, compute_filter_hash};
+    use crate::evm::types::{BlockHash, BlockRange, FilterHash, LogIdx, Topic};
     use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U64};
     use alloy::providers::ProviderBuilder;
     use alloy::rpc::types::Log;
@@ -286,14 +286,14 @@ mod tests {
     /// The mock chain head — the one `eth_blockNumber` answer.
     const HEAD: BlockNumber = BlockNumber::new(200);
 
-    const BH_0: BlockHash = B256::ZERO;
-    const BH_100: BlockHash = B256::repeat_byte(0xA0);
-    const BH_101: BlockHash = B256::repeat_byte(0xA1);
-    const BH_200: BlockHash = B256::repeat_byte(0xA2);
+    const BH_0: BlockHash = BlockHash::ZERO;
+    const BH_100: BlockHash = BlockHash::repeat_byte(0xA0);
+    const BH_101: BlockHash = BlockHash::repeat_byte(0xA1);
+    const BH_200: BlockHash = BlockHash::repeat_byte(0xA2);
 
     /// `GENESIS` shifted by `secs` — headers are stamped on a 12 s cadence.
-    const fn ts(secs: u64) -> Timestamp {
-        Timestamp::new(GENESIS.get() + secs)
+    fn ts(secs: u64) -> Timestamp {
+        GENESIS + secs
     }
 
     fn make_log(block: BlockNumber, log_index: LogIdx, block_hash: BlockHash) -> Log {
@@ -306,7 +306,7 @@ mod tests {
                 address: ADDR,
                 data: log_data,
             },
-            block_hash: Some(block_hash),
+            block_hash: Some(block_hash.b256()),
             block_number: Some(block.get()),
             block_timestamp: None,
             transaction_hash: Some(B256::from([0xCC; 32])),
@@ -316,12 +316,12 @@ mod tests {
         }
     }
 
-    /// Insert a header row; drops to `u64` at the `LogCache` `SQLite` seam.
+    /// Insert a header row.
     fn insert_header(cache: &LogCache, block: BlockNumber, hash: BlockHash, time: Timestamp) {
         // Parent hash is irrelevant to these tests — resolve only reads
         // (hash, timestamp).
         cache
-            .insert_block_header(block.get(), &hash, &B256::ZERO, time.get())
+            .insert_block_header(block, &hash, &BlockHash::ZERO, time)
             .unwrap();
     }
 
@@ -341,7 +341,11 @@ mod tests {
         ];
         cache.insert_logs(&fh, &logs).unwrap();
         cache
-            .record_scanned_range(&fh, 0, HEAD.get(), &BH_200)
+            .record_scanned_range(
+                &ScanPartition::Filter(fh),
+                BlockRange::new(BlockNumber::ZERO, HEAD),
+                &BH_200,
+            )
             .unwrap();
         (cache, fh)
     }
@@ -456,11 +460,15 @@ mod tests {
         insert_header(&cache, HEAD, BH_200, ts(2400));
         // A log at block 150 WITH a timestamp and deliberately NO header for 150.
         let block_150 = BlockNumber::new(150);
-        let mut log = make_log(block_150, LogIdx::ZERO, B256::repeat_byte(0x9A));
+        let mut log = make_log(block_150, LogIdx::ZERO, BlockHash::repeat_byte(0x9A));
         log.block_timestamp = Some(ts(1800).get());
         cache.insert_logs(&fh, std::slice::from_ref(&log)).unwrap();
         cache
-            .record_scanned_range(&fh, 0, HEAD.get(), &BH_200)
+            .record_scanned_range(
+                &ScanPartition::Filter(fh),
+                BlockRange::new(BlockNumber::ZERO, HEAD),
+                &BH_200,
+            )
             .unwrap();
 
         let chain = make_chain(cache).await;

@@ -21,7 +21,6 @@
 use std::sync::Weak;
 
 use alloy::network::Ethereum;
-use alloy::primitives::B256;
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use futures_util::StreamExt;
@@ -33,7 +32,7 @@ use super::{INITIAL_BACKOFF, MAX_BACKOFF, tip_pos};
 use crate::arch::HistoryError;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::range_index::{LogPage, LogSpec, RangeIndexStore};
-use crate::evm::types::{BlockNumber, BlockRange};
+use crate::evm::types::{BlockHash, BlockNumber, BlockRange};
 
 type WeakLogStore = Weak<RangeIndexStore<LogSpec>>;
 
@@ -171,7 +170,7 @@ where
                     provider.ensure_block_header(BlockNumber::new(bn)).await?;
                 }
                 let bn = BlockNumber::new(log.block_number.unwrap_or(0));
-                let bh = log.block_hash.unwrap_or(B256::ZERO);
+                let bh = log.block_hash.map_or(BlockHash::ZERO, BlockHash::new);
                 // Single-block page covering exactly this block. Late
                 // arrivals relative to head coverage are absorbed by the
                 // tree's late-item rules.

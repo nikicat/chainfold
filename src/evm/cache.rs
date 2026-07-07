@@ -19,10 +19,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use alloy::primitives::{Address, B256};
 use rusqlite::Connection;
-use rusqlite::types::{ToSql, ToSqlOutput};
+use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
-use crate::evm::types::{ChainId, FilterHash};
+use crate::arch::Timestamp;
+use crate::evm::types::{BlockHash, BlockNumber, ChainId, FilterHash, LogIdx, TxHash};
 
 mod erc20_cache;
 mod event_signature_cache;
@@ -30,7 +32,7 @@ mod log_cache;
 
 pub use erc20_cache::{CachedErc20Metadata, Erc20Cache};
 pub use event_signature_cache::{EventSignatureCache, EventSignatureRow};
-pub use log_cache::{BlockHeader, LogCache, compute_filter_hash, compute_gaps};
+pub use log_cache::{BlockHeader, LogCache, ScanPartition, compute_filter_hash, compute_gaps};
 
 /// `ChainId` persists as its underlying `u64` in an `INTEGER` column. Defining
 /// `ToSql` here — in the persistence layer, not on the domain type in
@@ -53,6 +55,85 @@ impl ToSql for FilterHash {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(self.as_slice()))
     }
+}
+
+// ============================================================
+// Typed column binds/reads
+// ============================================================
+//
+// Every numeric domain newtype binds and reads as its underlying integer, so
+// query call sites carry no `as i64` / `as u64` casts — the (checked)
+// conversion lives here, once per type. Like the `ToSql` impls above, these
+// live in the persistence layer so the domain types stay `SQLite`-free.
+// `FromSql` delegates to rusqlite's range-checked `u64`/`u32` readers, so a
+// negative or oversized column value errors instead of wrapping.
+
+macro_rules! sql_newtype_u64 {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl ToSql for $ty {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                Ok(ToSqlOutput::from(self.get() as i64))
+            }
+        }
+        impl FromSql for $ty {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                u64::column_result(value).map(Self::new)
+            }
+        }
+    )+};
+}
+
+macro_rules! sql_newtype_u32 {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl ToSql for $ty {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                Ok(ToSqlOutput::from(i64::from(self.get())))
+            }
+        }
+        impl FromSql for $ty {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                u32::column_result(value).map(Self::new)
+            }
+        }
+    )+};
+}
+
+macro_rules! sql_newtype_b256 {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl ToSql for $ty {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                Ok(ToSqlOutput::from(self.as_slice()))
+            }
+        }
+        impl FromSql for $ty {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                <[u8; 32]>::column_result(value).map(|arr| Self::new(B256::from(arr)))
+            }
+        }
+    )+};
+}
+
+sql_newtype_u64!(BlockNumber, Timestamp);
+sql_newtype_u32!(LogIdx);
+sql_newtype_b256!(BlockHash, TxHash);
+
+/// Read a 32-byte BLOB column (block/tx hash, topic) as a [`B256`]. A helper
+/// rather than a `FromSql` impl — both the trait and the type are foreign
+/// (orphan rule). Errors on a wrong-sized blob via rusqlite's fixed-size
+/// array reader.
+pub(crate) fn col_b256(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Result<B256> {
+    row.get::<_, [u8; 32]>(col).map(B256::from)
+}
+
+/// [`col_b256`] for a nullable column.
+pub(crate) fn col_b256_opt(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Result<Option<B256>> {
+    row.get::<_, Option<[u8; 32]>>(col)
+        .map(|opt| opt.map(B256::from))
+}
+
+/// Read a 20-byte BLOB column as an [`Address`]. See [`col_b256`].
+pub(crate) fn col_address(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Result<Address> {
+    row.get::<_, [u8; 20]>(col).map(Address::from)
 }
 
 // ============================================================
@@ -317,7 +398,7 @@ mod tests {
         // Distinct concern on the same file.
         let logs = db.logs();
         assert!(
-            logs.get_scanned_ranges(&FilterHash::new([0u8; 32]))
+            logs.get_scanned_ranges(&ScanPartition::Filter(FilterHash::new([0u8; 32])))
                 .unwrap()
                 .is_empty()
         );

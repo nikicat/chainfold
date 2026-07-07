@@ -194,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             m.value.block_number,
             m.value.log_index,
             topic0_hex,
-            &hex::encode(&m.value.tx_hash[..8]),
+            &hex::encode(&m.value.tx_hash.as_slice()[..8]),
         );
         count += 1;
         if count >= args.limit {

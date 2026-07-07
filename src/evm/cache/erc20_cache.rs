@@ -55,9 +55,9 @@ impl Erc20Cache {
         )?;
         let mut rows = stmt.query_map(rusqlite::params![address.as_slice(), chain_id], |row| {
             Ok(CachedErc20Metadata {
-                name: row.get(0)?,
-                symbol: row.get(1)?,
-                decimals: row.get::<_, i64>(2)? as u8,
+                name: row.get("name")?,
+                symbol: row.get("symbol")?,
+                decimals: row.get("decimals")?,
             })
         })?;
         match rows.next() {
@@ -78,7 +78,7 @@ impl Erc20Cache {
         conn.execute(
             "INSERT OR REPLACE INTO erc20_metadata (address, chain_id, name, symbol, decimals)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![address.as_slice(), chain_id, name, symbol, decimals as i64],
+            rusqlite::params![address.as_slice(), chain_id, name, symbol, decimals],
         )?;
         Ok(())
     }
@@ -100,25 +100,16 @@ impl Erc20Cache {
              WHERE chain_id = ?1 AND address = ?2 AND owner = ?3 AND block_number = ?4",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![
-                chain_id,
-                address.as_slice(),
-                owner.as_slice(),
-                block_number as i64
-            ],
+            rusqlite::params![chain_id, address.as_slice(), owner.as_slice(), block_number],
             |row| {
-                let bytes: Vec<u8> = row.get(0)?;
-                Ok(bytes)
+                // Fixed-size read: a wrong-sized balance blob is a corrupt
+                // row and errors loudly (it used to read as "absent").
+                Ok(U256::from_be_bytes(row.get::<_, [u8; 32]>("balance")?))
             },
         )?;
         match rows.next() {
-            Some(Ok(bytes)) if bytes.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Ok(Some(U256::from_be_bytes(arr)))
-            }
-            Some(Err(e)) => Err(e.into()),
-            _ => Ok(None),
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
         }
     }
 
@@ -136,26 +127,17 @@ impl Erc20Cache {
              ORDER BY block_number DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map(
-            rusqlite::params![
-                chain_id,
-                address.as_slice(),
-                owner.as_slice(),
-                max_block as i64
-            ],
+            rusqlite::params![chain_id, address.as_slice(), owner.as_slice(), max_block],
             |row| {
-                let block: i64 = row.get(0)?;
-                let balance: Vec<u8> = row.get(1)?;
-                Ok((block as u64, balance))
+                let block: u64 = row.get("block_number")?;
+                // See the fixed-size-read note in `get_erc20_balance`.
+                let balance = U256::from_be_bytes(row.get::<_, [u8; 32]>("balance")?);
+                Ok((block, balance))
             },
         )?;
         match rows.next() {
-            Some(Ok((block, bytes))) if bytes.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Ok(Some((block, U256::from_be_bytes(arr))))
-            }
-            Some(Err(e)) => Err(e.into()),
-            _ => Ok(None),
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
         }
     }
 
@@ -176,7 +158,7 @@ impl Erc20Cache {
                 chain_id,
                 address.as_slice(),
                 owner.as_slice(),
-                block_number as i64,
+                block_number,
                 &bytes[..]
             ],
         )?;

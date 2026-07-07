@@ -96,8 +96,8 @@ fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize) {
         index,
         e.block_number,
         e.log_index,
-        &hex::encode(&e.tx_hash[..4]),
-        &hex::encode(&e.tx_hash[30..]),
+        &hex::encode(&e.tx_hash.as_slice()[..4]),
+        &hex::encode(&e.tx_hash.as_slice()[30..]),
         &topic0_hex[..topic0_hex.len().min(10)],
         &topic0_hex[topic0_hex.len().saturating_sub(6)..],
     );

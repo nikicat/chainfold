@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, U256};
 use chainfold::arch::{Positioned, Timestamp};
-use chainfold::evm::{Erc20Metadata, EvmEvent, EvmPosition, decode_transfer};
+use chainfold::evm::{Erc20Metadata, EvmEvent, EvmPosition, TxHash, decode_transfer};
 
 pub fn explorer_base_url(chain_id: u64) -> &'static str {
     match chain_id {
@@ -27,7 +27,7 @@ pub fn abbrev_addr(addr: &Address) -> String {
     format!("0x{}…{}", hex::encode(&b[..3]), hex::encode(&b[18..]))
 }
 
-fn abbrev_tx_hash(hash: &B256) -> String {
+fn abbrev_tx_hash(hash: &TxHash) -> String {
     let b = hash.as_slice();
     format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
 }
@@ -37,7 +37,7 @@ pub fn linked_addr(addr: &Address, base_url: &str) -> String {
     osc8_link(&url, &abbrev_addr(addr))
 }
 
-fn linked_tx_hash(hash: &B256, base_url: &str) -> String {
+fn linked_tx_hash(hash: &TxHash, base_url: &str) -> String {
     let url = format!("{base_url}/tx/{hash:#x}");
     osc8_link(&url, &abbrev_tx_hash(hash))
 }

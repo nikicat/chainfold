@@ -8,10 +8,9 @@
 //! [`RangeIndex<LogSpec>`](super::RangeIndex) can map a position-gap back to
 //! the inclusive block range an `eth_getLogs` fetch needs.
 
-use alloy::primitives::BlockHash;
 use alloy::rpc::types::Log;
 
-use crate::evm::types::{BlockNumber, BlockRange, LogIdx};
+use crate::evm::types::{BlockHash, BlockNumber, BlockRange, LogIdx};
 
 // ============================================================
 // BlockPos — position type for the tree
@@ -137,7 +136,7 @@ pub struct LogPage {
 /// missing a block hash (pending / mempool logs are not cacheable and
 /// MUST NOT enter the tree).
 pub(super) fn log_ref_from(log: &Log) -> Option<LogRef> {
-    let block_hash = log.block_hash?;
+    let block_hash = BlockHash::new(log.block_hash?);
     Some(LogRef {
         block_number: BlockNumber::new(log.block_number?),
         log_index: LogIdx::new(log.log_index? as u32),

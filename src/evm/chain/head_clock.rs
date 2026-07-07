@@ -14,9 +14,9 @@ use tokio::time::sleep;
 
 use super::config::{HeadEvent, SubscribeTransport};
 use super::{INITIAL_BACKOFF, MAX_BACKOFF};
-use crate::arch::HistoryError;
+use crate::arch::{HistoryError, Timestamp};
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::types::BlockNumber;
+use crate::evm::types::{BlockHash, BlockNumber};
 
 pub(super) async fn run<P>(
     provider: ChainProvider<P>,
@@ -89,19 +89,17 @@ where
             return HistoryError::internal("heads subscription closed");
         };
         let number = BlockNumber::new(header.number);
+        let hash = BlockHash::new(header.hash);
         if let Err(e) = provider.log_cache().insert_block_header(
-            number.get(),
-            &header.hash,
-            &header.parent_hash,
-            header.timestamp,
+            number,
+            &hash,
+            &BlockHash::new(header.parent_hash),
+            Timestamp::new(header.timestamp),
         ) {
             return HistoryError::internal(format!("insert_block_header: {e}"));
         }
         if number > head.borrow().number {
-            head.send_replace(HeadEvent {
-                number,
-                hash: header.hash,
-            });
+            head.send_replace(HeadEvent { number, hash });
         }
     }
 }

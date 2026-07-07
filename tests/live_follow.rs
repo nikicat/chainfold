@@ -25,8 +25,8 @@ use tokio::time::{sleep, timeout};
 
 use chainfold::Shared;
 use chainfold::evm::{
-    ChainProvider, EvmChain, EvmChainConfig, Finality, LogCache, LogFilter, SubscribeTransport,
-    Topic, compute_filter_hash,
+    BlockNumber, ChainProvider, EvmChain, EvmChainConfig, Finality, LogCache, LogFilter,
+    ScanPartition, SubscribeTransport, Topic, compute_filter_hash,
 };
 
 use common::anvil::{local, skip_no_anvil};
@@ -179,15 +179,22 @@ async fn poll_drain_populates_scanned_ranges() {
     let filter = sentinel_filter();
     let ranges = chain
         .cache()
-        .get_scanned_ranges(&compute_filter_hash(&filter.address, &filter.topics))
+        .get_scanned_ranges(&ScanPartition::Filter(compute_filter_hash(
+            &filter.address,
+            &filter.topics,
+        )))
         .expect("get_scanned_ranges");
     assert!(
         !ranges.is_empty(),
         "scanned_ranges populated by the follow path (got 0)",
     );
-    let max_end = ranges.iter().map(|(_, end)| *end).max().unwrap_or(0);
+    let max_end = ranges
+        .iter()
+        .map(|r| r.to)
+        .max()
+        .unwrap_or(BlockNumber::ZERO);
     assert!(
-        max_end >= final_tip.get(),
+        max_end >= final_tip,
         "scanned coverage at or past final tip (max_end={max_end} final={final_tip})",
     );
 }

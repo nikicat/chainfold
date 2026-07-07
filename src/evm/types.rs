@@ -7,9 +7,6 @@ use std::ops::{Add, Sub};
 use std::sync::Arc;
 
 use alloy::primitives::{Address, B256};
-// Re-exported so the rest of the crate names hashes through the domain-type
-// module rather than reaching into alloy at each site.
-pub use alloy::primitives::{BlockHash, TxHash};
 
 use crate::arch::{Position, Timestamp};
 
@@ -56,14 +53,136 @@ impl From<u64> for ChainId {
 }
 
 // ============================================================
+// BlockHash / TxHash
+// ============================================================
+
+/// An EVM block hash. A real newtype over [`B256`] — like [`Topic`], and no
+/// longer an alloy alias — so a block hash can't be confused with a
+/// transaction hash, a topic, or any other 32-byte value, and so it binds and
+/// reads directly at the `SQLite` boundary. Kept EVM-specific on purpose:
+/// other sources' block identifiers differ in shape and display (Bitcoin's
+/// byte-reversed hex, TON's base64), so each source defines its own.
+///
+/// Unwrap to the inner `B256` with [`BlockHash::b256`] at the alloy boundary;
+/// everything chainfold-facing speaks `BlockHash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockHash(B256);
+
+impl BlockHash {
+    /// The all-zero hash — the "unknown/absent" placeholder at decode
+    /// boundaries.
+    pub const ZERO: Self = Self(B256::ZERO);
+
+    pub const fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// The inner 32-byte value, for the alloy boundary.
+    pub const fn b256(self) -> B256 {
+        self.0
+    }
+
+    /// Raw bytes, for hashing / hex formatting.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    /// Every byte set to `byte` — test fixtures.
+    pub const fn repeat_byte(byte: u8) -> Self {
+        Self(B256::repeat_byte(byte))
+    }
+}
+
+impl From<B256> for BlockHash {
+    fn from(value: B256) -> Self {
+        Self(value)
+    }
+}
+
+impl From<BlockHash> for B256 {
+    fn from(hash: BlockHash) -> Self {
+        hash.0
+    }
+}
+
+impl std::fmt::Display for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl std::fmt::LowerHex for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward so `{:#x}` (explorer URLs, log lines) keeps working.
+        std::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+/// An EVM transaction hash. See [`BlockHash`] for why this is a real newtype
+/// and why it stays EVM-specific (Solana identifies transactions by 64-byte
+/// signatures, TON by `(logical_time, hash)` — a common tx-id type would
+/// misrepresent them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TxHash(B256);
+
+impl TxHash {
+    /// The all-zero hash — the "unknown/absent" placeholder at decode
+    /// boundaries.
+    pub const ZERO: Self = Self(B256::ZERO);
+
+    pub const fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// The inner 32-byte value, for the alloy boundary.
+    pub const fn b256(self) -> B256 {
+        self.0
+    }
+
+    /// Raw bytes, for hashing / hex formatting.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    /// Every byte set to `byte` — test fixtures.
+    pub const fn repeat_byte(byte: u8) -> Self {
+        Self(B256::repeat_byte(byte))
+    }
+}
+
+impl From<B256> for TxHash {
+    fn from(value: B256) -> Self {
+        Self(value)
+    }
+}
+
+impl From<TxHash> for B256 {
+    fn from(hash: TxHash) -> Self {
+        hash.0
+    }
+}
+
+impl std::fmt::Display for TxHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl std::fmt::LowerHex for TxHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward so `{:#x}` (explorer URLs, log lines) keeps working.
+        std::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+// ============================================================
 // Topic
 // ============================================================
 
-/// An EVM log topic (`topic0`..`topic3`). A real newtype over [`B256`] —
-/// unlike block/transaction hashes, which use alloy's [`BlockHash`]/[`TxHash`]
-/// *aliases* (documentation only) — because a topic is a distinct concept that
-/// flows through chainfold's own filter API, and confusing one with a hash
-/// would be a genuine bug. alloy itself models all three as a bare `B256`.
+/// An EVM log topic (`topic0`..`topic3`). A real newtype over [`B256`], like
+/// [`BlockHash`]/[`TxHash`] — a topic is a distinct concept that flows
+/// through chainfold's own filter API, and confusing one with a hash would be
+/// a genuine bug. alloy itself models all three as a bare `B256`.
 ///
 /// Unwrap to the inner `B256` with [`Topic::b256`] at the alloy `Filter`/`Log`
 /// boundary; everything chainfold-facing speaks `Topic`.

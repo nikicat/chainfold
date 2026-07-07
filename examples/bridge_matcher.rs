@@ -321,8 +321,8 @@ fn print_state(out: &MatchOutput<EvmEvent, EvmEvent>) {
     if !out.matched.is_empty() {
         println!("\nrecent matches (up to 10):");
         for (i, m) in out.matched.iter().take(10).enumerate() {
-            let src_tx = hex::encode(&m.src.tx_hash[..8]);
-            let dst_tx = hex::encode(&m.dst.tx_hash[..8]);
+            let src_tx = hex::encode(&m.src.tx_hash.as_slice()[..8]);
+            let dst_tx = hex::encode(&m.dst.tx_hash.as_slice()[..8]);
             println!(
                 "  [{i:>3}] src=blk{:<9} tx=0x{}  ↔  dst=blk{:<9} tx=0x{}",
                 m.src.block_number, src_tx, m.dst.block_number, dst_tx,

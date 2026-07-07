@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
@@ -33,7 +33,7 @@ use chainfold::Shared;
 use chainfold::arch::{HistStore, Timestamp, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainProvider, ChunkSize, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent,
-    EvmPosition, OwnedErc20, SubscribeTransport, TransferDirection, apply_transfer,
+    EvmPosition, OwnedErc20, SubscribeTransport, TransferDirection, TxHash, apply_transfer,
     decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::MergedItem;
@@ -156,7 +156,7 @@ fn abbrev_addr(addr: &Address) -> String {
     format!("0x{}…{}", hex::encode(&b[..3]), hex::encode(&b[18..]))
 }
 
-fn abbrev_tx_hash(hash: &B256) -> String {
+fn abbrev_tx_hash(hash: &TxHash) -> String {
     let b = hash.as_slice();
     format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
 }
@@ -166,7 +166,7 @@ fn linked_addr(addr: &Address, base_url: &str) -> String {
     osc8_link(&url, &abbrev_addr(addr))
 }
 
-fn linked_tx_hash(hash: &B256, base_url: &str) -> String {
+fn linked_tx_hash(hash: &TxHash, base_url: &str) -> String {
     let url = format!("{base_url}/tx/{hash:#x}");
     osc8_link(&url, &abbrev_tx_hash(hash))
 }
