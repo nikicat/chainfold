@@ -86,6 +86,7 @@ impl RpcMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SqliteOp {
     GetLogsInRange,
+    GetBlocksInRange,
     GetScannedRanges,
 }
 
@@ -93,6 +94,7 @@ impl SqliteOp {
     pub const fn as_str(self) -> &'static str {
         match self {
             SqliteOp::GetLogsInRange => "get_logs_in_range",
+            SqliteOp::GetBlocksInRange => "get_blocks_in_range",
             SqliteOp::GetScannedRanges => "get_scanned_ranges",
         }
     }
@@ -101,6 +103,7 @@ impl SqliteOp {
     pub fn from_wire(s: &str) -> Option<Self> {
         Some(match s {
             "get_logs_in_range" => SqliteOp::GetLogsInRange,
+            "get_blocks_in_range" => SqliteOp::GetBlocksInRange,
             "get_scanned_ranges" => SqliteOp::GetScannedRanges,
             _ => return None,
         })
@@ -304,7 +307,11 @@ mod tests {
         ] {
             assert_eq!(RpcMethod::from_wire(m.as_str()), Some(m));
         }
-        for op in [SqliteOp::GetLogsInRange, SqliteOp::GetScannedRanges] {
+        for op in [
+            SqliteOp::GetLogsInRange,
+            SqliteOp::GetBlocksInRange,
+            SqliteOp::GetScannedRanges,
+        ] {
             assert_eq!(SqliteOp::from_wire(op.as_str()), Some(op));
         }
         for layer in [

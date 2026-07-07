@@ -17,7 +17,7 @@ use rusqlite::types::{ToSql, ToSqlOutput};
 use super::{CacheError, SharedConn, col_address, col_b256, col_b256_opt};
 use crate::arch::Timestamp;
 use crate::evm::observe::{SqliteOp, sqlite_span};
-use crate::evm::types::{BlockHash, BlockNumber, BlockRange, FilterHash, LogIdx, Topic};
+use crate::evm::types::{BlockHash, BlockNumber, BlockRange, EvmBlock, FilterHash, LogIdx, Topic};
 
 // ============================================================
 // Helpers
@@ -457,6 +457,60 @@ impl LogCache {
             None => Ok(None),
         }
     }
+
+    // --------------------------------------------------------
+    // Blocks (the blocks-history source)
+    // --------------------------------------------------------
+
+    /// Insert full blocks, replacing by height — a reorg refetch overwrites
+    /// the stale fork row in place. Written only by the blocks fetch path
+    /// (see the `cached_blocks` schema comment).
+    pub fn insert_blocks(&self, blocks: &[EvmBlock]) -> Result<(), CacheError> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO cached_blocks
+                 (height, hash, parent_hash, timestamp, tx_count, gas_used, gas_limit,
+                  base_fee, miner)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?;
+            for b in blocks {
+                stmt.execute(rusqlite::params![
+                    b.number,
+                    b.hash,
+                    b.parent_hash,
+                    b.timestamp,
+                    b.tx_count,
+                    b.gas_used,
+                    b.gas_limit,
+                    b.base_fee,
+                    b.miner.as_slice(),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// All cached, non-reorged blocks with heights in `range` (inclusive),
+    /// ordered by height.
+    pub fn get_blocks_in_range(&self, range: BlockRange) -> Result<Vec<EvmBlock>, CacheError> {
+        let _span = sqlite_span(SqliteOp::GetBlocksInRange).entered();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT height, hash, parent_hash, timestamp, tx_count, gas_used, gas_limit,
+                    base_fee, miner
+             FROM cached_blocks
+             WHERE height >= ?1 AND height <= ?2
+               AND hash NOT IN (SELECT block_hash FROM reorged_blocks)
+             ORDER BY height ASC",
+        )?;
+        let blocks = stmt
+            .query_map(rusqlite::params![range.from, range.to], row_to_evm_block)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(blocks)
+    }
 }
 
 // ============================================================
@@ -490,6 +544,20 @@ fn row_to_log(row: &rusqlite::Row) -> Result<Log, rusqlite::Error> {
         transaction_index: Some(row.get("transaction_index")?),
         log_index: Some(row.get("log_index")?),
         removed: false,
+    })
+}
+
+fn row_to_evm_block(row: &rusqlite::Row) -> Result<EvmBlock, rusqlite::Error> {
+    Ok(EvmBlock {
+        number: row.get("height")?,
+        hash: row.get("hash")?,
+        parent_hash: row.get("parent_hash")?,
+        timestamp: row.get("timestamp")?,
+        tx_count: row.get("tx_count")?,
+        gas_used: row.get("gas_used")?,
+        gas_limit: row.get("gas_limit")?,
+        base_fee: row.get("base_fee")?,
+        miner: col_address(row, "miner")?,
     })
 }
 
@@ -760,7 +828,72 @@ mod tests {
         );
     }
 
-    // -- blocks scan partition --
+    // -- blocks (cached_blocks) --
+
+    use crate::arch::Timestamp;
+    use crate::evm::types::{BlockNumber, Gas, GasPrice, TxCount};
+
+    fn make_test_block(
+        number: BlockNumber,
+        hash: BlockHash,
+        base_fee: Option<GasPrice>,
+    ) -> EvmBlock {
+        EvmBlock {
+            number,
+            hash,
+            parent_hash: BlockHash::repeat_byte(0x11),
+            timestamp: ts(number.get()),
+            tx_count: TxCount::new(42),
+            gas_used: Gas::new(14_900_000),
+            gas_limit: Gas::new(30_000_000),
+            base_fee,
+            miner: Address::repeat_byte(0x99),
+        }
+    }
+
+    #[test]
+    fn blocks_round_trip_all_fields() {
+        let store = LogCache::open_in_memory().unwrap();
+        let with_fee = make_test_block(bn(100), BLOCK_HASH_A, Some(GasPrice::new(2_410_000_000)));
+        let pre_1559 = make_test_block(bn(101), BLOCK_HASH_B, None);
+        store.insert_blocks(&[with_fee, pre_1559]).unwrap();
+        let got = store
+            .get_blocks_in_range(BlockRange::from_u64(100, 101))
+            .unwrap();
+        assert_eq!(got, vec![with_fee, pre_1559]);
+    }
+
+    #[test]
+    fn blocks_replace_by_height() {
+        // A reorg refetch at the same height overwrites the stale fork row.
+        let store = LogCache::open_in_memory().unwrap();
+        store
+            .insert_blocks(&[make_test_block(bn(100), BLOCK_HASH_A, None)])
+            .unwrap();
+        let refetched = make_test_block(bn(100), BLOCK_HASH_B, None);
+        store.insert_blocks(&[refetched]).unwrap();
+        let got = store
+            .get_blocks_in_range(BlockRange::from_u64(100, 100))
+            .unwrap();
+        assert_eq!(got, vec![refetched]);
+    }
+
+    #[test]
+    fn blocks_reorged_hash_filtered_out() {
+        let store = LogCache::open_in_memory().unwrap();
+        store
+            .insert_blocks(&[
+                make_test_block(bn(100), BLOCK_HASH_A, None),
+                make_test_block(bn(101), BLOCK_HASH_B, None),
+            ])
+            .unwrap();
+        store.mark_reorged(&[(BLOCK_HASH_A, bn(100))]).unwrap();
+        let got = store
+            .get_blocks_in_range(BlockRange::from_u64(100, 101))
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].number, bn(101));
+    }
 
     #[test]
     fn blocks_scan_partition_disjoint_from_filters() {

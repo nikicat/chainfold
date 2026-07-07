@@ -24,7 +24,9 @@ use rusqlite::Connection;
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
 use crate::arch::Timestamp;
-use crate::evm::types::{BlockHash, BlockNumber, ChainId, FilterHash, LogIdx, TxHash};
+use crate::evm::types::{
+    BlockHash, BlockNumber, ChainId, FilterHash, Gas, GasPrice, LogIdx, TxCount, TxHash,
+};
 
 mod erc20_cache;
 mod event_signature_cache;
@@ -113,8 +115,8 @@ macro_rules! sql_newtype_b256 {
     )+};
 }
 
-sql_newtype_u64!(BlockNumber, Timestamp);
-sql_newtype_u32!(LogIdx);
+sql_newtype_u64!(BlockNumber, Timestamp, Gas, GasPrice);
+sql_newtype_u32!(LogIdx, TxCount);
 sql_newtype_b256!(BlockHash, TxHash);
 
 /// Read a 32-byte BLOB column (block/tx hash, topic) as a [`B256`]. A helper
@@ -352,6 +354,29 @@ pub(crate) fn migrations() -> rusqlite_migration::Migrations<'static> {
         -- and rows written before this column existed have NULL — in both
         -- cases the reader falls back to the cached block header.
         ALTER TABLE cached_logs ADD COLUMN block_timestamp INTEGER;
+        ",
+        ),
+        rusqlite_migration::M::up(
+            "
+        -- Full cached blocks for the blocks history (BlockSpec). Distinct
+        -- from cached_block_headers, whose three INSERT-OR-REPLACE writers
+        -- (head clock, ensure_block_header, log fetcher) only know the four
+        -- header fields and would wipe the rich columns: rows here are
+        -- written only by the blocks fetch path. Height-keyed — a reorg
+        -- refetch overwrites the stale fork row in place; until then the
+        -- stale row is filtered at query time via reorged_blocks. Coverage
+        -- lives in scanned_ranges under the blocks ScanPartition.
+        CREATE TABLE cached_blocks (
+            height       INTEGER PRIMARY KEY,
+            hash         BLOB    NOT NULL,
+            parent_hash  BLOB    NOT NULL,
+            timestamp    INTEGER NOT NULL,
+            tx_count     INTEGER NOT NULL,
+            gas_used     INTEGER NOT NULL,
+            gas_limit    INTEGER NOT NULL,
+            base_fee     INTEGER,            -- NULL pre-EIP-1559
+            miner        BLOB    NOT NULL
+        );
         ",
         ),
     ])
