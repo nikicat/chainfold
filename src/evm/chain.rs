@@ -42,8 +42,10 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::arch::{HistStore, HistoryError, Signal, Timestamp};
 use crate::evm::cache::{LogCache, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::range_index::{LogSpec, RangeIndex, RangeIndexStore, TimePosFn};
-use crate::evm::types::{BlockNumber, ChainId, ChunkSize, EvmEvent, EvmPosition, LogIdx};
+use crate::evm::range_index::{
+    BlockSpec, LogSpec, RangeIndex, RangeIndexStore, RangeSpec, TimePosFn,
+};
+use crate::evm::types::{BlockNumber, ChainId, ChunkSize, EvmBlock, EvmEvent, EvmPosition, LogIdx};
 use crate::shared::Shared;
 
 mod config;
@@ -222,6 +224,47 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
         store.hist_store()
     }
 
+    /// Open the chain's block history at `tier`. Cheap and synchronous —
+    /// no RPC; cached blocks materialize lazily, gaps fill on demand
+    /// (batched `eth_getBlockByNumber`). The store's tip is seeded from
+    /// the current head and then driven by this chain's head clock.
+    ///
+    /// In follow mode blocks always arrive via eager gap-fill on each head
+    /// advance — there is no push delivery path (`newHeads` payloads lack
+    /// the transaction count), so ws and poll transports behave
+    /// identically here. All background wiring dies with the returned
+    /// store.
+    pub fn blocks(&self, tier: Finality) -> HistStore<EvmBlock, BlockNumber> {
+        let _ = tier; // Latest-only until Phase 7.
+
+        let spec = BlockSpec::new(self.cache().share());
+        let fetcher = rpc::build_block_fetcher(self.provider.clone());
+        let index = Arc::new(RangeIndex::with_chunk_size(spec, fetcher, self.chunk_size));
+        let store = RangeIndexStore::new(index, self.block_time_pos_fn());
+
+        // Seed the tip so consumers can iterate immediately in one-shot
+        // mode; the wiring below advances it from there.
+        let head = *self.head.borrow();
+        store.on_bump(head.number);
+
+        let wiring = match &self.follow {
+            None => tokio::spawn(wiring::mirror_head::<BlockSpec>(
+                self.head.subscribe(),
+                Arc::downgrade(&store),
+            )),
+            Some(_) => tokio::spawn(wiring::poll_follow::<BlockSpec>(
+                self.head.subscribe(),
+                Arc::downgrade(&store),
+                head.number,
+            )),
+        };
+        store.attach_wiring(AbortOnDropHandle::new(wiring));
+
+        tracing::debug!(chain_id = %self.provider.chain_id(), "block store opened");
+
+        store.hist_store()
+    }
+
     fn time_pos_fn(&self) -> TimePosFn<EvmPosition> {
         let (anchor_block, anchor_time, block_time) =
             (self.anchor_block, self.anchor_time, self.block_time);
@@ -238,15 +281,24 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
             })
         })
     }
+
+    fn block_time_pos_fn(&self) -> TimePosFn<BlockNumber> {
+        let (anchor_block, anchor_time, block_time) =
+            (self.anchor_block, self.anchor_time, self.block_time);
+        Arc::new(move |time: Timestamp| {
+            let block = estimate_block_from_time(anchor_block, anchor_time, block_time, time);
+            // The cut "just before `block`" — iteration after this anchor
+            // starts at `block` itself (ZERO doubles as the lower-bound
+            // sentinel, keeping genesis included).
+            Ok(block.checked_sub(1).unwrap_or(BlockNumber::ZERO))
+        })
+    }
 }
 
 /// The end-of-block tip position for a head block: a `Hist` ending here
 /// iterates every log up to and including the last one in `n`.
 fn tip_pos(n: BlockNumber) -> EvmPosition {
-    EvmPosition {
-        block: n,
-        log_index: LogIdx::MAX,
-    }
+    LogSpec::head_pos(n)
 }
 
 fn estimate_block_from_time(
@@ -273,7 +325,7 @@ mod tests {
     use crate::arch::{Hist, Position, Positioned};
     use crate::evm::cache::{ScanPartition, compute_filter_hash};
     use crate::evm::types::{BlockHash, BlockRange, FilterHash, LogIdx, Topic};
-    use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U64};
+    use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U64, U256};
     use alloy::providers::ProviderBuilder;
     use alloy::rpc::types::Log;
     use alloy::transports::mock::Asserter;
@@ -594,6 +646,152 @@ mod tests {
             counter.0.load(Ordering::Relaxed),
             0,
             "a fully-cached walk must not issue eth_getLogs"
+        );
+    }
+
+    // ============================================================
+    // Blocks history
+    // ============================================================
+
+    use crate::evm::types::{EvmBlock, Gas, GasPrice, TxCount};
+
+    fn test_block(n: u64) -> EvmBlock {
+        EvmBlock {
+            number: BlockNumber::new(n),
+            // Unique per height (offset so genesis isn't ZERO).
+            hash: BlockHash::new(B256::from(U256::from(n + 1))),
+            parent_hash: BlockHash::new(B256::from(U256::from(n))),
+            timestamp: ts(n * 12),
+            tx_count: TxCount::new(n as u32),
+            gas_used: Gas::new(15_000_000),
+            gas_limit: Gas::new(30_000_000),
+            base_fee: Some(GasPrice::new(1_000_000_000)),
+            miner: Address::repeat_byte(0x99),
+        }
+    }
+
+    /// Warm cache for the blocks source: anchor headers for construction +
+    /// dense `[0, HEAD]` block coverage under the blocks partition.
+    fn warm_blocks_cache() -> Shared<LogCache> {
+        let cache = Shared::new(LogCache::open_in_memory().unwrap());
+        insert_header(&cache, BlockNumber::ZERO, BH_0, GENESIS);
+        insert_header(&cache, HEAD, BH_200, ts(2400));
+
+        let blocks: Vec<EvmBlock> = (0..=HEAD.get()).map(test_block).collect();
+        let end_hash = blocks.last().unwrap().hash;
+        cache.insert_blocks(&blocks).unwrap();
+        cache
+            .record_scanned_range(
+                &ScanPartition::Blocks,
+                BlockRange::new(BlockNumber::ZERO, HEAD),
+                &end_hash,
+            )
+            .unwrap();
+        cache
+    }
+
+    #[tokio::test]
+    async fn blocks_tip_seeded_from_head() {
+        let chain = make_chain(warm_blocks_cache()).await;
+        let hist = chain.blocks(Finality::Latest).next().await;
+        assert_eq!(*hist.end(), HEAD);
+    }
+
+    #[tokio::test]
+    async fn blocks_iter_walks_dense_window_including_genesis() {
+        let chain = make_chain(warm_blocks_cache()).await;
+        let hist = chain.blocks(Finality::Latest).next().await;
+
+        let items: Vec<Positioned<EvmBlock, BlockNumber>> =
+            hist.iter().try_collect().await.unwrap();
+        assert_eq!(items.len(), HEAD.get() as usize + 1, "dense incl. genesis");
+        assert_eq!(items[0].pos, BlockNumber::ZERO);
+        assert_eq!(items.last().unwrap().pos, HEAD);
+        // Items carry the rich fields, positioned at their own number.
+        let b100 = &items[100];
+        assert_eq!(b100.item.number, BlockNumber::new(100));
+        assert_eq!(b100.item.tx_count, TxCount::new(100));
+        assert_eq!(b100.item.timestamp, ts(1200));
+    }
+
+    #[tokio::test]
+    async fn blocks_time_pos_cuts_just_before_estimated_block() {
+        let chain = make_chain(warm_blocks_cache()).await;
+        let store = chain.blocks(Finality::Latest);
+        // 12 s cadence anchored at (HEAD, ts(2400)): ts(1200) → block 100,
+        // cut just before it = 99 (iteration after the anchor starts at 100).
+        assert_eq!(
+            store.time_pos(ts(1200)).await.unwrap(),
+            BlockNumber::new(99)
+        );
+        // Before-anchor underflow clamps to the ZERO sentinel.
+        assert_eq!(
+            store.time_pos(GENESIS).await.unwrap(),
+            BlockNumber::ZERO,
+            "estimate at/below genesis clamps to the lower-bound sentinel"
+        );
+    }
+
+    /// Same guard as [`warm_walk_issues_zero_get_logs`], for the blocks
+    /// source: a fully-cached walk must not issue `eth_getBlockByNumber`.
+    #[tokio::test]
+    async fn blocks_warm_walk_issues_zero_get_block_by_number() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tracing::Subscriber;
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id};
+        use tracing::subscriber::set_default;
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::registry::LookupSpan;
+
+        use crate::evm::observe::{RPC_TARGET, RpcMethod};
+
+        #[derive(Clone, Default)]
+        struct GetBlockCounter(StdArc<AtomicUsize>);
+
+        impl<S> Layer<S> for GetBlockCounter
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+                if attrs.metadata().target() != RPC_TARGET {
+                    return;
+                }
+                #[derive(Default)]
+                struct MethodField(Option<String>);
+                impl Visit for MethodField {
+                    fn record_str(&mut self, field: &Field, value: &str) {
+                        if field.name() == "method" {
+                            self.0 = Some(value.to_owned());
+                        }
+                    }
+                    fn record_debug(&mut self, _f: &Field, _v: &dyn std::fmt::Debug) {}
+                }
+                let mut found = MethodField::default();
+                attrs.record(&mut found);
+                if found.0.as_deref() == Some(RpcMethod::GetBlockByNumber.as_str()) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let chain = make_chain(warm_blocks_cache()).await;
+        let hist = chain.blocks(Finality::Latest).next().await;
+
+        let counter = GetBlockCounter::default();
+        let guard = set_default(tracing_subscriber::registry().with(counter.clone()));
+        let items: Vec<Positioned<EvmBlock, BlockNumber>> =
+            hist.iter().try_collect().await.unwrap();
+        drop(guard);
+
+        assert_eq!(items.len(), HEAD.get() as usize + 1);
+        assert_eq!(
+            counter.0.load(Ordering::Relaxed),
+            0,
+            "a fully-cached walk must not issue eth_getBlockByNumber"
         );
     }
 }

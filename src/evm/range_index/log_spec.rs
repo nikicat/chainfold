@@ -142,6 +142,15 @@ impl RangeSpec for LogSpec {
         }
     }
 
+    fn head_pos(n: BlockNumber) -> EvmPosition {
+        // End-of-block cut: a `Hist` ending here iterates every log up to
+        // and including the last one in `n`.
+        EvmPosition {
+            block: n,
+            log_index: LogIdx::MAX,
+        }
+    }
+
     fn window(from: &EvmPosition, to: &EvmPosition) -> BlockRange {
         BlockRange::new(from.block, to.block)
     }

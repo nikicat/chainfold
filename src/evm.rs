@@ -52,7 +52,7 @@ pub use observe::{
 };
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use range_index::{
-    BlockPos, Fetcher, IndexPos, LoadedSpan, LogPage, LogRef, LogSpec, RangeIndex, RangeIndexStore,
-    RangeSpec, TimePosFn,
+    BlockPage, BlockPos, BlockSpec, Fetcher, IndexPos, LoadedSpan, LogPage, LogRef, LogSpec,
+    RangeIndex, RangeIndexStore, RangeSpec, TimePosFn,
 };
 pub use retry::rpc_retry_layer;

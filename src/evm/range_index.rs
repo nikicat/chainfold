@@ -32,6 +32,7 @@ use crate::arch::{HistoryError, Positioned};
 use crate::evm::types::{BlockRange, ChunkSize};
 
 mod block_pos;
+mod block_spec;
 mod gap_fill;
 mod log_spec;
 mod range_tree;
@@ -39,6 +40,7 @@ mod spec;
 mod store;
 
 pub use block_pos::{BlockPos, LogPage, LogRef};
+pub use block_spec::{BlockPage, BlockSpec};
 pub use log_spec::LogSpec;
 pub use spec::{Fetcher, IndexPos, LoadedSpan, RangeSpec};
 pub use store::{RangeIndexStore, TimePosFn};

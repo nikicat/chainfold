@@ -31,18 +31,23 @@ use super::config::HeadEvent;
 use super::{INITIAL_BACKOFF, MAX_BACKOFF, tip_pos};
 use crate::arch::HistoryError;
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::range_index::{LogPage, LogSpec, RangeIndexStore};
+use crate::evm::range_index::{LogPage, LogSpec, RangeIndexStore, RangeSpec};
 use crate::evm::types::{BlockHash, BlockNumber, BlockRange};
 
 type WeakLogStore = Weak<RangeIndexStore<LogSpec>>;
 
 /// Non-follow mode: mirror head advances into the store tip. Gaps fill
 /// lazily when a consumer iterates. Ends when the chain or store drops.
-pub(super) async fn mirror_head(mut head: watch::Receiver<HeadEvent>, store: WeakLogStore) {
+/// Generic — the head clock speaks blocks; [`RangeSpec::head_pos`] maps
+/// into the source's position space.
+pub(super) async fn mirror_head<S: RangeSpec>(
+    mut head: watch::Receiver<HeadEvent>,
+    store: Weak<RangeIndexStore<S>>,
+) {
     while head.changed().await.is_ok() {
         let n = head.borrow_and_update().number;
         let Some(store) = store.upgrade() else { return };
-        store.on_bump(tip_pos(n));
+        store.on_bump(S::head_pos(n));
     }
 }
 
@@ -50,9 +55,10 @@ pub(super) async fn mirror_head(mut head: watch::Receiver<HeadEvent>, store: Wea
 /// store's own fetcher (singleflight, chunked, persisted inline), then
 /// bump the tip. A fill failure still bumps — the tree keeps its gap and
 /// iteration falls back to lazy fill, so no false coverage is possible.
-pub(super) async fn poll_follow(
+/// Generic like [`mirror_head`].
+pub(super) async fn poll_follow<S: RangeSpec>(
     mut head: watch::Receiver<HeadEvent>,
-    store: WeakLogStore,
+    store: Weak<RangeIndexStore<S>>,
     mut last_tip: BlockNumber,
 ) {
     while head.changed().await.is_ok() {
@@ -68,7 +74,7 @@ pub(super) async fn poll_follow(
         {
             tracing::warn!(from = %(last_tip + 1), to = %n, error = %e, "poll gap-fill");
         }
-        store.on_bump(tip_pos(n));
+        store.on_bump(S::head_pos(n));
         last_tip = n;
     }
 }

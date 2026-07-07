@@ -135,6 +135,12 @@ pub trait RangeSpec: Clone + Send + Sync + 'static {
     /// Map a public position to its tree-key position.
     fn index_pos(p: &Self::PubPos) -> Self::Pos;
 
+    /// The public tip position for a head at block `n`. The head clock
+    /// speaks [`BlockNumber`]; each source maps it into its own position
+    /// space (EVM logs: the end-of-block cut `(n, LogIdx::MAX)`; EVM
+    /// blocks: `n` itself). Drives the generic head wiring's `on_bump`.
+    fn head_pos(n: BlockNumber) -> Self::PubPos;
+
     /// Deserialize a public position from a
     /// [`Position::marshal`](crate::arch::Position::marshal) value. The
     /// store-side seam behind [`HistStore::load`](crate::arch::HistStore::load)
