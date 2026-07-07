@@ -20,6 +20,13 @@ lives in git history and in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   skips (`decode: bool`, chain-identifier lookup strings).
 - **CLI** — `ExitCode` + `Display` error rendering, `chains list`, testnet/
   red-flag advisories, default chain = `ethereum`, end-to-end `ChainId` typing.
+- **EVM blocks source** — `BlockSpec` (2nd `RangeSpec` after `LogSpec`) →
+  `chain.blocks(tier) -> HistStore<EvmBlock, BlockNumber>`; own `cached_blocks`
+  table + typed `ScanPartition::Blocks` coverage; batched `eth_getBlockByNumber`
+  fetcher; `evm blocks list` CLI (windowed table + `--follow`/`--reverse`). The
+  reference histories-first read. Along the way: `BlockHash`/`TxHash` promoted
+  to real newtypes, `FromSql`/`ToSql` + name-based row reads across the cache,
+  and a `snapshots()` busy-loop fix (emit-on-advance).
 - **R6 — shared-index concurrency tests** — `RangeIndex` walk under true
   parallelism (multi-thread runtime), disjoint/overlapping gaps (singleflight
   tiles the union, no double-fetch), and reader-vs-writer (`insert_page` racing
@@ -67,6 +74,7 @@ width specifiers, scattered across several modules with no shared helper:
 - `stats.rs` — the `--stats` session summary (column-aligned RPC/cache rows).
 - `fmt.rs::format_amount` — `whole_width`/`frac_width` numeric padding.
 - `evm/erc20.rs`, `evm/events.rs` — per-row transfer/event renderers.
+- `evm/blocks.rs` — the `blocks list` table (`print_header`/`print_block`).
 - `config.rs::show` — key/value listing.
 
 Each picks its own widths and alignment by hand, so columns don't line up
