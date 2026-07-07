@@ -1,21 +1,27 @@
 //! Integration tests for the blocks history (`BlockSpec` / `EvmChain::blocks`).
 //!
-//! - Cold/warm walk over a mainnet fork: the cold walk populates
-//!   `cached_blocks` via real `eth_getBlockByNumber` batches; after dropping
-//!   the chain (and its in-memory index) and reopening, the warm walk answers
-//!   from the durable cache — same blocks, much faster.
-//! - Poll-follow over a plain local anvil: mining new blocks flows through
-//!   the store's tip and `watch_hist` delivers them.
+//! Both run against a **plain local anvil** — no fork, no upstream RPC — so
+//! they are fully offline and don't depend on `MAINNET_RPC_URL` or a public
+//! endpoint's rate limits. Anvil auto-mines a block per transaction, so a mix
+//! of `eth_sendTransaction` (blocks with txs) and `anvil_mine` (empty blocks)
+//! gives a realistic dense chain to walk.
 //!
-//! Marked `#[ignore]` because they spawn anvil (+ external RPC for the fork).
-//! Run with `cargo test --test blocks_history -- --ignored`.
+//! - `cold_then_warm_walk`: the cold walk populates `cached_blocks` via real
+//!   `eth_getBlockByNumber` batches against anvil; after dropping the chain
+//!   (and its in-memory index) and reopening the DB, the warm walk answers
+//!   from the durable cache — identical blocks, no RPC.
+//! - `poll_follow_delivers_mined_blocks`: mining new blocks flows through the
+//!   store's tip and `watch_hist` delivers them.
+//!
+//! Marked `#[ignore]` because they spawn anvil. Run with
+//! `cargo test --test blocks_history -- --ignored`.
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use alloy::network::Ethereum;
-use alloy::primitives::U256;
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
@@ -28,10 +34,7 @@ use futures_util::StreamExt;
 use tempfile::TempDir;
 use tokio::time::{sleep, timeout};
 
-use common::{
-    anvil::{fork_mainnet, local, skip_no_anvil},
-    fixtures::FORK_BLOCK,
-};
+use common::anvil::{local, skip_no_anvil};
 
 async fn build_chain(
     db_path: &std::path::Path,
@@ -54,6 +57,41 @@ async fn build_chain(
     .expect("EvmChain::new")
 }
 
+/// Mine `n` empty blocks on a local anvil. `anvil_mine` is synchronous.
+async fn mine_blocks<P: Provider>(provider: &P, n: u64) {
+    let _: serde_json::Value = provider
+        .raw_request("anvil_mine".into(), [U256::from(n)])
+        .await
+        .expect("anvil_mine");
+}
+
+/// Send one self-transfer from anvil's first (unlocked, pre-funded) dev
+/// account. Anvil auto-mines it into a fresh block carrying one transaction.
+async fn send_tx<P: Provider>(provider: &P, sender: Address) {
+    let _: B256 = provider
+        .raw_request(
+            "eth_sendTransaction".into(),
+            [serde_json::json!({ "from": sender, "to": sender, "value": "0x1" })],
+        )
+        .await
+        .expect("eth_sendTransaction");
+}
+
+/// Grow the local chain to a dense mix of tx-bearing and empty blocks, and
+/// return the resulting head.
+async fn seed_blocks<P: Provider>(provider: &P) -> BlockNumber {
+    let accounts: Vec<Address> = provider
+        .raw_request("eth_accounts".into(), ())
+        .await
+        .expect("eth_accounts");
+    let sender = accounts[0];
+    for _ in 0..7 {
+        send_tx(provider, sender).await; // a block with 1 tx
+        mine_blocks(provider, 1).await; // an empty block
+    }
+    BlockNumber::new(provider.get_block_number().await.expect("block number"))
+}
+
 /// Walk `(from, to]` of the blocks store into a Vec.
 async fn walk_blocks(
     store: &HistStore<EvmBlock, BlockNumber>,
@@ -72,81 +110,61 @@ async fn walk_blocks(
 }
 
 #[tokio::test]
-#[ignore = "fork-mainnet integration: spawns anvil + hits external RPC"]
-async fn cold_then_warm_walk_over_fork_window() {
-    let Some(anvil) = fork_mainnet(FORK_BLOCK) else {
-        skip_no_anvil("cold_then_warm_walk_over_fork_window");
+#[ignore = "requires anvil on PATH"]
+async fn cold_then_warm_walk() {
+    let Some(anvil) = local() else {
+        skip_no_anvil("cold_then_warm_walk");
         return;
     };
 
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("blocks.v3.db");
     let endpoint = anvil.endpoint_url();
+    let provider = ProviderBuilder::new().connect_http(endpoint.clone());
 
-    // (from, to] = the 20 blocks ending at FORK_BLOCK.
-    let from = FORK_BLOCK - 20;
-    let to = FORK_BLOCK;
+    let tip = seed_blocks(&provider).await;
+    assert!(tip.get() >= 14, "seeded a dense chain (tip {tip})");
 
-    // Cold: populate cached_blocks via real eth_getBlockByNumber batches.
+    // Cold: walk genesis..=tip, populating cached_blocks via real
+    // eth_getBlockByNumber batches against anvil. Starting from ZERO also
+    // exercises the from-genesis (Bottom) walk over a real fetcher.
     let chain_cold = build_chain(&db_path, endpoint.clone(), None).await;
     let store_cold = chain_cold.blocks(Finality::Latest);
-    let cold_start = Instant::now();
-    let cold = walk_blocks(&store_cold, from, to).await;
-    let cold_elapsed = cold_start.elapsed();
+    let cold = walk_blocks(&store_cold, BlockNumber::ZERO, tip).await;
 
-    // Dense + ascending + one per height.
-    assert_eq!(
-        cold.len(),
-        20,
-        "dense window: one block per height in (from, to]"
-    );
+    // Dense, ascending, covering genesis..=tip.
+    assert_eq!(cold.len(), tip.get() as usize + 1, "one block per height");
     for (i, b) in cold.iter().enumerate() {
-        assert_eq!(
-            b.number,
-            from + (i as u64 + 1),
-            "blocks are dense and ascending"
-        );
+        assert_eq!(b.number, BlockNumber::new(i as u64), "dense + ascending");
     }
-    // Timestamps strictly increase; at least one block carries transactions.
-    for pair in cold.windows(2) {
-        assert!(pair[1].timestamp > pair[0].timestamp, "timestamps ascend");
-    }
-    assert!(
-        cold.iter().any(|b| b.tx_count.get() > 0),
-        "some block in the window has transactions"
-    );
-    // Parent links chain up.
+    // Parent links chain up; timestamps never go backwards.
     for pair in cold.windows(2) {
         assert_eq!(pair[1].parent_hash, pair[0].hash, "parent links chain up");
+        assert!(
+            pair[1].timestamp >= pair[0].timestamp,
+            "timestamps monotonic"
+        );
     }
+    // The tx-bearing blocks are visible — the fetcher read the tx array.
+    assert!(
+        cold.iter().any(|b| b.tx_count.get() > 0),
+        "some seeded block carries transactions"
+    );
+    // Gas limit is always populated; a tx block used gas.
+    assert!(
+        cold.iter().all(|b| b.gas_limit.get() > 0),
+        "gas limit populated for every block"
+    );
     drop(store_cold);
     drop(chain_cold);
 
-    // Warm: fresh chain + store over the same DB; served from cached_blocks.
+    // Warm: fresh chain + store over the same DB, served entirely from
+    // cached_blocks (the zero-RPC guarantee is unit-pinned in chain.rs).
     let chain_warm = build_chain(&db_path, endpoint, None).await;
     let store_warm = chain_warm.blocks(Finality::Latest);
-    let warm_start = Instant::now();
-    let warm = walk_blocks(&store_warm, from, to).await;
-    let warm_elapsed = warm_start.elapsed();
+    let warm = walk_blocks(&store_warm, BlockNumber::ZERO, tip).await;
 
     assert_eq!(cold, warm, "warm walk yields identical blocks");
-    assert!(
-        cold_elapsed.as_micros() > warm_elapsed.as_micros() * 5,
-        "warm walk should be much faster (cold={cold_elapsed:?}, warm={warm_elapsed:?})"
-    );
-    eprintln!(
-        "blocks_history: n={}, cold={cold_elapsed:?}, warm={warm_elapsed:?}, speedup={:.1}x",
-        cold.len(),
-        cold_elapsed.as_secs_f64() / warm_elapsed.as_secs_f64().max(f64::MIN_POSITIVE)
-    );
-}
-
-/// Mine `n` blocks on a plain local anvil. `anvil_mine` is synchronous.
-async fn mine_blocks<P: Provider>(provider: &P, n: u64) {
-    let _: serde_json::Value = provider
-        .raw_request("anvil_mine".into(), [U256::from(n)])
-        .await
-        .expect("anvil_mine");
 }
 
 #[tokio::test]
