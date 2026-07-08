@@ -95,10 +95,11 @@ Bound long-running memory, and wire real `Best`/`Safe` producers into
 
 ### Current state to build on
 
-- **`src/evm/chain.rs`** — `EvmChain::head(tier)` / `logs(filter, tier)`
-  accept a `Finality` tier but ignore it (`Latest`-only). The head clock
-  (`chain/head_clock.rs`) publishes one `watch::Sender<HeadEvent>`; per-tier
-  producers slot in as sibling senders the same wiring pattern subscribes to.
+- **`src/evm/chain.rs`** — `EvmChain::logs(filter, tier)` / `blocks(tier)`
+  accept a `Finality` tier but ignore it (`Latest`-only). The demand-started
+  head clock (`chain/head_clock.rs`) publishes one internal
+  `watch::Sender<Option<HeadEvent>>` (the `HeadCell`); per-tier producers
+  slot in as sibling senders the same wiring pattern subscribes to.
 - **`src/evm/cache/log_cache.rs`** — durable `compact_ranges(filter, up_to)`
   already exists and is tested (`compact_merges_finalized_ranges`,
   `compact_skips_reorged_ranges`). What's missing is **in-memory** eviction.

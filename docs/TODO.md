@@ -33,6 +33,20 @@ lives in git history and in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   a mid-walk `items()`: no dup / no drop / no panic). Test suite split out to
   `src/evm/range_index/tests.rs`. Stretch goal **not** done: a `loom` model of
   the singleflight handshake (needs a sync analog of the async `Notify` path).
+- **Demand-started head tracking + bounded hists** — `EvmChain::new` is sync,
+  infallible and RPC-free; the head clock (poll/ws, `EvmChainConfig::transport`
+  — the `follow: Option<_>` "one-shot chain" mode is gone) starts exactly once
+  on the first tip demand (store `TipSeed` signal or the lazy `time_pos`
+  anchor) and runs until chain + stores drop. No bare-head API: `head(tier)` /
+  `refresh_head()` deleted (the head is the snapshot's `end()`), `HeadEvent`
+  internal + hash-less (ws coverage pages read hashes via
+  `ensure_block_header`). New `logs_hist(&filter, range)` /
+  `blocks_hist(range)` return head-free bounded `Hist`s — a warm
+  `--from-block` CLI query is fully offline (0 RPC; was 2 + a guaranteed
+  `block_header` miss). `TimePosFn` closure → `TimePos` trait; new `TipSeed`
+  trait; `chain.rs` split into per-source `chain/logs.rs` + `chain/blocks.rs`;
+  `BlockRange` got `Display`; CLI resolvers return `BlockRange` and one-shot
+  paths use the bounded hists ("last N" = snapshot + `split(tip − N)`).
 
 ---
 
@@ -84,6 +98,23 @@ the emitted events instead of real USDC. Trade-off: loses "real chain data at
 block N" coverage; the point becomes the cache/merge machinery, which is what
 these actually test. Keep one thin fork smoke test (behind an env gate) if real
 end-to-end coverage is still wanted.
+
+## Time anchor from the newest cached header — offline dated queries
+
+`--from`/`--to` queries resolve the wall-clock→block anchor by demanding the
+head and reading its header (`LazyAnchor` in `chain.rs`): one
+`eth_blockNumber` + one `eth_getBlockByNumber` per dated run, even fully
+cached. Extrapolation doesn't need the *current* head — any recent anchor
+works. Add a `LogCache` read for the newest `cached_block_headers` row and
+let `LazyAnchor` prefer it (fall back to the head demand on an empty cache):
+warm dated queries become offline like the `--from-block` path.
+
+## Head-clock stop-on-idle — deliberately deferred
+
+Tracking starts on first demand and then runs until the chain and all its
+stores drop — there is no stop when consumers go away (user call: "keep it
+one-shot for a while"). Revisit if long-lived apps with bursty consumption
+show the idle poll to matter.
 
 ## R8+ — (incoming)
 

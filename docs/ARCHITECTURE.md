@@ -495,33 +495,49 @@ planned second instance (the `blocks` command, M1).
 ```rust
 enum Finality { Latest, Best, Safe }     // Best/Safe mirror Latest until Phase 7
 struct LogFilter { address: Address, topics: [Option<Topic>; 4] }   // the "query" for logs
-struct HeadEvent { number: BlockNumber, hash: BlockHash }
 
-EvmChain::new(provider: ChainProvider<P>, config: EvmChainConfig).await  // one head fetch
-chain.head(tier)          -> Signal<HeadEvent>                 // the chain-wide clock
-chain.logs(&filter, tier) -> HistStore<EvmEvent, EvmPosition>  // sync, no RPC
-chain.blocks(tier)        -> HistStore<EvmBlock, BlockNumber>  // sync, no RPC (dense source)
-chain.refresh_head().await -> BlockNumber                      // one-shot poll (non-follow)
+EvmChain::new(provider: ChainProvider<P>, config: EvmChainConfig)  // sync, infallible: no RPC, no tasks
+chain.logs(&filter, tier)        -> HistStore<EvmEvent, EvmPosition>  // reactive; sync, no RPC
+chain.blocks(tier)               -> HistStore<EvmBlock, BlockNumber>  // reactive; sync, no RPC (dense source)
+chain.logs_hist(&filter, range)  -> Hist<EvmEvent, EvmPosition>   // bounded window; head-free
+chain.blocks_hist(range)         -> Hist<EvmBlock, BlockNumber>   // bounded window; head-free
+chain.estimate_block(time).await -> BlockNumber                   // wall-clock → block (lazy anchor)
 ```
 
 `EvmChain` is concrete because it vends *many* item types (`logs`, `blocks`,
-later traces/state) — no single trait/`dyn` expresses that. It owns the
-chain-wide concerns **once**: the `ChainProvider` (which carries the
-`LogCache`, [§12](#12-caching-mechanics)), the single head clock, the
-`time_pos` block-time anchor. `logs(filter, tier)` builds a `LogSpec` +
-fetcher + `RangeIndexStore`, seeds the tip from the current head, spawns the
-store's wiring, and hands back a plain `HistStore` — cheap and synchronous,
-no RPC; cached state materializes lazily. `blocks(tier)` is the same shape
-over a `BlockSpec` (the second `RangeSpec` instance): a **dense** source
-where every height is an item, positioned by bare `BlockNumber`. It has no
-push path — `newHeads` lacks the tx count — so each head advance eager-gap-
-fills through a batched `eth_getBlockByNumber` fetcher; its `cached_blocks`
-coverage lives under `ScanPartition::Blocks` (a typed partition key beside
-the per-filter `ScanPartition::Filter`, §12).
+later traces/state) — no single trait/`dyn` expresses that; each source
+lives in its own `chain/` submodule (methods + fetcher + `TimePos` impl +
+source-specific wiring). The chain owns the chain-wide concerns **once**:
+the `ChainProvider` (which carries the `LogCache`,
+[§12](#12-caching-mechanics)), the single demand-started head clock, the
+lazy `time_pos` block-time anchor. `logs(filter, tier)` builds a `LogSpec` +
+fetcher + `RangeIndexStore`, spawns the store's wiring, and hands back a
+plain `HistStore` — cheap, synchronous and side-effect-free; cached state
+materializes lazily. `blocks(tier)` is the same shape over a `BlockSpec`: a
+**dense** source where every height is an item, positioned by bare
+`BlockNumber`. It has no push path — `newHeads` lacks the tx count — so each
+head advance eager-gap-fills through a batched `eth_getBlockByNumber`
+fetcher; its `cached_blocks` coverage lives under `ScanPartition::Blocks` (a
+typed partition key beside the per-filter `ScanPartition::Filter`, §12).
 
-**Follow mode is fixed at construction** (`EvmChainConfig::follow`), not a
-per-store method: `None` = one-shot (head moves only via `refresh_head()`),
-`Poll`/`Ws` = the chain runs one head clock and every store gets live wiring.
+The `*_hist(range)` variants return a finite `Hist` over an explicit
+inclusive `BlockRange`: no tip, no wiring, no head demand — a fully-cached
+walk is completely offline, and a range beyond the real head fails loudly at
+iteration rather than clamping.
+
+**There is no bare-head API.** The head is not an entity consumers read —
+it is the `end()` of the reactive histories ("last N blocks" = snapshot,
+then `split(tip − N)`). Internally one watch channel (`Option<HeadEvent>`,
+`None` until first observed — the chain-level analog of the store's unset
+tip) fans observations out to every store's wiring.
+
+**Head tracking is demand-started** (`EvmChainConfig::transport`, poll or
+ws — every chain follows; there is no "one-shot chain" mode). Construction
+does nothing; the first demand for a tip — a consumer awaiting a snapshot
+(the store's `TipSeed` signal) or `estimate_block` resolving its anchor —
+starts the clock exactly once, and it runs until the chain and its stores
+drop. Demand-driven all the way down, symmetric with iteration's lazy
+gap-fill: histories fill on iteration, tips resolve on first consumption.
 Log delivery stays **per filter** — `eth_subscribe(logs)` can't express
 OR-topics (decision #11), so only the *head clock* is chain-wide. See
 [§11](#11-data-flow--cold-live-resume) for the wiring variants and the
@@ -529,13 +545,15 @@ false-coverage soundness rule.
 
 ### Finality lives on the chain
 
-`head(tier): Signal<HeadEvent>` is the chain-wide clock. The chain holds **one**
-`watch::Sender<HeadEvent>`; `head(Best/Safe)` mirror `Latest` until Phase 7
-wires their producers into the head clock (per-tier channels — a
-confirmation-depth lag for `best`, a `finalized` poll for `safe`). Every
-published head has its block header persisted *first* — the **headers-present
-invariant** — so `LogSpec::resolve` can fill event timestamps synchronously.
-A log store's tip widens a head block to `EvmPosition(block, LogIdx::MAX)`.
+The store constructors take a `Finality` tier; `Best`/`Safe` mirror `Latest`
+until Phase 7 wires their producers into the head clock (per-tier channels —
+a confirmation-depth lag for `best`, a `finalized` poll for `safe`). Every
+head the **ws** clock publishes has its block header persisted *first* — the
+**headers-present invariant** — so `LogSpec::resolve` can fill
+push-delivered timestamps synchronously; poll heads carry no header claim
+(poll-mode logs always arrive through the fetcher, which ensures its own
+headers). A log store's tip widens a head block to
+`EvmPosition(block, LogIdx::MAX)`.
 
 ---
 
@@ -754,12 +772,12 @@ The concrete client for EVM log streams (`feature = "evm"`).
 
 | Component | Role |
 |---|---|
-| **`EvmChain<P>`** | The per-chain entity. Owns the `ChainProvider`, **one** head clock (`newHeads` or poll; headers persisted before publishing), and vends per-filter stores via `logs(&LogFilter, Finality)` (sync, no RPC). Follow mode fixed at construction (`EvmChainConfig`); one-shot chains advance via `refresh_head()`. |
+| **`EvmChain<P>`** | The per-chain entity. Owns the `ChainProvider`, **one** demand-started head clock (`newHeads` or poll per `EvmChainConfig::transport`; ws heads persist headers before publishing), and vends per-source histories from per-source submodules: reactive stores (`logs(&LogFilter, tier)` / `blocks(tier)` — sync, side-effect-free) and bounded hists (`logs_hist(&filter, range)` / `blocks_hist(range)` — head-free, offline when cached). Construction does nothing; the first snapshot await (or `estimate_block`) starts tracking, which then runs until the chain and its stores drop. |
 | **`RangeIndexStore<S: RangeSpec>`** | The reactive layer, written once: `HistStoreBackend` + `HistBackend` over a `RangeIndex<S>` plus a single nullable `end` tip (`watch::Sender<Option<PubPos>>`; monotonic `on_bump`, `on_events` = insert page + bump). Wiring tasks attach as `AbortOnDropHandle`s holding `Weak` back-refs. |
 | **`RangeIndex<S>`** | Generic in-memory `BTreeMap<S::Pos, Range>` per source stream. Empty-range tombstones, singleflight via `Arc<Notify>` per range, lazy first-touch window load, async drain to SQLite. **The hot path.** |
 | **`LogSpec`** | The `RangeSpec` for EVM logs: `LogRef` tree items, sync `resolve` to `EvmEvent` (headers-present invariant), persist/load against `LogCache`, `EvmPosition` load. |
 | **`CacheDb` → `LogCache` / `Erc20Cache` / `EventSignatureCache`** | Durable SQLite over one shared connection. Narrow per-concern views; **never on the live path.** |
-| **chain wiring** (`chain/wiring.rs`) | Per-store tasks driving `on_events`/`on_bump`: mirror-head (one-shot), eager gap-fill (poll follow), or a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session (ws follow). Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
+| **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session. Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
 | **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Shared<LogCache>`**. Internalizes `rpc_span` instrumentation + error mapping (inherent `get_block_number`/`get_logs`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
@@ -928,7 +946,7 @@ sequenceDiagram
     Idx-->>Hist: stream items
     Hist-->>App: Positioned(EvmEvent, EvmPosition)
 
-    Note over App,RPC: LIVE path — follow mode (fixed at EvmChain::new)
+    Note over App,RPC: LIVE path — ws transport (clock demand-started by the first consumer)
     Clock->>RPC: eth_subscribe(newHeads) — ONE per chain
     Wire->>RPC: eth_subscribe(logs) — narrow, per filter store
     RPC-->>Wire: log push
@@ -1007,7 +1025,7 @@ flowchart LR
 - **Scanned ranges self-invalidate.** A range whose `end_block_hash` is
   reorged is refetched.
 - **Finality is chain-wide**: the `Finality` tier on
-  `EvmChain::head(tier)` / `EvmChain::logs(filter, tier)`, not per-store
+  `EvmChain::logs(filter, tier)` / `EvmChain::blocks(tier)`, not per-store
   accessors. `Latest` is fully wired; `Best`/`Safe` mirror `Latest` until
   Phase 7 wires their producers (`latest − confirmation_depth`; RPC
   `finalized`, else `latest − 64`) into the head clock.
