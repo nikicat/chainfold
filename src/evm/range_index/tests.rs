@@ -21,17 +21,15 @@ use super::gap_fill::never_fetch;
 use super::range_tree::align_window;
 use super::*;
 use crate::arch::Timestamp;
-use crate::evm::cache::LogCache;
-use crate::evm::types::{
-    BlockHash, BlockNumber, EvmEvent, EvmPosition, FilterHash, LogIdx, TxHash,
-};
+use crate::evm::cache::{LogCache, ScanPartition};
+use crate::evm::types::{BlockHash, BlockNumber, EvmEvent, EvmPosition, FilterHash, LogIdx};
 use crate::shared::Shared;
 
 const FH: FilterHash = FilterHash::new([0xAA; 32]);
 const HASH_A: BlockHash = BlockHash::repeat_byte(0xBB);
 const HASH_B: BlockHash = BlockHash::repeat_byte(0xBC);
 /// Base for fixture block timestamps (`TS_BASE + block`).
-const TS_BASE: u64 = 1_700_000_000;
+const TS_BASE: Timestamp = Timestamp::new(1_700_000_000);
 
 /// Shorthand [`BlockNumber`] constructor — these tests are wall-to-wall
 /// block coordinates.
@@ -48,10 +46,10 @@ fn mk_log(block: BlockNumber, idx: LogIdx, block_hash: BlockHash) -> Log {
             address: Address::from([0x42u8; 20]),
             data: log_data,
         },
-        block_hash: Some(block_hash),
+        block_hash: Some(block_hash.b256()),
         block_number: Some(block.get()),
         block_timestamp: None,
-        transaction_hash: Some(TxHash::from([0xEE; 32])),
+        transaction_hash: Some(B256::from([0xEE; 32])),
         transaction_index: Some(0),
         log_index: Some(u64::from(idx.get())),
         removed: false,
@@ -61,9 +59,9 @@ fn mk_log(block: BlockNumber, idx: LogIdx, block_hash: BlockHash) -> Log {
 /// Like [`mk_log`] but carrying its own `block_timestamp`, so
 /// [`LogSpec::resolve`] never needs a cached block header (the
 /// headers-present invariant, satisfied per-log).
-fn mk_log_ts(block: BlockNumber, idx: LogIdx, block_hash: B256) -> Log {
+fn mk_log_ts(block: BlockNumber, idx: LogIdx, block_hash: BlockHash) -> Log {
     let mut log = mk_log(block, idx, block_hash);
-    log.block_timestamp = Some(TS_BASE + block.get());
+    log.block_timestamp = Some((TS_BASE + block.get()).get());
     log
 }
 
@@ -72,7 +70,7 @@ fn mk_log_ts(block: BlockNumber, idx: LogIdx, block_hash: B256) -> Log {
 /// distinct blocks at once — must give each block its own hash or they'd all
 /// resolve to the same cached log.
 fn hash_for(block: BlockNumber) -> BlockHash {
-    B256::from(U256::from(block.get()))
+    BlockHash::new(B256::from(U256::from(block.get())))
 }
 
 /// A timestamped log at `(block, log_index)` with a block-unique hash.
@@ -276,7 +274,13 @@ fn is_loaded_lazy_first_access_only() {
     store
         .insert_logs(&FH, &[mk_log(bn(150), LogIdx::ZERO, HASH_A)])
         .unwrap();
-    store.record_scanned_range(&FH, 100, 200, &HASH_A).unwrap();
+    store
+        .record_scanned_range(
+            &ScanPartition::Filter(FH),
+            BlockRange::from_u64(100, 200),
+            &HASH_A,
+        )
+        .unwrap();
 
     let idx = RangeIndex::with_chunk_size(
         LogSpec::new(store, FH),
@@ -357,10 +361,10 @@ async fn items_walks_filled_ranges_yields_in_order() {
     // Fixture logs carry no block_timestamp, so resolution exercises
     // the headers-present path: both block headers must be cached.
     store
-        .insert_block_header(150, &HASH_A, &BlockHash::ZERO, TS_BASE + 150)
+        .insert_block_header(bn(150), &HASH_A, &BlockHash::ZERO, TS_BASE + 150)
         .unwrap();
     store
-        .insert_block_header(180, &HASH_B, &HASH_A, TS_BASE + 180)
+        .insert_block_header(bn(180), &HASH_B, &HASH_A, TS_BASE + 180)
         .unwrap();
     let idx = Arc::new(mk_index_over(store));
     idx.insert_page(&LogPage {
@@ -375,11 +379,11 @@ async fn items_walks_filled_ranges_yields_in_order() {
     );
     let a = stream.next().await.unwrap().unwrap();
     assert_eq!(a.item.block_number, bn(150));
-    assert_eq!(a.item.timestamp, Timestamp::new(TS_BASE + 150));
+    assert_eq!(a.item.timestamp, TS_BASE + 150);
     assert_eq!(a.pos, EvmPosition::new(150, 0));
     let b = stream.next().await.unwrap().unwrap();
     assert_eq!(b.item.block_number, bn(180));
-    assert_eq!(b.item.timestamp, Timestamp::new(TS_BASE + 180));
+    assert_eq!(b.item.timestamp, TS_BASE + 180);
     assert_eq!(b.pos, EvmPosition::new(180, 2));
     assert!(stream.next().await.is_none());
 }
@@ -425,7 +429,9 @@ async fn items_into_uncached_gap_calls_store_and_caches() {
     assert_eq!(calls.load(Ordering::SeqCst), 1, "no refetch on warm tree");
 
     // And the persisted scanned_ranges row is there.
-    let ranges = store.get_scanned_ranges(&FH).unwrap();
+    let ranges = store
+        .get_scanned_ranges(&ScanPartition::Filter(FH))
+        .unwrap();
     assert!(!ranges.is_empty(), "scanned range was persisted");
 }
 
@@ -506,16 +512,26 @@ async fn insert_page_drains_to_store_asynchronously() {
     for _ in 0..10 {
         yield_now().await;
         sleep(Duration::from_millis(5)).await;
-        let logs = store.get_logs_in_range(&FH, 100, 200).unwrap();
+        let logs = store
+            .get_logs_in_range(&FH, BlockRange::from_u64(100, 200))
+            .unwrap();
         if logs.len() == 2 {
             break;
         }
     }
 
-    let logs = store.get_logs_in_range(&FH, 100, 200).unwrap();
+    let logs = store
+        .get_logs_in_range(&FH, BlockRange::from_u64(100, 200))
+        .unwrap();
     assert_eq!(logs.len(), 2, "drain wrote both logs to the store");
-    let ranges = store.get_scanned_ranges(&FH).unwrap();
-    assert_eq!(ranges, vec![(100, 200)], "drain recorded the scanned range");
+    let ranges = store
+        .get_scanned_ranges(&ScanPartition::Filter(FH))
+        .unwrap();
+    assert_eq!(
+        ranges,
+        vec![BlockRange::from_u64(100, 200)],
+        "drain recorded the scanned range"
+    );
 }
 
 #[tokio::test]
@@ -534,12 +550,18 @@ async fn insert_page_without_drain_does_not_touch_store() {
     // Give any background work a chance to run.
     sleep(Duration::from_millis(20)).await;
     assert_eq!(
-        store.get_logs_in_range(&FH, 100, 200).unwrap().len(),
+        store
+            .get_logs_in_range(&FH, BlockRange::from_u64(100, 200))
+            .unwrap()
+            .len(),
         0,
         "no drain attached — store remains empty"
     );
     assert!(
-        store.get_scanned_ranges(&FH).unwrap().is_empty(),
+        store
+            .get_scanned_ranges(&ScanPartition::Filter(FH))
+            .unwrap()
+            .is_empty(),
         "no drain attached — scanned ranges remain empty"
     );
 }

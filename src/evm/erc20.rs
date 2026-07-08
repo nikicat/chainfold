@@ -335,7 +335,7 @@ pub fn cached_balance_floor(
 mod tests {
     use super::*;
     use crate::arch::Timestamp;
-    use crate::evm::types::{BlockNumber, LogIdx};
+    use crate::evm::types::{BlockHash, BlockNumber, LogIdx, TxHash};
     use alloy::primitives::B256;
     use std::sync::Arc;
 
@@ -351,9 +351,9 @@ mod tests {
             contract_address: Address::repeat_byte(0x42),
             block_number: BlockNumber::new(100),
             timestamp: Timestamp::new(1000),
-            block_hash: B256::ZERO,
+            block_hash: BlockHash::ZERO,
             log_index: LogIdx::ZERO,
-            tx_hash: B256::ZERO,
+            tx_hash: TxHash::ZERO,
             topics: vec![TRANSFER_TOPIC, from.into(), to.into()],
             data,
         }
@@ -408,9 +408,9 @@ mod tests {
             contract_address: Address::repeat_byte(0x42),
             block_number: BlockNumber::new(100),
             timestamp: Timestamp::new(1000),
-            block_hash: B256::ZERO,
+            block_hash: BlockHash::ZERO,
             log_index: LogIdx::ZERO,
-            tx_hash: B256::ZERO,
+            tx_hash: TxHash::ZERO,
             topics: vec![Topic::new(B256::repeat_byte(0xFF))],
             data: vec![],
         };

@@ -1,3 +1,4 @@
+pub mod blocks;
 pub mod erc20;
 pub mod events;
 
@@ -5,11 +6,12 @@ use std::path::PathBuf;
 
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
+use alloy::transports::http::Http;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, RpcMethod,
-    SubscribeTransport, rpc_retry_layer, rpc_span, versioned_path,
+    CacheDb, ChainId, ChainProvider, ChunkSize, ConnectTimingLayer, EvmChain, EvmChainConfig,
+    RpcMethod, rpc_retry_layer, rpc_span, versioned_path,
 };
 use tracing::Instrument;
 
@@ -129,7 +131,18 @@ pub async fn run(
     let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = CacheDb::open(&db_path)?;
 
-    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
+    // Hand-build the HTTP client (instead of `ClientBuilder::http`) so the
+    // connector is wrapped with the connect-timing layer: DNS+TCP+TLS setup
+    // gets its own `connect` span in --stats, and the first RPC on a fresh
+    // connection stops looking mysteriously slow.
+    let http_client = reqwest::Client::builder()
+        .connector_layer(ConnectTimingLayer)
+        .build()?;
+    let transport = Http::with_client(http_client, url);
+    let is_local = transport.guess_local();
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
+        .transport(transport, is_local);
     // The chain id is already resolved (and typed) from args — bundle it into
     // the provider so the EVM layer reads it for free instead of re-fetching
     // eth_chainId.
@@ -154,23 +167,23 @@ pub async fn run(
         ChainIdCheck::Trust => {}
     }
 
-    // One chain entity per invocation. `--follow` fixes the live-tracking
-    // transport at construction: this binary always builds an HTTP provider,
-    // so follow mode polls (same 2s cadence the old subscribe calls used).
+    // One chain entity per invocation. Construction is free (no RPC, no
+    // tasks); head tracking starts lazily on the first demand for a tip.
+    // This binary always builds an HTTP provider, so the transport is the
+    // default 2s poll — `--follow` only changes how commands consume the
+    // stores, never the chain itself.
     let chain = EvmChain::new(
         provider,
         EvmChainConfig {
             chunk_size: ChunkSize::new(args.chunk_size),
-            follow: match follow {
-                FollowMode::Follow => Some(SubscribeTransport::poll_default()),
-                FollowMode::Once => None,
-            },
             ..EvmChainConfig::default()
         },
-    )
-    .await?;
+    );
 
     match &args.command {
+        EvmCommand::Blocks(blocks_args) => {
+            blocks::run(&chain, &db_path, args, blocks_args, direction, follow).await
+        }
         EvmCommand::Erc20(erc20_args) => {
             erc20::run(
                 &chain, &cache, &db_path, args, erc20_args, direction, follow,

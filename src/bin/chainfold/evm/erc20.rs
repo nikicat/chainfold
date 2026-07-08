@@ -14,7 +14,7 @@ use futures_util::future::join_all;
 
 use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode};
 use crate::fmt::{self, FmtContext};
-use crate::util::{parse_hex_address, resolve_range};
+use crate::util::{log_cut, log_end, parse_hex_address, resolve_log_range};
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
@@ -77,6 +77,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     let show_balance = matches!(erc20_args.command, Erc20Command::Balances);
 
+    // One window for every token (the merge is per token, the window is
+    // not).
+    let range = resolve_log_range(chain, evm_args).await?;
+
     for address in &addresses {
         let meta_symbol = metadata
             .get(address)
@@ -84,25 +88,27 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             .unwrap_or_default();
         let owned = OwnedErc20::new(chain, owner, *address);
 
-        let (start, end) = resolve_range(evm_args, owned.out_transfers()).await?;
-        println!("── {} ({}..{}) ──", meta_symbol, start.block, end.block);
+        println!("── {meta_symbol} ({range}) ──");
 
         let merged_hs = owned.transfers();
         let mut balance = U256::ZERO;
 
         if follow.is_follow() {
-            // The chain was built with a poll transport, so both inner
-            // stores' tips are already driven live by the head clock.
-            let mut stream = watch_hist(&merged_hs, start);
+            // Awaiting the merged stream demand-starts the head clock,
+            // which drives both inner stores' tips.
+            let mut stream = watch_hist(&merged_hs, log_cut(range.from));
             let mut count = 0;
             while let Some(item) = stream.next().await {
                 render_transfer(&item?, &mut balance, count, &ctx, show_balance, owner);
                 count += 1;
             }
         } else {
+            // The merge works on reactive stores, so the snapshot demands
+            // the head (once per process, singleflight) and the window is
+            // cut out of it.
             let hist = merged_hs.next().await;
-            let (_, after_start) = hist.split(start);
-            let (window, _) = after_start.split(end);
+            let (_, after_start) = hist.split(log_cut(range.from));
+            let (window, _) = after_start.split(log_end(range.to));
             let mut stream = window.iter();
             let mut count = 0;
             while let Some(item) = stream.next().await {

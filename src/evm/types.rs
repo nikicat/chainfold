@@ -7,9 +7,6 @@ use std::ops::{Add, Sub};
 use std::sync::Arc;
 
 use alloy::primitives::{Address, B256};
-// Re-exported so the rest of the crate names hashes through the domain-type
-// module rather than reaching into alloy at each site.
-pub use alloy::primitives::{BlockHash, TxHash};
 
 use crate::arch::{Position, Timestamp};
 
@@ -56,14 +53,136 @@ impl From<u64> for ChainId {
 }
 
 // ============================================================
+// BlockHash / TxHash
+// ============================================================
+
+/// An EVM block hash. A real newtype over [`B256`] — like [`Topic`], and no
+/// longer an alloy alias — so a block hash can't be confused with a
+/// transaction hash, a topic, or any other 32-byte value, and so it binds and
+/// reads directly at the `SQLite` boundary. Kept EVM-specific on purpose:
+/// other sources' block identifiers differ in shape and display (Bitcoin's
+/// byte-reversed hex, TON's base64), so each source defines its own.
+///
+/// Unwrap to the inner `B256` with [`BlockHash::b256`] at the alloy boundary;
+/// everything chainfold-facing speaks `BlockHash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockHash(B256);
+
+impl BlockHash {
+    /// The all-zero hash — the "unknown/absent" placeholder at decode
+    /// boundaries.
+    pub const ZERO: Self = Self(B256::ZERO);
+
+    pub const fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// The inner 32-byte value, for the alloy boundary.
+    pub const fn b256(self) -> B256 {
+        self.0
+    }
+
+    /// Raw bytes, for hashing / hex formatting.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    /// Every byte set to `byte` — test fixtures.
+    pub const fn repeat_byte(byte: u8) -> Self {
+        Self(B256::repeat_byte(byte))
+    }
+}
+
+impl From<B256> for BlockHash {
+    fn from(value: B256) -> Self {
+        Self(value)
+    }
+}
+
+impl From<BlockHash> for B256 {
+    fn from(hash: BlockHash) -> Self {
+        hash.0
+    }
+}
+
+impl std::fmt::Display for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl std::fmt::LowerHex for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward so `{:#x}` (explorer URLs, log lines) keeps working.
+        std::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+/// An EVM transaction hash. See [`BlockHash`] for why this is a real newtype
+/// and why it stays EVM-specific (Solana identifies transactions by 64-byte
+/// signatures, TON by `(logical_time, hash)` — a common tx-id type would
+/// misrepresent them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TxHash(B256);
+
+impl TxHash {
+    /// The all-zero hash — the "unknown/absent" placeholder at decode
+    /// boundaries.
+    pub const ZERO: Self = Self(B256::ZERO);
+
+    pub const fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// The inner 32-byte value, for the alloy boundary.
+    pub const fn b256(self) -> B256 {
+        self.0
+    }
+
+    /// Raw bytes, for hashing / hex formatting.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    /// Every byte set to `byte` — test fixtures.
+    pub const fn repeat_byte(byte: u8) -> Self {
+        Self(B256::repeat_byte(byte))
+    }
+}
+
+impl From<B256> for TxHash {
+    fn from(value: B256) -> Self {
+        Self(value)
+    }
+}
+
+impl From<TxHash> for B256 {
+    fn from(hash: TxHash) -> Self {
+        hash.0
+    }
+}
+
+impl std::fmt::Display for TxHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl std::fmt::LowerHex for TxHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward so `{:#x}` (explorer URLs, log lines) keeps working.
+        std::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+// ============================================================
 // Topic
 // ============================================================
 
-/// An EVM log topic (`topic0`..`topic3`). A real newtype over [`B256`] —
-/// unlike block/transaction hashes, which use alloy's [`BlockHash`]/[`TxHash`]
-/// *aliases* (documentation only) — because a topic is a distinct concept that
-/// flows through chainfold's own filter API, and confusing one with a hash
-/// would be a genuine bug. alloy itself models all three as a bare `B256`.
+/// An EVM log topic (`topic0`..`topic3`). A real newtype over [`B256`], like
+/// [`BlockHash`]/[`TxHash`] — a topic is a distinct concept that flows
+/// through chainfold's own filter API, and confusing one with a hash would be
+/// a genuine bug. alloy itself models all three as a bare `B256`.
 ///
 /// Unwrap to the inner `B256` with [`Topic::b256`] at the alloy `Filter`/`Log`
 /// boundary; everything chainfold-facing speaks `Topic`.
@@ -246,6 +365,16 @@ impl Add<u64> for BlockNumber {
     }
 }
 
+/// Block + a typed count of blocks = block — the affine algebra extended to
+/// [`BlockCount`], so window arithmetic reads
+/// `from_block + num_blocks - 1` with no `.get()` unwrapping.
+impl Add<BlockCount> for BlockNumber {
+    type Output = Self;
+    fn add(self, rhs: BlockCount) -> Self {
+        Self(self.0 + rhs.get())
+    }
+}
+
 impl Sub<u64> for BlockNumber {
     type Output = Self;
     fn sub(self, rhs: u64) -> Self {
@@ -258,6 +387,30 @@ impl std::fmt::Display for BlockNumber {
         // Forward to the inner Display so formatter flags (width, alignment)
         // survive — see the note on `ChainId`'s Display.
         std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// [`BlockNumber`] is the public position of the blocks history
+/// (`HistStore<EvmBlock, BlockNumber>`): block `N` sits *at* position `N`.
+///
+/// Wart, mirroring [`EvmPosition::earliest`]'s `(0, 0)` convention:
+/// [`BlockNumber::ZERO`] doubles as the lower-bound sentinel ("before all
+/// blocks") and as genesis's own position, so `split(ZERO)` excludes genesis
+/// and a resume anchor of `ZERO` replays it. Harmless in practice — no real
+/// query starts a window at genesis — so documented rather than engineered
+/// around.
+impl Position for BlockNumber {
+    fn marshal(&self) -> serde_json::Value {
+        // `#[serde(transparent)]` — a bare JSON number.
+        serde_json::to_value(self).expect("BlockNumber serialization cannot fail")
+    }
+}
+
+impl BlockNumber {
+    /// Reconstruct from a [`Position::marshal`] value. Called by the owning
+    /// store's `load` (deserialization lives on the store, not the position).
+    pub fn from_value(value: serde_json::Value) -> Option<Self> {
+        serde_json::from_value(value).ok()
     }
 }
 
@@ -289,6 +442,13 @@ impl BlockRange {
     /// Raw `(from, to)` heights for the `SQLite` / RPC / arithmetic boundary.
     pub const fn as_u64(self) -> (u64, u64) {
         (self.from.get(), self.to.get())
+    }
+}
+
+impl std::fmt::Display for BlockRange {
+    /// Inclusive `from..=to`, matching Rust range syntax.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..={}", self.from, self.to)
     }
 }
 
@@ -327,6 +487,46 @@ impl ChunkSize {
 }
 
 impl std::fmt::Display for ChunkSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward to the inner Display so formatter flags (width, alignment)
+        // survive — see the note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+// ============================================================
+// BlockCount
+// ============================================================
+
+/// A positive count of blocks — a window size, a batch size.
+///
+/// Like [`ChunkSize`], a count is a *distance* in the affine [`BlockNumber`]
+/// algebra, hence not a `BlockNumber`; the two counts stay distinct types
+/// because they play different roles (a fetch-alignment granularity vs. a
+/// how-many-blocks quantity) and neither should be swappable with the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockCount(std::num::NonZeroU64);
+
+impl BlockCount {
+    /// Wrap a block count.
+    ///
+    /// # Panics
+    /// Panics if `n == 0` — a zero-block window/batch is meaningless.
+    /// `const`-evaluable, so literal misuse fails at compile time.
+    pub const fn new(n: u64) -> Self {
+        match std::num::NonZeroU64::new(n) {
+            Some(v) => Self(v),
+            None => panic!("block count must be positive"),
+        }
+    }
+
+    /// The inner count, for the window/batch arithmetic boundary.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Display for BlockCount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Forward to the inner Display so formatter flags (width, alignment)
         // survive — see the note on `ChainId`'s Display.
@@ -429,10 +629,14 @@ pub struct EvmPosition {
 }
 
 impl EvmPosition {
-    pub const fn new(block: u64, log_index: u32) -> Self {
+    /// Coordinate constructor. `impl Into` on both parameters so call sites
+    /// pass domain values (`BlockNumber`, `LogIdx`) directly *and* raw
+    /// `u64`/`u32` literals keep working in tests — no `.get()` unwrapping
+    /// on either side.
+    pub fn new(block: impl Into<BlockNumber>, log_index: impl Into<LogIdx>) -> Self {
         Self {
-            block: BlockNumber::new(block),
-            log_index: LogIdx::new(log_index),
+            block: block.into(),
+            log_index: log_index.into(),
         }
     }
 
@@ -484,6 +688,117 @@ impl EvmEvent {
             log_index: self.log_index,
         }
     }
+}
+
+// ============================================================
+// Block scalars — TxCount / Gas / GasPrice
+// ============================================================
+
+/// A count of transactions in a block. A newtype over `u32` so it can't be
+/// silently swapped with a [`LogIdx`] or any other bare integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TxCount(u32);
+
+impl TxCount {
+    pub const fn new(n: u32) -> Self {
+        Self(n)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// From a transactions-list length (the RPC boundary). Saturates at
+    /// `u32::MAX` — no real block approaches 4B transactions, but a
+    /// misbehaving RPC shouldn't panic us.
+    pub fn from_len(len: usize) -> Self {
+        Self(u32::try_from(len).unwrap_or(u32::MAX))
+    }
+}
+
+impl std::fmt::Display for TxCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward to the inner Display so formatter flags (width, alignment)
+        // survive — see the note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// A quantity of gas units (a block's `gas_used` / `gas_limit`). A newtype
+/// over `u64` so gas can't be silently swapped with a block number, a
+/// timestamp, or a [`GasPrice`] (units vs. price — confusing the two is a
+/// genuine bug).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Gas(u64);
+
+impl Gas {
+    pub const fn new(n: u64) -> Self {
+        Self(n)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Gas {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward to the inner Display so formatter flags (width, alignment)
+        // survive — see the note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// A gas price in wei-per-gas (a block's EIP-1559 `base_fee_per_gas`; later
+/// also effective/priority prices). A newtype over `u64` — alloy's header
+/// carries `base_fee_per_gas: Option<u64>` — kept distinct from [`Gas`]
+/// (price vs. units).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GasPrice(u64);
+
+impl GasPrice {
+    pub const fn new(wei: u64) -> Self {
+        Self(wei)
+    }
+
+    /// The raw wei-per-gas value, for formatting and the `SQLite` boundary.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for GasPrice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forward to the inner Display so formatter flags (width, alignment)
+        // survive — see the note on `ChainId`'s Display.
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+// ============================================================
+// EVM block
+// ============================================================
+
+/// One EVM block: header facts + transaction count. The item type of the
+/// blocks history (`HistStore<EvmBlock, BlockNumber>`); its position is its
+/// own [`number`](Self::number).
+///
+/// All-`Copy` (~136 bytes) so it can be stored directly in the range tree as
+/// the `RangeSpec::Item` — resolving a block is then a pure copy, with no
+/// per-row `SQLite` read (unlike logs' `LogRef` indirection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvmBlock {
+    pub number: BlockNumber,
+    pub hash: BlockHash,
+    pub parent_hash: BlockHash,
+    pub timestamp: Timestamp,
+    pub tx_count: TxCount,
+    pub gas_used: Gas,
+    pub gas_limit: Gas,
+    /// EIP-1559 base fee; `None` on pre-London blocks (and chains without it).
+    pub base_fee: Option<GasPrice>,
+    /// The block's beneficiary (`miner` field in the RPC block).
+    pub miner: Address,
 }
 
 // ============================================================

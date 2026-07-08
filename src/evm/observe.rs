@@ -18,11 +18,18 @@
 //! | Kind | target | span name | fields |
 //! |---|---|---|---|
 //! | RPC call (span) | `chainfold::rpc` | `rpc` | `method: &str` |
+//! | Connection setup (span) | `chainfold::connect` | `connect` | — |
 //! | `SQLite` read (span) | `chainfold::sqlite` | `sqlite` | `op: &str` |
 //! | Cache hit/miss (event) | `chainfold::cache` | — | `layer: &str`, `outcome: &str` |
 //!
 //! Spans carry duration (open → close); a consumer sums it per `method`/`op`.
 //! Cache events are instantaneous counters keyed by `layer` + `outcome`.
+//!
+//! Connect spans ([`ConnectTimingLayer`]) time connection establishment
+//! (DNS + TCP + TLS). A connection is opened lazily by the first request that
+//! needs it, so a connect span *nests inside* that request's RPC span —
+//! consumers must report it separately, never add it to an RPC total (that
+//! would double-count the handshake).
 //!
 //! The wire-level field values are strings (what `tracing`/OTLP want), but the
 //! *emission API* is typed: [`RpcMethod`], [`SqliteOp`], [`CacheLayer`], and
@@ -31,12 +38,17 @@
 //! (spans) / TRACE (events) and costs nothing when no interested subscriber is
 //! installed.
 
-use tracing::{Level, Span};
+use std::task::{Context, Poll};
+
+use tracing::instrument::Instrumented;
+use tracing::{Instrument, Level, Span};
 
 /// Target for per-RPC-call spans. Kept in sync by hand with the literal in
 /// [`rpc_span`] — `tracing`'s `target:` slot only accepts a string literal,
 /// so the const exists for the *subscriber* side to match against.
 pub const RPC_TARGET: &str = "chainfold::rpc";
+/// Target for connection-establishment spans (see [`connect_span`]).
+pub const CONNECT_TARGET: &str = "chainfold::connect";
 /// Target for durable SQLite-read spans (see [`sqlite_span`]).
 pub const SQLITE_TARGET: &str = "chainfold::sqlite";
 /// Target for cache hit/miss events (see [`cache_event`]).
@@ -86,6 +98,7 @@ impl RpcMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SqliteOp {
     GetLogsInRange,
+    GetBlocksInRange,
     GetScannedRanges,
 }
 
@@ -93,6 +106,7 @@ impl SqliteOp {
     pub const fn as_str(self) -> &'static str {
         match self {
             SqliteOp::GetLogsInRange => "get_logs_in_range",
+            SqliteOp::GetBlocksInRange => "get_blocks_in_range",
             SqliteOp::GetScannedRanges => "get_scanned_ranges",
         }
     }
@@ -101,6 +115,7 @@ impl SqliteOp {
     pub fn from_wire(s: &str) -> Option<Self> {
         Some(match s {
             "get_logs_in_range" => SqliteOp::GetLogsInRange,
+            "get_blocks_in_range" => SqliteOp::GetBlocksInRange,
             "get_scanned_ranges" => SqliteOp::GetScannedRanges,
             _ => return None,
         })
@@ -182,6 +197,14 @@ pub fn rpc_span(method: RpcMethod) -> Span {
     tracing::span!(target: "chainfold::rpc", Level::DEBUG, "rpc", method = method.as_str())
 }
 
+/// Open a span around one connection establishment (DNS + TCP + TLS).
+/// Emitted by [`ConnectTimingLayer`]; its open → close duration is the
+/// handshake cost that is otherwise invisible inside the first RPC span on a
+/// fresh connection.
+pub fn connect_span() -> Span {
+    tracing::span!(target: "chainfold::connect", Level::DEBUG, "connect")
+}
+
 /// Open a span around one durable `SQLite` read. Enter it with [`Span::entered`]
 /// around the synchronous read so its duration is captured.
 pub fn sqlite_span(op: SqliteOp) -> Span {
@@ -196,6 +219,51 @@ pub fn cache_event(layer: CacheLayer, outcome: CacheOutcome) {
         layer = layer.as_str(),
         outcome = outcome.as_str(),
     );
+}
+
+/// Tower layer that times connection establishment under a [`connect_span`].
+///
+/// Wrap a client's *connector* with it — e.g.
+/// `reqwest::ClientBuilder::connector_layer(ConnectTimingLayer)` — so every
+/// new connection's DNS + TCP + TLS cost is measured. Pooled requests reuse
+/// established connections and never reach the connector, so the span fires
+/// exactly once per physical connection.
+///
+/// Deliberately reqwest-agnostic: it wraps any [`tower_service::Service`], so
+/// the same layer instruments whatever HTTP stack a consumer builds.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConnectTimingLayer;
+
+impl<S> tower_layer::Layer<S> for ConnectTimingLayer {
+    type Service = ConnectTiming<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        ConnectTiming { inner }
+    }
+}
+
+/// The service [`ConnectTimingLayer`] produces: forwards to `inner`,
+/// instrumenting each connect future with a [`connect_span`].
+#[derive(Debug, Clone)]
+pub struct ConnectTiming<S> {
+    inner: S,
+}
+
+impl<S, Req> tower_service::Service<Req> for ConnectTiming<S>
+where
+    S: tower_service::Service<Req>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = Instrumented<S::Future>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Req) -> Self::Future {
+        self.inner.call(req).instrument(connect_span())
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +354,7 @@ mod tests {
     #[test]
     fn targets_match_literals() {
         assert_eq!(RPC_TARGET, "chainfold::rpc");
+        assert_eq!(CONNECT_TARGET, "chainfold::connect");
         assert_eq!(SQLITE_TARGET, "chainfold::sqlite");
         assert_eq!(CACHE_TARGET, "chainfold::cache");
     }
@@ -304,7 +373,11 @@ mod tests {
         ] {
             assert_eq!(RpcMethod::from_wire(m.as_str()), Some(m));
         }
-        for op in [SqliteOp::GetLogsInRange, SqliteOp::GetScannedRanges] {
+        for op in [
+            SqliteOp::GetLogsInRange,
+            SqliteOp::GetBlocksInRange,
+            SqliteOp::GetScannedRanges,
+        ] {
             assert_eq!(SqliteOp::from_wire(op.as_str()), Some(op));
         }
         for layer in [
@@ -336,6 +409,50 @@ mod tests {
         assert!(spans.contains(&CapturedSpan {
             target: SQLITE_TARGET,
             label: SqliteOp::GetLogsInRange.as_str().to_owned(),
+        }));
+    }
+
+    /// The connector layer emits one connect span per service call — driving
+    /// a wrapped dummy connector to completion must leave a captured span on
+    /// [`CONNECT_TARGET`].
+    #[test]
+    fn connect_timing_layer_emits_connect_span() {
+        use futures_util::FutureExt;
+
+        /// Stand-in for a connector: always ready, resolves immediately.
+        struct DummyConnector;
+        impl tower_service::Service<()> for DummyConnector {
+            type Response = ();
+            type Error = std::convert::Infallible;
+            type Future = std::future::Ready<Result<(), Self::Error>>;
+
+            fn poll_ready(
+                &mut self,
+                _cx: &mut std::task::Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, (): ()) -> Self::Future {
+                std::future::ready(Ok(()))
+            }
+        }
+
+        let cap = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(cap.clone());
+        with_default(subscriber, || {
+            use tower_layer::Layer as _;
+            use tower_service::Service as _;
+            let mut svc = ConnectTimingLayer.layer(DummyConnector);
+            svc.call(())
+                .now_or_never()
+                .expect("ready future completes in one poll")
+                .expect("dummy connector is infallible");
+        });
+        let spans = cap.spans.lock().unwrap();
+        assert!(spans.contains(&CapturedSpan {
+            target: CONNECT_TARGET,
+            label: String::new(),
         }));
     }
 

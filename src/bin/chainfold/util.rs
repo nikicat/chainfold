@@ -1,6 +1,8 @@
+use alloy::network::Ethereum;
 use alloy::primitives::Address;
-use chainfold::arch::{HistStore, Timestamp};
-use chainfold::evm::{EvmEvent, EvmPosition};
+use alloy::providers::Provider;
+use chainfold::arch::Timestamp;
+use chainfold::evm::{BlockCount, BlockNumber, BlockRange, EvmChain, EvmPosition, LogIdx};
 use chrono::NaiveDate;
 
 use crate::cli::EvmArgs;
@@ -21,43 +23,106 @@ pub fn parse_datetime(s: &str) -> Result<Timestamp, String> {
 /// Default `--from-block` when neither date range nor explicit block is given.
 const DEFAULT_FROM_BLOCK: u64 = 22_000_000;
 
-/// Resolve `(from, to)` `EvmPosition` from the user's `--from` / `--to` /
-/// `--from-block` / `--num-blocks` choice. Used by both `events` and
-/// `erc20` subcommands.
-///
-/// Prints date-range info to stdout on the date-range branch — preserves
-/// the CLI output the per-command callers used to emit.
-pub async fn resolve_range(
-    args: &EvmArgs,
-    hs: &HistStore<EvmEvent, EvmPosition>,
-) -> Result<(EvmPosition, EvmPosition), Box<dyn std::error::Error>> {
+/// The user's window selection — the shared interpretation of `--from` /
+/// `--to` vs `--from-block` / `--num-blocks`. Domain types: clap's raw
+/// integers wrap here, once.
+pub enum WindowSel {
+    /// `--from` + `--to` (UTC dates).
+    Dates { from: Timestamp, to: Timestamp },
+    /// `--from-block` (+ `--num-blocks`).
+    Blocks {
+        from_block: BlockNumber,
+        num_blocks: BlockCount,
+    },
+    /// Neither given — each command picks its own default window of
+    /// `num_blocks`.
+    Unspecified { num_blocks: BlockCount },
+}
+
+/// Decode the window flags. Errors on conflicting or zero-sized selections.
+pub fn window_sel(args: &EvmArgs) -> Result<WindowSel, Box<dyn std::error::Error>> {
+    if args.num_blocks == 0 {
+        return Err("--num-blocks must be positive".into());
+    }
+    let num_blocks = BlockCount::new(args.num_blocks);
     match (&args.from, &args.to, args.from_block) {
-        (Some(from_str), Some(to_str), None) => {
-            let from_ts = parse_datetime(from_str)?;
-            let to_ts = parse_datetime(to_str)?;
-            let start = hs.time_pos(from_ts).await?;
-            let end = hs.time_pos(to_ts).await?;
-            println!("  Date range: {from_str} → {to_str}");
-            println!(
-                "  Estimated blocks: {} → {}",
-                start.block + 1,
-                end.block + 1
-            );
-            let end_inclusive = EvmPosition::new(end.block.saturating_add(1).get(), u32::MAX);
-            Ok((start, end_inclusive))
-        }
-        (None, None, Some(from_block)) => Ok(block_range(from_block, args.num_blocks)),
-        (None, None, None) => Ok(block_range(DEFAULT_FROM_BLOCK, args.num_blocks)),
+        (Some(from), Some(to), None) => Ok(WindowSel::Dates {
+            from: parse_datetime(from)?,
+            to: parse_datetime(to)?,
+        }),
+        (None, None, Some(from_block)) => Ok(WindowSel::Blocks {
+            from_block: BlockNumber::new(from_block),
+            num_blocks,
+        }),
+        (None, None, None) => Ok(WindowSel::Unspecified { num_blocks }),
         _ => Err("provide either --from + --to or --from-block, not both".into()),
     }
 }
 
-fn block_range(from_block: u64, num_blocks: u64) -> (EvmPosition, EvmPosition) {
-    let to_block = from_block + num_blocks - 1;
-    let start = if from_block == 0 {
-        EvmPosition::earliest()
-    } else {
-        EvmPosition::new(from_block - 1, u32::MAX)
-    };
-    (start, EvmPosition::new(to_block, u32::MAX))
+/// The inclusive window of `num_blocks` blocks starting at `from_block`.
+pub fn inclusive_range(from_block: BlockNumber, num_blocks: BlockCount) -> BlockRange {
+    BlockRange::new(from_block, from_block + num_blocks - 1)
+}
+
+/// Estimate the inclusive `[from, to]` block window for a date range via
+/// the chain's block-time anchor, printing the CLI estimate note.
+pub async fn estimate_date_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
+    chain: &EvmChain<P>,
+    args: &EvmArgs,
+    from: Timestamp,
+    to: Timestamp,
+) -> Result<BlockRange, Box<dyn std::error::Error>> {
+    let range = BlockRange::new(
+        chain.estimate_block(from).await?,
+        chain.estimate_block(to).await?,
+    );
+    // The Dates arm implies both flags are present.
+    let (from_str, to_str) = (
+        args.from.as_deref().expect("Dates arm has --from"),
+        args.to.as_deref().expect("Dates arm has --to"),
+    );
+    println!("  Date range: {from_str} → {to_str}");
+    println!("  Estimated blocks: {range}");
+    Ok(range)
+}
+
+/// Resolve the inclusive block window for the log commands (`events`,
+/// `erc20`). The unspecified default starts at a fixed block — no head
+/// demand; a fully-cached run stays offline.
+pub async fn resolve_log_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
+    chain: &EvmChain<P>,
+    args: &EvmArgs,
+) -> Result<BlockRange, Box<dyn std::error::Error>> {
+    match window_sel(args)? {
+        WindowSel::Dates { from, to } => estimate_date_range(chain, args, from, to).await,
+        WindowSel::Blocks {
+            from_block,
+            num_blocks,
+        } => Ok(inclusive_range(from_block, num_blocks)),
+        WindowSel::Unspecified { num_blocks } => Ok(inclusive_range(
+            BlockNumber::new(DEFAULT_FROM_BLOCK),
+            num_blocks,
+        )),
+    }
+}
+
+/// The block-space split cut just before `from` — `(cut, …]` starts
+/// iteration at `from`. ZERO doubles as the lower-bound sentinel (the
+/// documented position-0 wart).
+pub fn block_cut(from: BlockNumber) -> BlockNumber {
+    from.checked_sub(1).unwrap_or(BlockNumber::ZERO)
+}
+
+/// The log-space split cut just before `from`.
+pub fn log_cut(from: BlockNumber) -> EvmPosition {
+    match from.checked_sub(1) {
+        None => EvmPosition::earliest(),
+        Some(prev) => EvmPosition::new(prev, LogIdx::MAX),
+    }
+}
+
+/// The log-space cut at the end of block `to` — `(…, cut]` includes every
+/// log up to and including the last one in `to`.
+pub fn log_end(to: BlockNumber) -> EvmPosition {
+    EvmPosition::new(to, LogIdx::MAX)
 }

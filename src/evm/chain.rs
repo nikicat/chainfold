@@ -1,60 +1,70 @@
 //! [`EvmChain`] — the per-chain client entity. Owns the provider, the
-//! durable [`LogCache`], **one** head clock, and vends per-filter log
-//! [`HistStore`]s backed by [`RangeIndexStore<LogSpec>`].
+//! durable [`LogCache`], **one** demand-started head clock, and vends the
+//! per-source histories: logs ([`logs`](EvmChain::logs) /
+//! [`logs_hist`](EvmChain::logs_hist)) and blocks
+//! ([`blocks`](EvmChain::blocks) / [`blocks_hist`](EvmChain::blocks_hist)).
 //!
 //! ## Head clock
 //!
 //! The chain runs at most one head-tracking task (`newHeads` over WS, or an
-//! `eth_blockNumber` poll), regardless of how many log stores exist. Every
-//! head it observes has its block header persisted to the cache *before*
-//! the head event is published — the headers-present invariant that lets
-//! [`LogSpec::resolve`](super::range_index::LogSpec) fill timestamps
-//! synchronously.
+//! `eth_blockNumber` poll), regardless of how many stores exist. Tracking
+//! is **demand-started**: construction performs no RPC and spawns nothing;
+//! the first demand for a tip (a consumer awaiting a snapshot, or a
+//! time-position estimate resolving its anchor) starts the clock exactly
+//! once, and it then runs for the life of the chain and its stores.
 //!
-//! Finality is a chain-wide fact: [`EvmChain::head`] takes a [`Finality`]
-//! tier. Until Phase 7 wires real `best`/`safe` producers, all tiers mirror
-//! `Latest`.
+//! Every head the **ws** clock publishes has its block header persisted to
+//! the cache *before* the head event goes out — the headers-present
+//! invariant that lets [`LogSpec::resolve`](super::range_index::LogSpec)
+//! fill push-delivered timestamps synchronously. Poll heads carry no
+//! header claim: in poll mode every log arrives through the fetcher, which
+//! ensures its own headers.
 //!
-//! ## Per-source log delivery
+//! Explicitly bounded histories ([`EvmChain::blocks_hist`] /
+//! [`EvmChain::logs_hist`]) never demand the head at all, so a
+//! fully-cached walk is completely offline.
 //!
-//! Log delivery stays **per source** (= per filter): one chain-wide log
-//! subscription cannot express `topic1=owner OR topic2=owner` without
-//! refetching everything client-side. Each store created by
-//! [`EvmChain::logs`] gets its own wiring task (see [`wiring`]), tied to
-//! the store's lifetime.
+//! Finality is a chain-wide fact: the store constructors take a
+//! [`Finality`] tier. Until Phase 7 wires real `best`/`safe` producers,
+//! all tiers mirror `Latest`.
 //!
-//! Split across submodules:
-//! - [`config`] — [`EvmChainConfig`], [`SubscribeTransport`], [`Finality`],
-//!   [`LogFilter`], [`HeadEvent`].
+//! Split across submodules — one per source, plus the chain-wide plumbing:
+//! - [`logs`] — the logs source: [`LogFilter`], the `eth_getLogs` fetcher,
+//!   ws push wiring, store + bounded hist.
+//! - [`blocks`] — the blocks source: batched `eth_getBlockByNumber`
+//!   fetcher, store + bounded hist.
+//! - [`config`] — [`EvmChainConfig`], [`SubscribeTransport`], [`Finality`].
 //! - [`head_clock`] — the chain-wide head-tracking task.
-//! - [`wiring`] — the per-store tasks driving `on_events` / `on_bump`.
-//! - [`rpc`] — provider helpers shared by all of the above (header
-//!   ensure, gap-fill fetcher).
+//! - [`wiring`] — the shared per-store task driving `on_bump` off the
+//!   head channel.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
-use tokio::sync::watch;
+use tokio::sync::{OnceCell, watch};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::arch::{HistStore, HistoryError, Signal, Timestamp};
-use crate::evm::cache::{LogCache, compute_filter_hash};
+use crate::arch::{HistoryError, Timestamp};
+use crate::evm::cache::LogCache;
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::range_index::{LogSpec, RangeIndex, RangeIndexStore, TimePosFn};
-use crate::evm::types::{BlockNumber, ChainId, ChunkSize, EvmEvent, EvmPosition, LogIdx};
+use crate::evm::range_index::TipSeed;
+use crate::evm::types::{BlockNumber, ChainId, ChunkSize};
 use crate::shared::Shared;
 
+mod blocks;
 mod config;
 mod head_clock;
-mod rpc;
+mod logs;
+#[cfg(test)]
+mod testkit;
 mod wiring;
 
 pub use config::{
-    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChainConfig, Finality, HeadEvent, LogFilter,
-    SubscribeTransport,
+    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChainConfig, Finality, SubscribeTransport,
 };
+pub use logs::LogFilter;
 
 /// Reconnect backoff bounds shared by the head clock and the ws wiring.
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -67,67 +77,43 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 pub struct EvmChain<P> {
     provider: ChainProvider<P>,
     chunk_size: ChunkSize,
-    follow: Option<SubscribeTransport>,
-
-    /// The single head clock output. Holding only the sender: `.borrow()`
-    /// reads, `.subscribe()` mints receivers for wiring tasks and
-    /// [`Self::head`] stores.
-    head: watch::Sender<HeadEvent>,
-
-    // Wall-clock → block-number estimation. Anchored at the construction
-    // head rather than genesis because some chains use timestamp 0 there.
-    anchor_block: BlockNumber,
-    anchor_time: Timestamp,
     block_time: Duration,
 
-    /// Head-clock task (follow mode only); aborted when the chain drops.
-    _head_clock: Option<AbortOnDropHandle<()>>,
+    /// Shared head machinery: the head channel plus the demand-started
+    /// clock. Every store holds it as its [`TipSeed`], so tracking (and
+    /// the stores it drives) outlives the chain handle itself.
+    seeder: Arc<HeadSeeder<P>>,
+
+    /// Wall-clock → block-number estimation anchor, resolved lazily on the
+    /// first `time_pos` / [`Self::estimate_block`] call.
+    anchor: Arc<OnceCell<TimeAnchor>>,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
-    /// Connect the chain entity: fetches the current head once (one
-    /// `eth_blockNumber` + a cache-first header fetch — per *chain*, not
-    /// per filter), seeds the head clock with it, and, in follow mode,
-    /// spawns the head-tracking task. The durable cache rides in the
-    /// [`ChainProvider`].
-    pub async fn new(
-        provider: ChainProvider<P>,
-        config: EvmChainConfig,
-    ) -> Result<Self, HistoryError> {
-        let head_number = provider.get_block_number().await?;
-        let header = provider.ensure_block_header(head_number).await?;
-
-        let (head, _) = watch::channel(HeadEvent {
-            number: head_number,
-            hash: header.hash,
-        });
-
-        let clock = config.follow.as_ref().map(|transport| {
-            AbortOnDropHandle::new(tokio::spawn(head_clock::run(
-                provider.clone(),
-                transport.clone(),
-                head.clone(),
-            )))
-        });
-
+    /// Create the chain entity. Construction does nothing observable: no
+    /// RPC, no tasks. Head tracking over `config.transport` starts on the
+    /// first demand for a tip (see the module docs). The durable cache
+    /// rides in the [`ChainProvider`].
+    pub fn new(provider: ChainProvider<P>, config: EvmChainConfig) -> Self {
         tracing::debug!(
             chain_id = %provider.chain_id(),
-            head = head_number.get(),
-            follow = ?config.follow,
+            transport = ?config.transport,
             chunk_size = %config.chunk_size,
             "EvmChain created"
         );
 
-        Ok(Self {
+        Self {
+            seeder: Arc::new(HeadSeeder {
+                provider: provider.clone(),
+                transport: config.transport,
+                head: HeadCell::new(),
+                clock: OnceLock::new(),
+            }),
             provider,
             chunk_size: config.chunk_size,
-            follow: config.follow,
-            head,
-            anchor_block: head_number,
-            anchor_time: Timestamp::new(header.timestamp),
             block_time: config.block_time,
-            _head_clock: clock,
-        })
+            anchor: Arc::new(OnceCell::new()),
+        }
     }
 
     pub fn chain_id(&self) -> ChainId {
@@ -144,108 +130,145 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
         &self.provider
     }
 
-    /// Reactive chain head for a finality tier. **All tiers currently
-    /// mirror `Latest`** — `best`/`safe` producers land with Phase 7.
-    pub fn head(&self, tier: Finality) -> Signal<HeadEvent> {
-        let _ = tier; // Latest-only until Phase 7.
-        Signal::new(self.head.subscribe())
+    /// Estimate the block mined around wall-clock `time`, from the lazily
+    /// resolved anchor + the configured block time. The first call demands
+    /// the head (starting tracking if needed) and reads one header
+    /// (cache-first); afterwards it is pure arithmetic.
+    pub async fn estimate_block(&self, time: Timestamp) -> Result<BlockNumber, HistoryError> {
+        let anchor = self.lazy_anchor().get().await?;
+        Ok(estimate_block_from_time(
+            anchor.block,
+            anchor.time,
+            self.block_time,
+            time,
+        ))
     }
 
-    /// One-shot head poll: fetch the latest block number and, if it
-    /// advanced, publish it (persisting the header first). Drives every
-    /// log store's tip in non-follow mode. Returns the (possibly
-    /// unchanged) head number.
-    pub async fn refresh_head(&self) -> Result<BlockNumber, HistoryError> {
-        let n = self.provider.get_block_number().await?;
-        if n > self.head.borrow().number {
-            let header = self.provider.ensure_block_header(n).await?;
-            self.head.send_replace(HeadEvent {
-                number: n,
-                hash: header.hash,
-            });
+    fn lazy_anchor(&self) -> LazyAnchor<P> {
+        LazyAnchor {
+            seeder: self.seeder.clone(),
+            cell: self.anchor.clone(),
         }
-        Ok(self.head.borrow().number)
-    }
-
-    /// Open a log history for `filter` at `tier`. Cheap and synchronous —
-    /// no RPC; cached state materializes lazily, gaps fill on demand. The
-    /// store's tip is seeded from the current head and then driven by this
-    /// chain's head clock (plus, in ws follow mode, a narrow per-filter
-    /// log subscription). All background wiring dies with the returned
-    /// store.
-    pub fn logs(&self, filter: &LogFilter, tier: Finality) -> HistStore<EvmEvent, EvmPosition> {
-        let _ = tier; // Latest-only until Phase 7.
-
-        let filter_hash = compute_filter_hash(&filter.address, &filter.topics);
-        let spec = LogSpec::new(self.cache().share(), filter_hash);
-        let fetcher = rpc::build_fetcher(self.provider.clone(), filter.address, filter.topics);
-        let index = Arc::new(RangeIndex::with_chunk_size(spec, fetcher, self.chunk_size));
-        let store = RangeIndexStore::new(index, self.time_pos_fn());
-
-        // Seed the tip so consumers can iterate immediately in one-shot
-        // mode; the wiring below advances it from there.
-        let head = *self.head.borrow();
-        store.on_bump(tip_pos(head.number));
-
-        let wiring = match &self.follow {
-            None => tokio::spawn(wiring::mirror_head(
-                self.head.subscribe(),
-                Arc::downgrade(&store),
-            )),
-            Some(SubscribeTransport::Poll { .. }) => tokio::spawn(wiring::poll_follow(
-                self.head.subscribe(),
-                Arc::downgrade(&store),
-                head.number,
-            )),
-            Some(SubscribeTransport::Ws) => {
-                // Live pages persist via the async drain (never SQLite on
-                // the delivery path).
-                store.index().attach_drain();
-                tokio::spawn(wiring::ws_follow(
-                    self.provider.clone(),
-                    filter.to_alloy(),
-                    self.head.subscribe(),
-                    Arc::downgrade(&store),
-                    head.number,
-                ))
-            }
-        };
-        store.attach_wiring(AbortOnDropHandle::new(wiring));
-
-        tracing::debug!(
-            chain_id = %self.provider.chain_id(),
-            filter = %filter,
-            filter_hash = %format!("0x{}", hex::encode(&filter_hash.as_slice()[..8])),
-            "log store opened"
-        );
-
-        store.hist_store()
-    }
-
-    fn time_pos_fn(&self) -> TimePosFn<EvmPosition> {
-        let (anchor_block, anchor_time, block_time) =
-            (self.anchor_block, self.anchor_time, self.block_time);
-        Arc::new(move |time: Timestamp| {
-            let block = estimate_block_from_time(anchor_block, anchor_time, block_time, time);
-            // The cut "just before `block`" — iteration after this anchor
-            // starts with the first log in `block`.
-            Ok(match block.checked_sub(1) {
-                None => EvmPosition::earliest(),
-                Some(prev) => EvmPosition {
-                    block: prev,
-                    log_index: LogIdx::MAX,
-                },
-            })
-        })
     }
 }
 
-/// The end-of-block tip position for a head block: a `Hist` ending here
-/// iterates every log up to and including the last one in `n`.
-fn tip_pos(n: BlockNumber) -> EvmPosition {
-    EvmPosition {
-        block: n,
-        log_index: LogIdx::MAX,
+// ============================================================
+// Head machinery
+// ============================================================
+
+/// One observation of the chain head, as published on the internal head
+/// channel by the clock. Heads published by the **ws** clock have their
+/// block header persisted to the cache before the event goes out (the
+/// headers-present invariant for push-delivered logs); poll heads carry no
+/// header claim. Consumers needing the hash read it from the cache by
+/// number (`ensure_block_header`).
+#[derive(Clone, Copy, Debug)]
+struct HeadEvent {
+    number: BlockNumber,
+}
+
+/// The chain-wide head channel: `None` until the first observation;
+/// publishes are monotonic. The chain-level analog of the store's
+/// unset-until-seeded tip.
+#[derive(Clone)]
+struct HeadCell {
+    chan: watch::Sender<Option<HeadEvent>>,
+}
+
+impl HeadCell {
+    fn new() -> Self {
+        Self {
+            chan: watch::channel(None).0,
+        }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<Option<HeadEvent>> {
+        self.chan.subscribe()
+    }
+
+    /// Monotonic publish: a no-op unless `number` advances past the
+    /// current head.
+    fn publish(&self, number: BlockNumber) {
+        self.chan.send_if_modified(|cur| match cur {
+            Some(c) if c.number >= number => false,
+            _ => {
+                *cur = Some(HeadEvent { number });
+                true
+            }
+        });
+    }
+
+    /// Await the first head observation — purely reactive, no fetching.
+    async fn observed(&self) -> BlockNumber {
+        let mut rx = self.subscribe();
+        loop {
+            if let Some(h) = *rx.borrow_and_update() {
+                return h.number;
+            }
+            // `self` holds the sender — the channel cannot close.
+            rx.changed().await.expect("head sender lives with the cell");
+        }
+    }
+}
+
+/// Chain-side [`TipSeed`]: the first demand for a tip starts head tracking
+/// over the configured transport, exactly once; observed heads flow
+/// through the [`HeadCell`] to every store's wiring. Tracking runs until
+/// the chain and all its stores drop (no stop-on-idle yet).
+struct HeadSeeder<P> {
+    provider: ChainProvider<P>,
+    transport: SubscribeTransport,
+    head: HeadCell,
+    clock: OnceLock<AbortOnDropHandle<()>>,
+}
+
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> TipSeed for HeadSeeder<P> {
+    fn request(&self) {
+        self.clock.get_or_init(|| {
+            AbortOnDropHandle::new(tokio::spawn(head_clock::run(
+                self.provider.clone(),
+                self.transport.clone(),
+                self.head.clone(),
+            )))
+        });
+    }
+}
+
+// ============================================================
+// Wall-clock → block estimation
+// ============================================================
+
+/// Anchor for wall-clock → block estimation: a recent `(block, timestamp)`
+/// observation. Anchored at a recent head rather than genesis because some
+/// chains use timestamp 0 there.
+#[derive(Clone, Copy)]
+struct TimeAnchor {
+    block: BlockNumber,
+    time: Timestamp,
+}
+
+/// Lazy shared resolver for the chain's [`TimeAnchor`]: demands the head
+/// (starting tracking if needed), awaits the observation reactively, then
+/// reads the header cache-first — at most one resolution per chain.
+struct LazyAnchor<P> {
+    seeder: Arc<HeadSeeder<P>>,
+    cell: Arc<OnceCell<TimeAnchor>>,
+}
+
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> LazyAnchor<P> {
+    async fn get(&self) -> Result<TimeAnchor, HistoryError> {
+        self.cell
+            .get_or_try_init(|| async {
+                self.seeder.request();
+                let block = self.seeder.head.observed().await;
+                let header = self.seeder.provider.ensure_block_header(block).await?;
+                Ok(TimeAnchor {
+                    block,
+                    time: header.timestamp,
+                })
+            })
+            .await
+            .copied()
     }
 }
 
@@ -264,254 +287,53 @@ fn estimate_block_from_time(
 }
 
 // ============================================================
-// Tests
+// Tests — chain-wide concerns (per-source tests live with the source)
 // ============================================================
 
 #[cfg(test)]
 mod tests {
+    use super::testkit;
+    use super::testkit::{GENESIS, TEST_CHAIN, make_chain, offline_chain, ts, warm_cache};
     use super::*;
-    use crate::arch::{Hist, Position, Positioned};
-    use crate::evm::cache::compute_filter_hash;
-    use crate::evm::types::{BlockHash, FilterHash, LogIdx, Topic};
-    use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U64};
-    use alloy::providers::ProviderBuilder;
-    use alloy::rpc::types::Log;
-    use alloy::transports::mock::Asserter;
-    use futures_util::TryStreamExt;
+    use crate::evm::types::EvmPosition;
 
-    const ADDR: Address = Address::repeat_byte(0x42);
-    const TOPICS: [Option<Topic>; 4] = [None; 4];
-    const GENESIS: Timestamp = Timestamp::new(1_600_000_000);
-    const TEST_CHAIN: ChainId = ChainId::new(1);
-    /// The mock chain head — the one `eth_blockNumber` answer.
-    const HEAD: BlockNumber = BlockNumber::new(200);
-
-    const BH_0: BlockHash = B256::ZERO;
-    const BH_100: BlockHash = B256::repeat_byte(0xA0);
-    const BH_101: BlockHash = B256::repeat_byte(0xA1);
-    const BH_200: BlockHash = B256::repeat_byte(0xA2);
-
-    /// `GENESIS` shifted by `secs` — headers are stamped on a 12 s cadence.
-    const fn ts(secs: u64) -> Timestamp {
-        Timestamp::new(GENESIS.get() + secs)
-    }
-
-    fn make_log(block: BlockNumber, log_index: LogIdx, block_hash: BlockHash) -> Log {
-        let topic0 = B256::from([0xDD; 32]);
-        let data = Bytes::from(vec![0x01, 0x02]);
-        let log_data = LogData::new_unchecked(vec![topic0], data);
-
-        Log {
-            inner: LogInner {
-                address: ADDR,
-                data: log_data,
-            },
-            block_hash: Some(block_hash),
-            block_number: Some(block.get()),
-            block_timestamp: None,
-            transaction_hash: Some(B256::from([0xCC; 32])),
-            transaction_index: Some(0),
-            log_index: Some(log_index.get() as u64),
-            removed: false,
-        }
-    }
-
-    /// Insert a header row; drops to `u64` at the `LogCache` `SQLite` seam.
-    fn insert_header(cache: &LogCache, block: BlockNumber, hash: BlockHash, time: Timestamp) {
-        // Parent hash is irrelevant to these tests — resolve only reads
-        // (hash, timestamp).
-        cache
-            .insert_block_header(block.get(), &hash, &B256::ZERO, time.get())
-            .unwrap();
-    }
-
-    fn warm_cache() -> (Shared<LogCache>, FilterHash) {
-        let cache = Shared::new(LogCache::open_in_memory().unwrap());
-        let fh = compute_filter_hash(&ADDR, &TOPICS);
-
-        insert_header(&cache, BlockNumber::ZERO, BH_0, GENESIS);
-        insert_header(&cache, BlockNumber::new(100), BH_100, ts(1200));
-        insert_header(&cache, BlockNumber::new(101), BH_101, ts(1212));
-        insert_header(&cache, HEAD, BH_200, ts(2400));
-
-        let logs = vec![
-            make_log(BlockNumber::new(100), LogIdx::ZERO, BH_100),
-            make_log(BlockNumber::new(100), LogIdx::new(1), BH_100),
-            make_log(BlockNumber::new(101), LogIdx::ZERO, BH_101),
-        ];
-        cache.insert_logs(&fh, &logs).unwrap();
-        cache
-            .record_scanned_range(&fh, 0, HEAD.get(), &BH_200)
-            .unwrap();
-        (cache, fh)
-    }
-
-    /// One-shot chain over a mock provider: the only RPC is the head
-    /// `eth_blockNumber` at construction (the anchor header for [`HEAD`]
-    /// is served by the warm cache).
-    async fn make_chain(
-        cache: Shared<LogCache>,
-    ) -> EvmChain<impl Provider<Ethereum> + Clone + 'static> {
-        let asserter = Asserter::new();
-        asserter.push_success(&U64::from(HEAD.get()));
-        let provider = ProviderBuilder::default().connect_mocked_client(asserter);
-        let provider = ChainProvider::new(provider, TEST_CHAIN, cache);
-        EvmChain::new(
-            provider,
-            EvmChainConfig {
-                chunk_size: ChunkSize::new(100),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap()
-    }
-
-    fn log_store<P>(chain: &EvmChain<P>) -> HistStore<EvmEvent, EvmPosition>
-    where
-        P: Provider<Ethereum> + Clone + Send + Sync + 'static,
-    {
-        chain.logs(&LogFilter::address(ADDR), Finality::Latest)
-    }
-
-    /// Iterate a Hist into a Vec<Positioned> with no in-flight fetcher.
-    async fn collect(hist: Hist<EvmEvent, EvmPosition>) -> Vec<Positioned<EvmEvent, EvmPosition>> {
-        hist.iter().try_collect().await.unwrap()
-    }
-
+    /// Construction (and opening stores) is completely offline: the mock
+    /// provider has no responses queued, so any RPC would fail loudly.
     #[tokio::test]
-    async fn iter_walks_all_logs_in_window() {
+    async fn construction_and_store_open_are_offline() {
         let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        // The store's tip is seeded from the chain head at logs().
-        let hist = log_store(&chain).next().await;
-        assert_eq!(*hist.end(), tip_pos(HEAD));
-
-        let items = collect(hist).await;
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].item.position(), EvmPosition::new(100, 0));
-        assert_eq!(items[1].item.position(), EvmPosition::new(100, 1));
-        assert_eq!(items[2].item.position(), EvmPosition::new(101, 0));
+        let chain = offline_chain(cache);
+        // Opening stores is side-effect-free — nothing demands the head.
+        let _logs = chain.logs(&LogFilter::address(testkit::ADDR), Finality::Latest);
+        let _blocks = chain.blocks(Finality::Latest);
     }
 
+    /// The anchor resolves lazily: the first estimate demands the head
+    /// (the clock's first poll consumes the one queued `eth_blockNumber`)
+    /// and reads the cached header; afterwards it is pure arithmetic.
     #[tokio::test]
-    async fn split_clamps_anchor_to_window() {
+    async fn estimate_block_resolves_anchor_on_demand() {
         let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        let hist = log_store(&chain).next().await;
-
-        // Split past end ⇒ head = full, tail = empty.
-        let (head, tail) = hist.split(EvmPosition::new(9999, 0));
-        assert_eq!(collect(head).await.len(), 3);
-        assert!(tail.is_empty());
-
-        // Split before start ⇒ head = empty, tail = full.
-        let (head, tail) = hist.split(EvmPosition::new(0, 0));
-        assert!(head.is_empty());
-        assert_eq!(collect(tail).await.len(), 3);
-
-        // Split between logs.
-        let (head, tail) = hist.split(EvmPosition::new(100, 0));
-        let head_items = collect(head).await;
-        let tail_items = collect(tail).await;
-        assert_eq!(head_items.len(), 1);
-        assert_eq!(head_items[0].item.position(), EvmPosition::new(100, 0));
-        assert_eq!(tail_items.len(), 2);
-        assert_eq!(tail_items[0].item.position(), EvmPosition::new(100, 1));
-    }
-
-    #[tokio::test]
-    async fn iter_empty_window_yields_nothing() {
-        let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        let hist = log_store(&chain).next().await;
-        // Zero-width window via two splits at the same cut.
-        let cut = EvmPosition::new(150, 0);
-        let (_, tail) = hist.split(cut);
-        let (empty, _) = tail.split(cut);
-        assert!(empty.is_empty());
-        assert!(collect(empty).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn iter_picks_up_timestamp_from_store() {
-        let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        let items = collect(log_store(&chain).next().await).await;
-        // Headers inserted by warm_cache: block 100 @ ts(1200), 101 @ ts(1212).
-        assert_eq!(items[0].item.timestamp, ts(1200));
-        assert_eq!(items[2].item.timestamp, ts(1212));
-    }
-
-    /// When a log carries its own `block_timestamp`, resolve stamps the event
-    /// from it and never reads a block header — proven by leaving no header
-    /// cached for that block and no `eth_getBlockByNumber` queued on the mock
-    /// provider (the sync resolve would error on the missing header).
-    #[tokio::test]
-    async fn iter_uses_log_block_timestamp_without_header_fetch() {
-        let cache = Shared::new(LogCache::open_in_memory().unwrap());
-        let fh = compute_filter_hash(&ADDR, &TOPICS);
-        // Anchor header (HEAD) so construction is fully cache-served.
-        insert_header(&cache, BlockNumber::ZERO, BH_0, GENESIS);
-        insert_header(&cache, HEAD, BH_200, ts(2400));
-        // A log at block 150 WITH a timestamp and deliberately NO header for 150.
-        let block_150 = BlockNumber::new(150);
-        let mut log = make_log(block_150, LogIdx::ZERO, B256::repeat_byte(0x9A));
-        log.block_timestamp = Some(ts(1800).get());
-        cache.insert_logs(&fh, std::slice::from_ref(&log)).unwrap();
-        cache
-            .record_scanned_range(&fh, 0, HEAD.get(), &BH_200)
-            .unwrap();
-
-        let chain = make_chain(cache).await;
-        let hist = log_store(&chain).next().await;
-        let (_, tail) = hist.split(tip_pos(block_150 - 1));
-        let (window, _) = tail.split(tip_pos(block_150));
-        let items = collect(window).await;
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].item.timestamp, ts(1800));
-    }
-
-    #[tokio::test]
-    async fn position_marshal_round_trips_via_store_load() {
-        let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        let store = log_store(&chain);
-
-        let p = EvmPosition::new(123_456_789, 42);
-        let value = p.marshal();
-        // Deserialization lives on the store, not the position.
-        let restored = store.load(value).expect("load");
-        assert_eq!(restored, p);
-    }
-
-    #[tokio::test]
-    async fn time_pos_estimates_block() {
-        let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        let store = log_store(&chain);
+        let chain = make_chain(cache);
         // Anchor: HEAD @ ts(2400); block_time = 12s. 1200 s earlier
-        // → 100 blocks before the anchor → the cut "just before block 100".
-        let pos = store.time_pos(ts(1200)).await.unwrap();
-        assert_eq!(pos, tip_pos(BlockNumber::new(99)));
-    }
-
-    #[tokio::test]
-    async fn hist_store_next_uses_current_head() {
-        let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        let hist = log_store(&chain).next().await;
-        assert_eq!(*hist.start(), EvmPosition::earliest());
-        assert_eq!(*hist.end(), tip_pos(HEAD));
-        // The chain-level head store agrees.
-        assert_eq!(chain.head(Finality::Latest).get().number, HEAD);
+        // → 100 blocks before the anchor.
+        assert_eq!(
+            chain.estimate_block(ts(1200)).await.unwrap(),
+            BlockNumber::new(100)
+        );
+        // Second call: no head demand, no header read — the queue is
+        // empty, so an RPC here would error.
+        assert_eq!(
+            chain.estimate_block(GENESIS).await.unwrap(),
+            BlockNumber::ZERO
+        );
     }
 
     /// `chain_id` stays on `EvmChain`, never on positions.
     #[tokio::test]
     async fn chain_id_is_on_chain_not_position() {
         let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
+        let chain = make_chain(cache);
         assert_eq!(chain.chain_id(), TEST_CHAIN);
         // EvmPosition has only block + log_index — no chain field.
         let p = EvmPosition::new(100, 0);
@@ -519,73 +341,6 @@ mod tests {
         assert!(
             !s.contains("chain"),
             "EvmPosition Debug should not mention chain: {s}"
-        );
-    }
-
-    /// Guardrail for the "minimize RPC" guarantee: a fully-cached walk must
-    /// issue **zero** `eth_getLogs`. Counts the observability contract's RPC
-    /// spans rather than timing, so a refactor that reintroduces a network
-    /// round-trip on the warm path fails here, loudly.
-    #[tokio::test]
-    async fn warm_walk_issues_zero_get_logs() {
-        use std::sync::Arc as StdArc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        use tracing::Subscriber;
-        use tracing::field::{Field, Visit};
-        use tracing::span::{Attributes, Id};
-        use tracing::subscriber::set_default;
-        use tracing_subscriber::layer::{Context, Layer};
-        use tracing_subscriber::prelude::*;
-        use tracing_subscriber::registry::LookupSpan;
-
-        use crate::evm::observe::{RPC_TARGET, RpcMethod};
-
-        #[derive(Clone, Default)]
-        struct GetLogsCounter(StdArc<AtomicUsize>);
-
-        impl<S> Layer<S> for GetLogsCounter
-        where
-            S: Subscriber + for<'a> LookupSpan<'a>,
-        {
-            fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
-                if attrs.metadata().target() != RPC_TARGET {
-                    return;
-                }
-                #[derive(Default)]
-                struct MethodField(Option<String>);
-                impl Visit for MethodField {
-                    fn record_str(&mut self, field: &Field, value: &str) {
-                        if field.name() == "method" {
-                            self.0 = Some(value.to_owned());
-                        }
-                    }
-                    fn record_debug(&mut self, _f: &Field, _v: &dyn std::fmt::Debug) {}
-                }
-                let mut found = MethodField::default();
-                attrs.record(&mut found);
-                if found.0.as_deref() == Some(RpcMethod::GetLogs.as_str()) {
-                    self.0.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-
-        let (cache, _) = warm_cache();
-        let chain = make_chain(cache).await;
-        let hist = log_store(&chain).next().await;
-
-        // Install the counter only around the walk — the chain's setup RPC
-        // (block_number) happens before this and isn't counted.
-        let counter = GetLogsCounter::default();
-        let guard = set_default(tracing_subscriber::registry().with(counter.clone()));
-        let items = collect(hist).await;
-        drop(guard);
-
-        assert_eq!(items.len(), 3);
-        assert_eq!(
-            counter.0.load(Ordering::Relaxed),
-            0,
-            "a fully-cached walk must not issue eth_getLogs"
         );
     }
 }

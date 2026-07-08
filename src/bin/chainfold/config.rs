@@ -11,10 +11,27 @@ use crate::chains::{self, ChainSelector};
 /// the same `${VAR:-fallback}` rules as a real config file, so unset env
 /// vars yield empty strings (which downstream getters like
 /// `Config::alchemy_url` treat as "not configured").
-const DEFAULT_CONFIG_TOML: &str = r#"
+///
+/// Carries every schema default explicitly, so the resolved config (what
+/// `config show` prints) states each field's effective value. The typed
+/// accessors keep their code-side fallbacks as backstops;
+/// `default_config_matches_code_defaults` pins the two in sync. Runtime
+/// overrides that outrank the config file (`CHAINFOLD_CHAIN`,
+/// `--chain`/`--chain-id`) deliberately do NOT appear here — this is the
+/// config-file layer only.
+fn default_config_toml() -> String {
+    format!(
+        r#"
 [provider.alchemy]
-api_key = "${ALCHEMY_KEY:-}"
-"#;
+api_key = "${{ALCHEMY_KEY:-}}"
+
+[evm]
+chain_id_check = "verify"
+default_chain = "{}"
+"#,
+        chains::DEFAULT_CHAIN
+    )
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -90,7 +107,7 @@ pub struct EvmConfig {
 /// Whether to confirm the RPC serves the requested chain. A closed choice
 /// rather than a bare bool, so the config reads `"verify"` / `"trust"` instead
 /// of a `true`/`false` whose meaning you have to remember.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChainIdCheck {
     /// Cross-check the RPC's reported chain id against the requested chain
@@ -118,68 +135,50 @@ pub struct EtherscanConfig {
 }
 
 impl Config {
-    /// Load config from `--config` path, or search default locations.
-    pub fn load(explicit_path: Option<&Path>) -> Result<Self, ConfigError> {
-        if let Some(p) = explicit_path {
-            return Self::load_from(p);
-        }
-
-        let candidates = Self::default_paths();
-        for path in &candidates {
-            if path.exists() {
-                return Self::load_from(path);
-            }
-        }
-
-        Err(ConfigError::NotFound {
-            searched: candidates,
-        })
-    }
-
     /// Load config, layering the user's config on top of the hardcoded
     /// default so that any fields the user left unset inherit defaults.
     ///
     /// 1. Parse the built-in default (env-interpolated).
     /// 2. If a user file exists, parse it (also env-interpolated) and merge
     ///    it over the default. Missing file is fine — the default stands
-    ///    alone. Any other error (parse, I/O) propagates.
+    ///    alone. Any other error (parse, I/O, explicit `--config` path
+    ///    absent) propagates.
     /// 3. Deserialize the merged TOML into `Config`.
     ///
     /// The merge is a uniform deep-merge over `toml::Value`s; this module
     /// has no field-specific knowledge of what's in the schema.
     pub fn load_optional(explicit_path: Option<&Path>) -> Result<Self, ConfigError> {
-        Self::load_optional_with(explicit_path, &real_env)
+        Self::load_resolved(explicit_path).map(|(config, _)| config)
     }
 
-    /// [`Self::load_optional`] with an injectable environment lookup. Tests
+    /// [`Self::load_optional`], also reporting where the user config came
+    /// from: the file merged over the defaults, or `None` when the resolved
+    /// config is the built-in default alone. Backs `config show`/`check`.
+    pub fn load_resolved(
+        explicit_path: Option<&Path>,
+    ) -> Result<(Self, Option<PathBuf>), ConfigError> {
+        Self::load_resolved_with(explicit_path, &real_env)
+    }
+
+    /// [`Self::load_resolved`] with an injectable environment lookup. Tests
     /// pass a fixed map; production passes [`real_env`].
-    fn load_optional_with(
+    fn load_resolved_with(
         explicit_path: Option<&Path>,
         env: EnvLookup,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<(Self, Option<PathBuf>), ConfigError> {
         let mut merged = parse_default_toml(env)?;
-        match load_user_toml(explicit_path, env) {
-            Ok(Some(user)) => merge_toml(&mut merged, user),
-            Ok(None) | Err(ConfigError::NotFound { .. }) => {}
-            Err(e) => return Err(e),
-        }
-        toml::Value::try_into(merged).map_err(|source| ConfigError::Parse {
+        let source = match load_user_toml(explicit_path, env)? {
+            Some((path, user)) => {
+                merge_toml(&mut merged, user);
+                Some(path)
+            }
+            None => None,
+        };
+        let config = toml::Value::try_into(merged).map_err(|source| ConfigError::Parse {
             path: PathBuf::from("<merged config>"),
             source,
-        })
-    }
-
-    fn load_from(path: &Path) -> Result<Self, ConfigError> {
-        let raw = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
-            path: path.to_owned(),
-            source: e,
         })?;
-        let interpolated = interpolate_env(&raw, &real_env)?;
-        let config: Config = toml::from_str(&interpolated).map_err(|e| ConfigError::Parse {
-            path: path.to_owned(),
-            source: e,
-        })?;
-        Ok(config)
+        Ok((config, source))
     }
 
     fn default_paths() -> Vec<PathBuf> {
@@ -232,30 +231,68 @@ impl Config {
         self.evm.as_ref()?.default_chain.as_ref()
     }
 
-    /// Print resolved config with API key masked.
-    pub fn show(&self) {
-        println!("[provider]");
-        match &self.provider {
-            Some(p) => match &p.alchemy {
-                Some(a) => {
-                    println!("  alchemy.api_key = {}", mask(&a.api_key));
-                }
-                None => println!("  (no alchemy config)"),
+    /// Print the effective config as TOML — validated, defaults filled in,
+    /// API keys masked. What prints is what the run paths consume, not what
+    /// the config file says. `source` is the user file that was merged over
+    /// the built-in defaults, if one was found.
+    pub fn show(&self, source: Option<&Path>) {
+        match source {
+            Some(p) => println!("# config file: {}", p.display()),
+            None => println!("# no config file found — using built-in defaults"),
+        }
+        let toml = toml::to_string_pretty(&self.effective())
+            .expect("the effective config is a plain table");
+        print!("{toml}");
+    }
+
+    /// The serializable view behind [`Self::show`]: every field routed
+    /// through the same accessor the run paths call, so the dump reflects
+    /// effective values. Unset optionals are omitted (TOML has no null);
+    /// API keys are masked.
+    fn effective(&self) -> EffectiveConfig {
+        EffectiveConfig {
+            provider: self.alchemy_api_key().map(|key| EffectiveProvider {
+                alchemy: EffectiveApiKey { api_key: mask(key) },
+            }),
+            etherscan: self
+                .etherscan_api_key()
+                .filter(|key| !key.is_empty())
+                .map(|key| EffectiveApiKey { api_key: mask(key) }),
+            evm: EffectiveEvm {
+                chain_id_check: self.chain_id_check(),
+                default_chain: self
+                    .default_chain()
+                    .map_or_else(|| chains::DEFAULT_CHAIN.to_owned(), ToString::to_string),
             },
-            None => println!("  (no provider config)"),
-        }
-        println!("[etherscan]");
-        match &self.etherscan {
-            Some(e) => println!("  api_key = {}", mask(&e.api_key)),
-            None => println!("  (no etherscan config)"),
-        }
-        println!("[evm]");
-        println!("  chain_id_check = {:?}", self.chain_id_check());
-        match self.default_chain() {
-            Some(sel) => println!("  default_chain  = {sel}"),
-            None => println!("  default_chain  = (unset → ethereum)"),
         }
     }
+}
+
+/// [`Config::effective`]'s output shape — mirrors the config schema so the
+/// dump pastes back in as a valid config file.
+#[derive(serde::Serialize)]
+struct EffectiveConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<EffectiveProvider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    etherscan: Option<EffectiveApiKey>,
+    evm: EffectiveEvm,
+}
+
+#[derive(serde::Serialize)]
+struct EffectiveProvider {
+    alchemy: EffectiveApiKey,
+}
+
+#[derive(serde::Serialize)]
+struct EffectiveApiKey {
+    api_key: String,
+}
+
+#[derive(serde::Serialize)]
+struct EffectiveEvm {
+    chain_id_check: ChainIdCheck,
+    default_chain: String,
 }
 
 /// Deserialize `[evm] default_chain` into an optional [`ChainSelector`], mapping
@@ -330,21 +367,21 @@ fn interpolate_env(input: &str, env: EnvLookup) -> Result<String, ConfigError> {
 
 /// Parse the built-in default TOML into a `toml::Value` (env-interpolated).
 fn parse_default_toml(env: EnvLookup) -> Result<toml::Value, ConfigError> {
-    let interpolated = interpolate_env(DEFAULT_CONFIG_TOML, env)?;
+    let interpolated = interpolate_env(&default_config_toml(), env)?;
     toml::from_str(&interpolated).map_err(|source| ConfigError::Parse {
         path: PathBuf::from("<built-in default>"),
         source,
     })
 }
 
-/// Read and parse the user's config (if any) as a `toml::Value`. Returns
-/// `Ok(None)` only when no file was found at the default search locations
-/// and no explicit path was given; an explicit path that doesn't exist is
-/// still surfaced as `NotFound` by `Config::load`.
+/// Read and parse the user's config (if any) as a `toml::Value`, tagged
+/// with the path it was read from. Returns `Ok(None)` only when no file was
+/// found at the default search locations and no explicit path was given; an
+/// explicit path that doesn't exist is a `NotFound` error.
 fn load_user_toml(
     explicit_path: Option<&Path>,
     env: EnvLookup,
-) -> Result<Option<toml::Value>, ConfigError> {
+) -> Result<Option<(PathBuf, toml::Value)>, ConfigError> {
     let Some(path) = find_config_path(explicit_path)? else {
         return Ok(None);
     };
@@ -358,13 +395,13 @@ fn load_user_toml(
             path: path.clone(),
             source,
         })?;
-    Ok(Some(value))
+    Ok(Some((path, value)))
 }
 
-/// Resolve which config file to read, if any. Mirrors `Config::load`'s
-/// search behavior but returns `Ok(None)` instead of `NotFound` when no
-/// default-path file exists, since `load_optional` treats "no user file"
-/// as benign.
+/// Resolve which config file to read, if any. Searches the default
+/// locations but returns `Ok(None)` instead of `NotFound` when no
+/// default-path file exists, since the load path treats "no user file"
+/// as benign. An explicit path is never searched around: absent → error.
 fn find_config_path(explicit_path: Option<&Path>) -> Result<Option<PathBuf>, ConfigError> {
     if let Some(p) = explicit_path {
         if p.exists() {
@@ -562,7 +599,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[etherscan]\napi_key = \"es-key\"\n").expect("write");
 
-        let config = Config::load_optional_with(
+        let (config, source) = Config::load_resolved_with(
             Some(&path),
             &env_map(&[("ALCHEMY_KEY", "from-default-abc")]),
         )
@@ -581,6 +618,7 @@ mod tests {
             Some("es-key"),
             "user's etherscan must be preserved"
         );
+        assert_eq!(source.as_deref(), Some(path.as_path()), "source reported");
     }
 
     #[test]
@@ -615,7 +653,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[provider.alchemy]\napi_key = \"user-explicit\"\n").expect("write");
 
-        let config = Config::load_optional_with(
+        let (config, _) = Config::load_resolved_with(
             Some(&path),
             &env_map(&[("ALCHEMY_KEY", "should-not-be-used")]),
         )
@@ -629,5 +667,63 @@ mod tests {
             Some("user-explicit"),
             "user's explicit api_key must override env-derived default"
         );
+    }
+
+    #[test]
+    fn load_resolved_explicit_missing_path_errors() {
+        // An explicit --config pointing nowhere must error, not silently
+        // fall back to defaults (it used to be swallowed).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nope.toml");
+        let err = Config::load_resolved_with(Some(&path), &env_map(&[]))
+            .expect_err("missing explicit path must error");
+        assert!(matches!(err, ConfigError::NotFound { ref searched } if searched == &[path]));
+    }
+
+    #[test]
+    fn default_config_matches_code_defaults() {
+        // The baked-in [evm] defaults must agree with the code-side
+        // backstops (ChainIdCheck::default(), chains::DEFAULT_CHAIN) —
+        // `config show` prints the former, the run paths fall back to the
+        // latter when a user config force-unsets a field.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("write empty user config");
+
+        let (config, _) =
+            Config::load_resolved_with(Some(&path), &env_map(&[])).expect("defaults load");
+        assert_eq!(config.chain_id_check(), ChainIdCheck::default());
+        assert_eq!(
+            config.default_chain().map(ToString::to_string).as_deref(),
+            Some(chains::DEFAULT_CHAIN)
+        );
+        assert_eq!(
+            config.alchemy_api_key(),
+            None,
+            "unset ALCHEMY_KEY yields no alchemy provider"
+        );
+    }
+
+    #[test]
+    fn effective_dump_masks_keys_and_fills_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("write empty user config");
+
+        let (config, _) =
+            Config::load_resolved_with(Some(&path), &env_map(&[("ALCHEMY_KEY", "secret-key-123")]))
+                .expect("load");
+        let dump = toml::to_string_pretty(&config.effective()).expect("serialize");
+        assert!(
+            dump.contains("api_key = \"sec...123\""),
+            "api key must print masked: {dump}"
+        );
+        assert!(
+            !dump.contains("secret-key-123"),
+            "raw key must not leak: {dump}"
+        );
+        assert!(!dump.contains("[etherscan]"), "unset section omitted");
+        assert!(dump.contains("chain_id_check = \"verify\""), "{dump}");
+        assert!(dump.contains("default_chain = \"ethereum\""), "{dump}");
     }
 }

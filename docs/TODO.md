@@ -20,12 +20,33 @@ lives in git history and in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   skips (`decode: bool`, chain-identifier lookup strings).
 - **CLI** — `ExitCode` + `Display` error rendering, `chains list`, testnet/
   red-flag advisories, default chain = `ethereum`, end-to-end `ChainId` typing.
+- **EVM blocks source** — `BlockSpec` (2nd `RangeSpec` after `LogSpec`) →
+  `chain.blocks(tier) -> HistStore<EvmBlock, BlockNumber>`; own `cached_blocks`
+  table + typed `ScanPartition::Blocks` coverage; batched `eth_getBlockByNumber`
+  fetcher; `evm blocks list` CLI (windowed table + `--follow`/`--reverse`). The
+  reference histories-first read. Along the way: `BlockHash`/`TxHash` promoted
+  to real newtypes, `FromSql`/`ToSql` + name-based row reads across the cache,
+  and a `snapshots()` busy-loop fix (emit-on-advance).
 - **R6 — shared-index concurrency tests** — `RangeIndex` walk under true
   parallelism (multi-thread runtime), disjoint/overlapping gaps (singleflight
   tiles the union, no double-fetch), and reader-vs-writer (`insert_page` racing
   a mid-walk `items()`: no dup / no drop / no panic). Test suite split out to
   `src/evm/range_index/tests.rs`. Stretch goal **not** done: a `loom` model of
   the singleflight handshake (needs a sync analog of the async `Notify` path).
+- **Demand-started head tracking + bounded hists** — `EvmChain::new` is sync,
+  infallible and RPC-free; the head clock (poll/ws, `EvmChainConfig::transport`
+  — the `follow: Option<_>` "one-shot chain" mode is gone) starts exactly once
+  on the first tip demand (store `TipSeed` signal or the lazy `time_pos`
+  anchor) and runs until chain + stores drop. No bare-head API: `head(tier)` /
+  `refresh_head()` deleted (the head is the snapshot's `end()`), `HeadEvent`
+  internal + hash-less (ws coverage pages read hashes via
+  `ensure_block_header`). New `logs_hist(&filter, range)` /
+  `blocks_hist(range)` return head-free bounded `Hist`s — a warm
+  `--from-block` CLI query is fully offline (0 RPC; was 2 + a guaranteed
+  `block_header` miss). `TimePosFn` closure → `TimePos` trait; new `TipSeed`
+  trait; `chain.rs` split into per-source `chain/logs.rs` + `chain/blocks.rs`;
+  `BlockRange` got `Display`; CLI resolvers return `BlockRange` and one-shot
+  paths use the bounded hists ("last N" = snapshot + `split(tip − N)`).
 
 ---
 
@@ -54,6 +75,47 @@ memory. That's the `loom` model, and it's the one genuinely open R6 piece.
 
 Stretch goal; the behavioural tests are the load-bearing coverage.
 
+## Log fork tests — remove the real-RPC dependency
+
+Three `#[ignore]` integration suites still fork mainnet via
+`fork_mainnet(FORK_BLOCK)`, so anvil proxies `eth_getLogs` /
+`eth_getBlockByNumber` to a real upstream — flaky and rate-limited without a
+paid `MAINNET_RPC_URL` (free-tier Alchemy caps `eth_getLogs` at a 10-block
+range; the public fallback throttles):
+
+- `tests/cache_layering.rs::warm_store_then_drop_index_then_reopen` — cold/warm
+  USDC `Transfer` walk.
+- `tests/owned_erc20.rs` — the two `OwnedErc20` merge cases.
+- `tests/anvil_smoke.rs::fork_mainnet_reads_usdc_total_supply` — `totalSupply`
+  read at the pinned block.
+
+The blocks suite (`tests/blocks_history.rs`) was already converted to a plain
+`local()` anvil (mine synthetic tx-bearing blocks — no upstream). The log suites
+are harder because they validate decoding of **real mainnet USDC data** at a
+pinned block. To make them offline, deploy a mock ERC20 on local anvil and emit
+`Transfer`s (via `alloy::sol!` + a wallet-signing provider), then assert against
+the emitted events instead of real USDC. Trade-off: loses "real chain data at
+block N" coverage; the point becomes the cache/merge machinery, which is what
+these actually test. Keep one thin fork smoke test (behind an env gate) if real
+end-to-end coverage is still wanted.
+
+## Time anchor from the newest cached header — offline dated queries
+
+`--from`/`--to` queries resolve the wall-clock→block anchor by demanding the
+head and reading its header (`LazyAnchor` in `chain.rs`): one
+`eth_blockNumber` + one `eth_getBlockByNumber` per dated run, even fully
+cached. Extrapolation doesn't need the *current* head — any recent anchor
+works. Add a `LogCache` read for the newest `cached_block_headers` row and
+let `LazyAnchor` prefer it (fall back to the head demand on an empty cache):
+warm dated queries become offline like the `--from-block` path.
+
+## Head-clock stop-on-idle — deliberately deferred
+
+Tracking starts on first demand and then runs until the chain and all its
+stores drop — there is no stop when consumers go away (user call: "keep it
+one-shot for a while"). Revisit if long-lived apps with bursty consumption
+show the idle poll to matter.
+
 ## R8+ — (incoming)
 
 _Reserved for additional reactive-core points from the user._
@@ -67,6 +129,7 @@ width specifiers, scattered across several modules with no shared helper:
 - `stats.rs` — the `--stats` session summary (column-aligned RPC/cache rows).
 - `fmt.rs::format_amount` — `whole_width`/`frac_width` numeric padding.
 - `evm/erc20.rs`, `evm/events.rs` — per-row transfer/event renderers.
+- `evm/blocks.rs` — the `blocks list` table (`print_header`/`print_block`).
 - `config.rs::show` — key/value listing.
 
 Each picks its own widths and alignment by hand, so columns don't line up

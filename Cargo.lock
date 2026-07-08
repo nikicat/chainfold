@@ -1318,6 +1318,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
 ]

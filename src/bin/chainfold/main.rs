@@ -63,13 +63,14 @@ fn stats_env_enabled() -> bool {
 async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
         Command::Config { action } => {
-            let config = Config::load(cli.config.as_deref().map(std::path::Path::new))?;
+            let (config, source) =
+                Config::load_resolved(cli.config.as_deref().map(std::path::Path::new))?;
             match action {
                 ConfigCommand::Show => {
-                    config.show();
+                    config.show(source.as_deref());
                 }
                 ConfigCommand::Check => {
-                    config.show();
+                    config.show(source.as_deref());
                     println!("\nConfig is valid.");
                     // Could add RPC connectivity test here later
                 }
@@ -79,7 +80,7 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             ChainsCommand::List(list_args) => {
                 let resolver = ChainResolver::load_or_fetch().await?;
                 let filter = ListFilter {
-                    testnet_only: list_args.testnet,
+                    include_testnets: list_args.testnets,
                     alchemy_only: list_args.alchemy_supported,
                 };
                 print_chain_list(&resolver.list(filter));
@@ -90,8 +91,8 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             evm::run(
                 &config,
                 evm_args,
-                Direction::from_reverse(cli.reverse),
-                FollowMode::from_follow(cli.follow),
+                Direction::from_reverse(evm_args.reverse),
+                FollowMode::from_follow(evm_args.follow),
             )
             .await?;
         }

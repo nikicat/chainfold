@@ -19,7 +19,7 @@ use alloy::providers::ProviderBuilder;
 use chainfold::Shared;
 use chainfold::evm::{
     ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache,
-    LogFilter, OwnedErc20, TRANSFER_TOPIC, Topic,
+    LogFilter, OwnedErc20, SubscribeTransport, TRANSFER_TOPIC, Topic,
 };
 use chainfold::merge::MergedItem;
 use futures_util::StreamExt;
@@ -33,7 +33,9 @@ use common::{
 const TEST_CONFIG: EvmChainConfig = EvmChainConfig {
     chunk_size: ChunkSize::new(10),
     block_time: Duration::from_secs(12),
-    follow: None,
+    transport: SubscribeTransport::Poll {
+        interval: Duration::from_secs(2),
+    },
 };
 
 #[tokio::test]
@@ -51,9 +53,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");
-    let chain = EvmChain::new(provider, TEST_CONFIG)
-        .await
-        .expect("EvmChain::new");
+    let chain = EvmChain::new(provider, TEST_CONFIG);
 
     // Phase A — broad filter to discover an active owner in the window.
     let broad = chain.logs(
@@ -103,8 +103,9 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
         "first transfer's from must appear in its own filter"
     );
 
-    // Phase B — same range via OwnedErc20. The chain head was fetched at
-    // construction, so no tip refresh is needed for a one-shot walk.
+    // Phase B — same range via OwnedErc20. Awaiting the merged snapshot
+    // demands the head (chain-wide singleflight), so no explicit tip
+    // refresh is needed for a one-shot walk.
     let owned = OwnedErc20::new(&chain, owner, USDC);
     let merged_hs = owned.transfers();
     let hist = merged_hs.next().await;
@@ -171,9 +172,7 @@ async fn owned_erc20_empty_for_inactive_address() {
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");
-    let chain = EvmChain::new(provider, TEST_CONFIG)
-        .await
-        .expect("EvmChain::new");
+    let chain = EvmChain::new(provider, TEST_CONFIG);
 
     // An address with no real-world USDC activity (literally the zero
     // address — receivers of burns, but no transfers FROM it).

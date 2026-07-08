@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// Iteration direction — funneled from the global `--reverse` flag, so the two
+/// Iteration direction — funneled from the `evm` `--reverse` flag, so the two
 /// run-fn plumbing args (`Direction`, [`FollowMode`]) can't be silently swapped
 /// the way two adjacent `bool`s could.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +24,7 @@ impl Direction {
     }
 }
 
-/// Whether to block at the tip for live events — funneled from the global
+/// Whether to block at the tip for live events — funneled from the `evm`
 /// `--follow` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowMode {
@@ -51,14 +51,6 @@ pub struct Cli {
     /// Path to config file
     #[arg(long, global = true)]
     pub config: Option<String>,
-
-    /// Navigate backwards instead of forwards
-    #[arg(long, global = true)]
-    pub reverse: bool,
-
-    /// Follow (block at tip for new events)
-    #[arg(long, global = true)]
-    pub follow: bool,
 
     /// Print a session summary at exit: RPC calls by method (+ wall-time),
     /// `SQLite` read time, and cache hit/miss counts. Also enabled by setting
@@ -88,7 +80,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Print resolved config (API key masked)
+    /// Validate and print the effective config as TOML (defaults filled in,
+    /// API keys masked) — what an actual run would use.
     Show,
     /// Validate config and test RPC connectivity
     Check,
@@ -103,9 +96,9 @@ pub enum ChainsCommand {
 
 #[derive(Parser)]
 pub struct ChainsListArgs {
-    /// Show only chains flagged as testnets.
+    /// Include chains flagged as testnets (excluded by default).
     #[arg(long)]
-    pub testnet: bool,
+    pub testnets: bool,
 
     /// Show only chains Alchemy hosts (those with an Alchemy URL slug).
     #[arg(long)]
@@ -159,16 +152,50 @@ pub struct EvmArgs {
     #[arg(long, default_value = "20")]
     pub limit: usize,
 
+    /// Navigate backwards instead of forwards. `global` here scopes the flag
+    /// to the `evm` subtree — direction means nothing to `chains`/`config`.
+    #[arg(long, global = true)]
+    pub reverse: bool,
+
+    /// Follow (block at tip for new events). Scoped to the `evm` subtree,
+    /// like `--reverse`.
+    #[arg(long, global = true)]
+    pub follow: bool,
+
     #[command(subcommand)]
     pub command: EvmCommand,
 }
 
 #[derive(Subcommand)]
 pub enum EvmCommand {
+    /// Block history commands
+    Blocks(BlocksArgs),
     /// ERC20 token commands
     Erc20(Erc20Args),
     /// Show all logs for one event of one contract
     Events(EventsArgs),
+}
+
+#[derive(Parser)]
+pub struct BlocksArgs {
+    #[command(subcommand)]
+    pub command: BlocksCommand,
+}
+
+#[derive(Subcommand)]
+pub enum BlocksCommand {
+    /// List blocks in a window as a table, or --follow the live tip.
+    /// Window flags (--from/--to/--from-block/--num-blocks) come from `evm`;
+    /// the default window is the latest --num-blocks ending at the chain
+    /// head.
+    List(BlocksListArgs),
+}
+
+#[derive(Parser)]
+pub struct BlocksListArgs {
+    /// Add the MINER and PARENT columns and print full hashes.
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Parser)]

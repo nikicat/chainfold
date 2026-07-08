@@ -1,27 +1,30 @@
-//! The chain-wide head clock: one task per [`EvmChain`](super::EvmChain)
-//! in follow mode, publishing [`HeadEvent`]s on the chain's watch channel.
+//! The chain-wide head clock: one demand-started task per
+//! [`EvmChain`](super::EvmChain), publishing head observations into the
+//! chain's head channel (see [`HeadCell`]).
 //!
-//! Every published head has its block header persisted first (the
-//! headers-present invariant). Errors reconnect with exponential backoff;
-//! the task is aborted by the chain's `AbortOnDropHandle`.
+//! Ws heads have their block header persisted *before* publication — the
+//! headers-present invariant for push-delivered logs (the `newHeads`
+//! payload carries the header for free). Poll heads publish the bare
+//! number: in poll mode every log arrives through the fetcher, which
+//! ensures its own headers. Errors reconnect with exponential backoff; the
+//! task is aborted when the chain and all its stores drop.
 
 use std::time::Duration;
 
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
-use tokio::sync::watch;
 use tokio::time::sleep;
 
-use super::config::{HeadEvent, SubscribeTransport};
-use super::{INITIAL_BACKOFF, MAX_BACKOFF};
-use crate::arch::HistoryError;
+use super::config::SubscribeTransport;
+use super::{HeadCell, INITIAL_BACKOFF, MAX_BACKOFF};
+use crate::arch::{HistoryError, Timestamp};
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::types::BlockNumber;
+use crate::evm::types::{BlockHash, BlockNumber};
 
 pub(super) async fn run<P>(
     provider: ChainProvider<P>,
     transport: SubscribeTransport,
-    head: watch::Sender<HeadEvent>,
+    head: HeadCell,
 ) where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
@@ -41,39 +44,31 @@ pub(super) async fn run<P>(
     }
 }
 
-/// Poll `eth_blockNumber`; on advance, persist the header and publish.
-/// Only returns on error (the caller reconnects with backoff).
+/// Poll `eth_blockNumber` and publish (the publish is monotonic, so
+/// non-advances are no-ops). Polls immediately on entry — the clock is
+/// demand-started, so a consumer is already waiting on the first
+/// observation. Only returns on error (the caller reconnects with
+/// backoff).
 async fn poll_heads<P>(
     provider: &ChainProvider<P>,
     interval: Duration,
-    head: &watch::Sender<HeadEvent>,
+    head: &HeadCell,
 ) -> HistoryError
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
     loop {
-        sleep(interval).await;
-        let n = match provider.get_block_number().await {
-            Ok(n) => n,
+        match provider.get_block_number().await {
+            Ok(n) => head.publish(n),
             Err(e) => return e,
-        };
-        if n <= head.borrow().number {
-            continue;
         }
-        let header = match provider.ensure_block_header(n).await {
-            Ok(h) => h,
-            Err(e) => return e,
-        };
-        head.send_replace(HeadEvent {
-            number: n,
-            hash: header.hash,
-        });
+        sleep(interval).await;
     }
 }
 
 /// `eth_subscribe(newHeads)`: persist each header (free — the payload
 /// carries it) and publish. Only returns on error.
-async fn ws_heads<P>(provider: &ChainProvider<P>, head: &watch::Sender<HeadEvent>) -> HistoryError
+async fn ws_heads<P>(provider: &ChainProvider<P>, head: &HeadCell) -> HistoryError
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
@@ -90,18 +85,13 @@ where
         };
         let number = BlockNumber::new(header.number);
         if let Err(e) = provider.log_cache().insert_block_header(
-            number.get(),
-            &header.hash,
-            &header.parent_hash,
-            header.timestamp,
+            number,
+            &BlockHash::new(header.hash),
+            &BlockHash::new(header.parent_hash),
+            Timestamp::new(header.timestamp),
         ) {
             return HistoryError::internal(format!("insert_block_header: {e}"));
         }
-        if number > head.borrow().number {
-            head.send_replace(HeadEvent {
-                number,
-                hash: header.hash,
-            });
-        }
+        head.publish(number);
     }
 }

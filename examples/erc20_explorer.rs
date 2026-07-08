@@ -23,9 +23,8 @@
 //!     --from 2025-01-15 --to 2025-01-16
 
 use std::collections::HashMap;
-use std::time::Duration;
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
@@ -33,8 +32,8 @@ use chainfold::Shared;
 use chainfold::arch::{HistStore, Timestamp, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainProvider, ChunkSize, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent,
-    EvmPosition, OwnedErc20, SubscribeTransport, TransferDirection, apply_transfer,
-    decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
+    EvmPosition, OwnedErc20, TransferDirection, TxHash, apply_transfer, decode_transfer,
+    fetch_erc20_metadata, rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::MergedItem;
 use chrono::NaiveDate;
@@ -156,7 +155,7 @@ fn abbrev_addr(addr: &Address) -> String {
     format!("0x{}…{}", hex::encode(&b[..3]), hex::encode(&b[18..]))
 }
 
-fn abbrev_tx_hash(hash: &B256) -> String {
+fn abbrev_tx_hash(hash: &TxHash) -> String {
     let b = hash.as_slice();
     format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
 }
@@ -166,7 +165,7 @@ fn linked_addr(addr: &Address, base_url: &str) -> String {
     osc8_link(&url, &abbrev_addr(addr))
 }
 
-fn linked_tx_hash(hash: &B256, base_url: &str) -> String {
+fn linked_tx_hash(hash: &TxHash, base_url: &str) -> String {
     let url = format!("{base_url}/tx/{hash:#x}");
     osc8_link(&url, &abbrev_tx_hash(hash))
 }
@@ -295,19 +294,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  DB:       {db_path}");
     println!();
 
-    // One chain per example run; follow mode is fixed at construction. In
-    // follow mode the chain's head clock drives every log store's tip.
+    // One chain per example run. Head tracking (a 2s poll) starts lazily
+    // on the first demand for a tip and drives every log store's tip;
+    // --follow only changes how this example consumes the stores.
     let chain = EvmChain::new(
         provider,
         EvmChainConfig {
             chunk_size: ChunkSize::new(args.chunk_size),
-            follow: args.follow.then(|| SubscribeTransport::Poll {
-                interval: Duration::from_secs(2),
-            }),
             ..Default::default()
         },
-    )
-    .await?;
+    );
 
     for address in &addresses {
         let owned = OwnedErc20::new(&chain, owner, *address);

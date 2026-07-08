@@ -40,10 +40,10 @@ use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::{Filter, Log};
 use tracing::Instrument;
 
-use crate::arch::HistoryError;
+use crate::arch::{HistoryError, Timestamp};
 use crate::evm::cache::{BlockHeader, LogCache};
 use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
-use crate::evm::types::{BlockNumber, ChainId};
+use crate::evm::types::{BlockHash, BlockNumber, ChainId};
 use crate::shared::Shared;
 
 /// A provider paired with the chain id it serves and the chain's durable
@@ -65,7 +65,7 @@ struct HeaderSingleflight {
 impl HeaderSingleflight {
     fn cached(&self, block: BlockNumber) -> Result<Option<BlockHeader>, HistoryError> {
         self.store
-            .get_block_header(block.get())
+            .get_block_header(block)
             .map_err(|e| HistoryError::internal(e.to_string()))
     }
 
@@ -186,17 +186,17 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
             .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
             .ok_or_else(|| HistoryError::internal(format!("block {block} not found")))?;
 
-        let hash = fetched.header.hash;
-        let parent_hash = fetched.header.parent_hash;
-        let timestamp = fetched.header.timestamp;
+        let hash = BlockHash::new(fetched.header.hash);
+        let parent_hash = BlockHash::new(fetched.header.parent_hash);
+        let timestamp = Timestamp::new(fetched.header.timestamp);
 
         self.headers
             .store
-            .insert_block_header(block.get(), &hash, &parent_hash, timestamp)
+            .insert_block_header(block, &hash, &parent_hash, timestamp)
             .map_err(|e| HistoryError::internal(e.to_string()))?;
 
         Ok(BlockHeader {
-            height: block.get(),
+            height: block,
             hash,
             parent_hash,
             timestamp,

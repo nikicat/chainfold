@@ -43,6 +43,10 @@ use tokio::sync::watch;
 /// a bare `u64` so a timestamp can't be silently swapped with a block number or
 /// any other count. Convert to/from `u64` at the chrono / RPC / `SQLite`
 /// boundary via [`Timestamp::new`] / [`Timestamp::get`].
+///
+/// Arithmetic is *affine*, like `BlockNumber`'s: an instant + a seconds
+/// offset is another instant ([`Add`](std::ops::Add)); the distance between
+/// two instants is a `u64` of seconds, computed via [`Timestamp::get`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Timestamp(u64);
 
@@ -61,6 +65,13 @@ impl Timestamp {
 impl From<u64> for Timestamp {
     fn from(secs: u64) -> Self {
         Self(secs)
+    }
+}
+
+impl std::ops::Add<u64> for Timestamp {
+    type Output = Self;
+    fn add(self, secs: u64) -> Self {
+        Self(self.0 + secs)
     }
 }
 

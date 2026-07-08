@@ -27,18 +27,19 @@ mod types;
 
 pub use aligned_ranges::{AlignedRange, Alignment, aligned_block_ranges};
 pub use types::{
-    Amount, Asset, BlockHash, BlockNumber, BlockRange, ChainId, ChunkSize, Erc20, Erc20Balance,
-    Erc20Burn, Erc20Mint, Erc20Transfer, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic,
+    Amount, Asset, BlockCount, BlockHash, BlockNumber, BlockRange, ChainId, ChunkSize, Erc20,
+    Erc20Balance, Erc20Burn, Erc20Mint, Erc20Transfer, EvmBlock, EvmEvent, EvmPosition, FilterHash,
+    Gas, GasPrice, LogIdx, Topic, TxCount, TxHash,
 };
 
 pub use cache::{
     BlockHeader, CACHE_VERSION, CacheDb, CacheError, CachedErc20Metadata, Erc20Cache,
-    EventSignatureCache, EventSignatureRow, LogCache, compute_filter_hash, compute_gaps,
-    versioned_path,
+    EventSignatureCache, EventSignatureRow, LogCache, ScanPartition, compute_filter_hash,
+    compute_gaps, versioned_path,
 };
 pub use chain::{
-    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, Finality, HeadEvent,
-    LogFilter, SubscribeTransport,
+    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, Finality, LogFilter,
+    SubscribeTransport,
 };
 pub use chain_provider::ChainProvider;
 pub use erc20::{
@@ -46,12 +47,12 @@ pub use erc20::{
     fetch_erc20_metadata,
 };
 pub use observe::{
-    CACHE_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, RpcMethod, SQLITE_TARGET, SqliteOp,
-    cache_event, rpc_span, sqlite_span,
+    CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, ConnectTimingLayer, RPC_TARGET,
+    RpcMethod, SQLITE_TARGET, SqliteOp, cache_event, connect_span, rpc_span, sqlite_span,
 };
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use range_index::{
-    BlockPos, Fetcher, IndexPos, LoadedSpan, LogPage, LogRef, LogSpec, RangeIndex, RangeIndexStore,
-    RangeSpec, TimePosFn,
+    BlockPage, BlockPos, BlockSpec, Fetcher, IndexPos, LoadedSpan, LogPage, LogRef, LogSpec,
+    RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed,
 };
 pub use retry::rpc_retry_layer;

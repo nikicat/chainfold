@@ -127,27 +127,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-        // One-shot flow: the head is fetched once at chain construction.
         let chain = EvmChain::new(
             provider,
             EvmChainConfig {
                 chunk_size: ChunkSize::new(args.chunk_size),
-                follow: None,
                 ..Default::default()
             },
-        )
-        .await?;
+        );
 
         let topics: [Option<Topic>; 4] = [Some(topic0), None, None, None];
         let store = chain.logs(&LogFilter::new(address, topics), Finality::Latest);
         let chain_id = chain.chain_id();
-        let tip = chain.head(Finality::Latest).get().number;
+        // The first snapshot demands the head (one eth_blockNumber) — the
+        // tip is the snapshot's end, not a separate "head" API.
+        let hist = store.next().await;
+        let tip = hist.end().block;
         println!("  chain_id={chain_id} tip_block={tip}");
 
         // Pre-cache the window so merge doesn't fight cold fetches per chain.
         let from_block = tip.saturating_sub(args.num_blocks);
         let from_pos = EvmPosition::new(from_block.saturating_sub(1).get(), u32::MAX);
-        let hist = store.next().await;
         let (_, _tail) = hist.split(from_pos);
 
         sources.insert(key.clone(), store);
@@ -194,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             m.value.block_number,
             m.value.log_index,
             topic0_hex,
-            &hex::encode(&m.value.tx_hash[..8]),
+            &hex::encode(&m.value.tx_hash.as_slice()[..8]),
         );
         count += 1;
         if count >= args.limit {

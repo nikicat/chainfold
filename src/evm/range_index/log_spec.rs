@@ -6,15 +6,14 @@
 //! it needs for the timestamp must already be cached (the fetcher and the live
 //! path pre-persist headers; see the headers-present invariant in the R3 plan).
 
-use alloy::primitives::B256;
 use alloy::rpc::types::Log;
 
 use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
 use super::spec::{LoadedSpan, RangeSpec};
 use crate::arch::{HistoryError, Positioned, Timestamp};
-use crate::evm::cache::LogCache;
+use crate::evm::cache::{LogCache, ScanPartition};
 use crate::evm::types::{
-    BlockNumber, BlockRange, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic,
+    BlockHash, BlockNumber, BlockRange, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic, TxHash,
 };
 use crate::shared::Shared;
 
@@ -54,7 +53,7 @@ impl RangeSpec for LogSpec {
     fn page_tip(page: &LogPage) -> EvmPosition {
         // End-of-block cut: a Hist ending here iterates every log up to and
         // including the last one in `to_block`.
-        EvmPosition::new(page.to_block.get(), u32::MAX)
+        EvmPosition::new(page.to_block, LogIdx::MAX)
     }
 
     fn resolve(&self, item: &LogRef) -> Result<Positioned<EvmEvent, EvmPosition>, HistoryError> {
@@ -73,7 +72,7 @@ impl RangeSpec for LogSpec {
         // Sync-only timestamp fill: prefer the log's own timestamp; otherwise
         // read the (must-be-cached) block header. Never RPC here.
         if log.block_timestamp.is_none() {
-            let bn = log.block_number.unwrap_or(0);
+            let bn = BlockNumber::new(log.block_number.unwrap_or(0));
             let header = self
                 .store
                 .get_block_header(bn)
@@ -83,7 +82,7 @@ impl RangeSpec for LogSpec {
                         "block header {bn} not cached (headers-present invariant violated)"
                     ))
                 })?;
-            event.timestamp = Timestamp::new(header.timestamp);
+            event.timestamp = header.timestamp;
         }
         let pos = event.position();
         Ok(Positioned::new(event, pos))
@@ -97,33 +96,31 @@ impl RangeSpec for LogSpec {
         }
         self.store
             .record_scanned_range(
-                &self.filter_hash,
-                page.from_block.get(),
-                page.to_block.get(),
+                &ScanPartition::Filter(self.filter_hash),
+                BlockRange::new(page.from_block, page.to_block),
                 &page.end_block_hash,
             )
             .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))
     }
 
     fn load_window(&self, window: BlockRange) -> Result<Vec<LoadedSpan<LogRef>>, HistoryError> {
-        let (aligned_from, aligned_to) = (window.from.get(), window.to.get());
         let scanned = self
             .store
-            .get_scanned_ranges(&self.filter_hash)
+            .get_scanned_ranges(&ScanPartition::Filter(self.filter_hash))
             .map_err(|e| HistoryError::internal(format!("get_scanned_ranges: {e}")))?;
 
         let mut spans = Vec::new();
-        for (s_start, s_end) in scanned {
-            if s_end < aligned_from || s_start > aligned_to {
+        for scanned_range in scanned {
+            if scanned_range.to < window.from || scanned_range.from > window.to {
                 continue;
             }
             let logs = self
                 .store
-                .get_logs_in_range(&self.filter_hash, s_start, s_end)
+                .get_logs_in_range(&self.filter_hash, scanned_range)
                 .map_err(|e| HistoryError::internal(format!("get_logs_in_range: {e}")))?;
             let items: Vec<LogRef> = logs.iter().filter_map(log_ref_from).collect();
             spans.push(LoadedSpan {
-                range: BlockRange::from_u64(s_start, s_end),
+                range: scanned_range,
                 items,
             });
         }
@@ -145,6 +142,15 @@ impl RangeSpec for LogSpec {
         }
     }
 
+    fn head_pos(n: BlockNumber) -> EvmPosition {
+        // End-of-block cut: a `Hist` ending here iterates every log up to
+        // and including the last one in `n`.
+        EvmPosition {
+            block: n,
+            log_index: LogIdx::MAX,
+        }
+    }
+
     fn window(from: &EvmPosition, to: &EvmPosition) -> BlockRange {
         BlockRange::new(from.block, to.block)
     }
@@ -158,9 +164,9 @@ fn log_to_evm_event(log: &Log) -> EvmEvent {
         contract_address: log.address(),
         block_number: BlockNumber::new(log.block_number.unwrap_or(0)),
         timestamp: Timestamp::new(log.block_timestamp.unwrap_or(0)),
-        block_hash: log.block_hash.unwrap_or(B256::ZERO),
+        block_hash: log.block_hash.map_or(BlockHash::ZERO, BlockHash::new),
         log_index: LogIdx::new(log.log_index.unwrap_or(0) as u32),
-        tx_hash: log.transaction_hash.unwrap_or(B256::ZERO),
+        tx_hash: log.transaction_hash.map_or(TxHash::ZERO, TxHash::new),
         topics: log.topics().iter().copied().map(Topic::new).collect(),
         data: log.data().data.to_vec(),
     }
