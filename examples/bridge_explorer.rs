@@ -19,6 +19,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
@@ -118,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let db_dir = format!("{}/{}", args.db.trim_end_matches('/'), key);
         std::fs::create_dir_all(&db_dir).ok();
-        let db_path = versioned_path(&format!("{db_dir}/log_store.db"));
+        let db_path = versioned_path(&Path::new(&db_dir).join("log_store.db"));
         let cache_db = CacheDb::open(&db_path)?;
 
         let provider = ChainProvider::discover(

@@ -1255,6 +1255,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytesize"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7c8918969267b2932ffd5655509bbbea0833823058c378876953217f5fc50e"
+
+[[package]]
 name = "c-kzg"
 version = "2.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1301,6 +1307,7 @@ dependencies = [
  "alloy-node-bindings",
  "async-trait",
  "blake3",
+ "bytesize",
  "chrono",
  "clap",
  "dirs",

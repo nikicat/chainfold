@@ -2,8 +2,6 @@ pub mod blocks;
 pub mod erc20;
 pub mod events;
 
-use std::path::PathBuf;
-
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::Http;
@@ -11,26 +9,17 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::evm::{
     CacheDb, ChainId, ChainProvider, ChunkSize, ConnectTimingLayer, EvmChain, EvmChainConfig,
-    RpcTimingLayer, rpc_retry_layer, versioned_path,
+    RpcTimingLayer, rpc_retry_layer,
 };
 
 use crate::chains::{ChainHandle, ChainResolver, ChainSelector, select_chain};
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
 use crate::config::{ChainIdCheck, Config, ConfigError, RpcSource};
-use crate::util::setup_span;
+use crate::util::{resolved_db_path, setup_span};
 
 /// Env var overriding the configured/built-in default chain, consulted when
 /// neither `--chain` nor `--chain-id` is passed.
 const CHAIN_ENV_VAR: &str = "CHAINFOLD_CHAIN";
-
-/// Default cache DB location: `$XDG_CACHE_HOME/chainfold/chainfold.db`.
-/// Falls back to `./chainfold.db` if no XDG cache dir is resolvable.
-fn default_db_path() -> PathBuf {
-    dirs::cache_dir().map_or_else(
-        || PathBuf::from("./chainfold.db"),
-        |d| d.join("chainfold").join("chainfold.db"),
-    )
-}
 
 pub async fn run(
     config: &Config,
@@ -122,13 +111,12 @@ pub async fn run(
 
     // Open the durable cache before the provider — the ChainProvider bundles
     // the log cache (header singleflight lives behind it).
-    let db_path_buf = args.db.clone().unwrap_or_else(default_db_path);
-    if let Some(parent) = db_path_buf.parent()
+    let db_path = resolved_db_path(args.db.as_deref());
+    if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
-    let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = CacheDb::open(&db_path)?;
 
     // Hand-build the HTTP client (instead of `ClientBuilder::http`) so the

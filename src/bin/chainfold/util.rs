@@ -1,8 +1,12 @@
+use std::path::{Path, PathBuf};
+
 use alloy::network::Ethereum;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use chainfold::arch::Timestamp;
-use chainfold::evm::{BlockCount, BlockNumber, BlockRange, EvmChain, EvmPosition, LogIdx};
+use chainfold::evm::{
+    BlockCount, BlockNumber, BlockRange, EvmChain, EvmPosition, LogIdx, versioned_path,
+};
 use chrono::NaiveDate;
 
 use crate::cli::EvmArgs;
@@ -16,6 +20,30 @@ macro_rules! setup_span {
     };
 }
 pub(crate) use setup_span;
+
+/// Default cache DB location: `$XDG_CACHE_HOME/chainfold/chainfold.db`.
+/// Falls back to `./chainfold.db` if no XDG cache dir is resolvable.
+fn default_db_path() -> PathBuf {
+    dirs::cache_dir().map_or_else(
+        || PathBuf::from("./chainfold.db"),
+        |d| d.join("chainfold").join("chainfold.db"),
+    )
+}
+
+/// The base (unversioned) cache path for a `--db` flag: the flag value, or
+/// the XDG default.
+pub fn db_base_path(db_flag: Option<&Path>) -> PathBuf {
+    db_flag.map_or_else(default_db_path, Path::to_path_buf)
+}
+
+/// The resolved, versioned cache path for a `--db` flag — the file that
+/// actually gets opened (`chainfold.db` → `chainfold.v3.db`). Every command
+/// must resolve through here (or [`db_base_path`] + `versioned_path`) so
+/// `evm` and `cache` always operate on the same file. Does NOT create the
+/// file or its parent directory.
+pub fn resolved_db_path(db_flag: Option<&Path>) -> PathBuf {
+    versioned_path(&db_base_path(db_flag))
+}
 
 pub fn parse_hex_address(s: &str) -> Result<Address, String> {
     s.parse().map_err(|e| format!("invalid address: {e}"))

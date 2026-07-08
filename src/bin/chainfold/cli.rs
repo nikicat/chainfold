@@ -76,6 +76,8 @@ pub enum Command {
     },
     /// EVM chain commands
     Evm(EvmArgs),
+    /// Local `SQLite` cache management
+    Cache(CacheArgs),
 }
 
 #[derive(Subcommand)]
@@ -103,6 +105,43 @@ pub struct ChainsListArgs {
     /// Show only chains Alchemy hosts (those with an Alchemy URL slug).
     #[arg(long)]
     pub alchemy_supported: bool,
+}
+
+#[derive(Parser)]
+pub struct CacheArgs {
+    /// `SQLite` cache path. Defaults to `$XDG_CACHE_HOME/chainfold/chainfold.db`
+    /// (typically `~/.cache/chainfold/chainfold.db`). `global` scopes the
+    /// flag to the `cache` subtree, so it may follow the subcommand.
+    #[arg(long, global = true)]
+    pub db: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: CacheCommand,
+}
+
+#[derive(Subcommand)]
+pub enum CacheCommand {
+    /// Show per-table entry counts and the on-disk size of the cache DB
+    Size,
+    /// Delete cached data. With no flags, wipes everything; category flags
+    /// narrow the purge and are combinable.
+    Purge(CachePurgeArgs),
+}
+
+#[derive(Parser)]
+pub struct CachePurgeArgs {
+    /// Purge log/block scan history (cached logs and blocks, scanned ranges,
+    /// reorg tombstones, block headers)
+    #[arg(long)]
+    pub history: bool,
+
+    /// Purge ERC20 token metadata and balances
+    #[arg(long)]
+    pub erc20: bool,
+
+    /// Purge resolved event signatures
+    #[arg(long)]
+    pub signatures: bool,
 }
 
 #[derive(Parser)]

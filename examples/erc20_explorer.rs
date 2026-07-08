@@ -23,6 +23,7 @@
 //!     --from 2025-01-15 --to 2025-01-16
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
@@ -255,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    let db_path = versioned_path(&args.db);
+    let db_path = versioned_path(Path::new(&args.db));
     let cache_db = CacheDb::open(&db_path)?;
     // Per-concern views over the one shared cache connection.
     let erc20_cache = cache_db.erc20();
@@ -291,7 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Owner:    {owner:#x}");
     println!("  Tokens:   {}", addresses.len());
     println!("  Chain:    {chain_id}");
-    println!("  DB:       {db_path}");
+    println!("  DB:       {}", db_path.display());
     println!();
 
     // One chain per example run. Head tracking (a 2s poll) starts lazily

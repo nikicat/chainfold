@@ -1,3 +1,4 @@
+mod cache;
 mod chains;
 mod cli;
 mod config;
@@ -96,6 +97,7 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
+        Command::Cache(cache_args) => cache::run(cache_args)?,
     }
 
     Ok(())

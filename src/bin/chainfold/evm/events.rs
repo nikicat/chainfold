@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use alloy::dyn_abi::{DecodedEvent, DynSolValue, EventExt};
 use alloy::json_abi::Event;
 use alloy::network::Ethereum;
@@ -44,7 +46,7 @@ struct PrintOpts {
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
     cache: &CacheDb,
-    db_path: &str,
+    db_path: &Path,
     config: &Config,
     evm_args: &EvmArgs,
     events_args: &EventsArgs,
@@ -76,7 +78,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     println!("  Topic0:   {:#x}", resolved.topic0);
     println!("  Chain:    {chain_id}");
     println!("  Range:    block {range}");
-    println!("  DB:       {db_path}");
+    println!("  DB:       {}", db_path.display());
     println!();
 
     if follow.is_follow() {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, U256};
@@ -19,7 +20,7 @@ use crate::util::{log_cut, log_end, parse_hex_address, resolve_log_range};
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
     cache: &CacheDb,
-    db_path: &str,
+    db_path: &Path,
     evm_args: &EvmArgs,
     erc20_args: &Erc20Args,
     _direction: Direction,
@@ -72,7 +73,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     println!("  Owner:    0x{}", hex::encode(owner.as_slice()));
     println!("  Tokens:   {}", addresses.len());
     println!("  Chain:    {chain_id}");
-    println!("  DB:       {db_path}");
+    println!("  DB:       {}", db_path.display());
     println!();
 
     let show_balance = matches!(erc20_args.command, Erc20Command::Balances);

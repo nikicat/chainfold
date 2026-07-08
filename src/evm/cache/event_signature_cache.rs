@@ -7,6 +7,8 @@
 //! `SignatureCache`) to avoid colliding with the
 //! [`SignatureCache`](crate::signatures::SignatureCache) resolver trait.
 
+use std::path::Path;
+
 use alloy::primitives::{Address, B256};
 
 use super::{CacheError, SharedConn};
@@ -36,7 +38,7 @@ impl EventSignatureCache {
     /// Open a standalone signature cache at the given path. Creates the DB and
     /// runs migrations if needed. Equivalent to
     /// `CacheDb::open(path)?.signatures()`.
-    pub fn open(path: &str) -> Result<Self, CacheError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, CacheError> {
         Ok(super::CacheDb::open(path)?.signatures())
     }
 

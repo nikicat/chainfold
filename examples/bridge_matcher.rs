@@ -24,6 +24,7 @@
 //!     --match-on topic1 --num-blocks 50
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use alloy::network::Ethereum;
@@ -171,7 +172,7 @@ async fn open_chain(
     let url: Url = rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
     std::fs::create_dir_all(db_subdir).ok();
-    let db_path = versioned_path(&format!("{db_subdir}/log_store.db"));
+    let db_path = versioned_path(&Path::new(db_subdir).join("log_store.db"));
     let cache_db = CacheDb::open(&db_path)?;
     let provider = ChainProvider::discover(
         ProviderBuilder::new().connect_client(client),

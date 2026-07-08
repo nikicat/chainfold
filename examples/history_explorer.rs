@@ -13,6 +13,8 @@
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --from 2025-01-15 --to 2025-01-16
 
+use std::path::Path;
+
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
@@ -160,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url: Url = args.rpc_url.parse()?;
     let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
-    let db_path = versioned_path(&args.db);
+    let db_path = versioned_path(Path::new(&args.db));
     let cache_db = CacheDb::open(&db_path)?;
     let provider = ChainProvider::discover(
         ProviderBuilder::new().connect_client(client),
@@ -189,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  Chain:    {chain_id}");
     println!("  Range:    block {} .. {}", start.block, end.block);
-    println!("  DB:       {db_path}");
+    println!("  DB:       {}", db_path.display());
     println!();
 
     if args.measure {

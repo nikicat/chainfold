@@ -41,7 +41,7 @@ async fn build_chain(
     endpoint: Url,
     transport: SubscribeTransport,
 ) -> EvmChain<impl Provider<Ethereum> + Clone + 'static + use<>> {
-    let cache = Shared::new(LogCache::open(db_path.to_str().unwrap()).expect("open cache"));
+    let cache = Shared::new(LogCache::open(db_path).expect("open cache"));
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");

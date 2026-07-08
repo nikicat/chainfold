@@ -5,6 +5,8 @@
 //! [`CacheDb`](super::CacheDb). Independent of the log cache — populated by
 //! the ERC20 metadata/balance helpers, not the log-history path.
 
+use std::path::Path;
+
 use alloy::primitives::{Address, U256};
 
 use super::{CacheError, SharedConn};
@@ -30,7 +32,7 @@ impl Erc20Cache {
 
     /// Open a standalone ERC20 cache at the given path. Creates the DB and
     /// runs migrations if needed. Equivalent to `CacheDb::open(path)?.erc20()`.
-    pub fn open(path: &str) -> Result<Self, CacheError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, CacheError> {
         Ok(super::CacheDb::open(path)?.erc20())
     }
 

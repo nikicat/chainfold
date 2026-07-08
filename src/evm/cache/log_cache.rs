@@ -8,6 +8,7 @@
 //! bookkeeping, reorg invalidation, and header lookup. Navigation queries
 //! (first/last log) live in the in-memory [`LogIndex`](crate::evm::LogIndex).
 
+use std::path::Path;
 use std::sync::LazyLock;
 
 use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
@@ -153,7 +154,7 @@ impl LogCache {
 
     /// Open a standalone log cache at the given path. Creates the DB and runs
     /// migrations if needed. Equivalent to `CacheDb::open(path)?.logs()`.
-    pub fn open(path: &str) -> Result<Self, CacheError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, CacheError> {
         Ok(super::CacheDb::open(path)?.logs())
     }
 
@@ -573,6 +574,30 @@ fn row_to_evm_block(row: &rusqlite::Row) -> Result<EvmBlock, rusqlite::Error> {
 // Tests
 // ============================================================
 
+/// Minimal `cached_logs` fixture. Module-level (not inside `mod tests`) so
+/// the parent [`cache`](super) test module can seed logs through
+/// [`LogCache::insert_logs`] too.
+#[cfg(test)]
+pub(super) fn make_test_log(block: BlockNumber, log_idx: LogIdx, block_hash: BlockHash) -> Log {
+    let topic0 = B256::from([0xDD; 32]);
+    let data = Bytes::from(vec![0x01, 0x02]);
+    let log_data = LogData::new_unchecked(vec![topic0], data);
+
+    Log {
+        inner: LogInner {
+            address: Address::from([0x42u8; 20]),
+            data: log_data,
+        },
+        block_hash: Some(block_hash.b256()),
+        block_number: Some(block.get()),
+        block_timestamp: None,
+        transaction_hash: Some(B256::from([0xEE; 32])),
+        transaction_index: Some(0),
+        log_index: Some(u64::from(log_idx.get())),
+        removed: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,26 +618,6 @@ mod tests {
 
     fn ts(offset: u64) -> Timestamp {
         TS_BASE + offset
-    }
-
-    fn make_test_log(block: BlockNumber, log_idx: LogIdx, block_hash: BlockHash) -> Log {
-        let topic0 = B256::from([0xDD; 32]);
-        let data = Bytes::from(vec![0x01, 0x02]);
-        let log_data = LogData::new_unchecked(vec![topic0], data);
-
-        Log {
-            inner: LogInner {
-                address: Address::from([0x42u8; 20]),
-                data: log_data,
-            },
-            block_hash: Some(block_hash.b256()),
-            block_number: Some(block.get()),
-            block_timestamp: None,
-            transaction_hash: Some(B256::from([0xEE; 32])),
-            transaction_index: Some(0),
-            log_index: Some(u64::from(log_idx.get())),
-            removed: false,
-        }
     }
 
     // -- compute_filter_hash --

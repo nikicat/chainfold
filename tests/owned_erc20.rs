@@ -49,7 +49,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20.v3.db");
     let endpoint = anvil.endpoint_url();
-    let cache = Shared::new(LogCache::open(db_path.to_str().unwrap()).expect("open cache"));
+    let cache = Shared::new(LogCache::open(db_path).expect("open cache"));
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");
@@ -168,7 +168,7 @@ async fn owned_erc20_empty_for_inactive_address() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20_empty.v3.db");
     let endpoint = anvil.endpoint_url();
-    let cache = Shared::new(LogCache::open(db_path.to_str().unwrap()).expect("open cache"));
+    let cache = Shared::new(LogCache::open(db_path).expect("open cache"));
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");

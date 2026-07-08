@@ -33,9 +33,9 @@ pub use types::{
 };
 
 pub use cache::{
-    BlockHeader, CACHE_VERSION, CacheDb, CacheError, CachedErc20Metadata, Erc20Cache,
-    EventSignatureCache, EventSignatureRow, LogCache, ScanPartition, compute_filter_hash,
-    compute_gaps, versioned_path,
+    BlockHeader, CACHE_VERSION, CacheDb, CacheError, CacheSection, CacheTable, CachedErc20Metadata,
+    Erc20Cache, EventSignatureCache, EventSignatureRow, LogCache, ScanPartition, TableCount,
+    TableStat, compute_filter_hash, compute_gaps, versioned_path,
 };
 pub use chain::{
     DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, Finality, LogFilter,

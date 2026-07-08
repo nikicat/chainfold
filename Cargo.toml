@@ -10,6 +10,7 @@ evm = [
   "dep:blake3",
   "dep:tower-layer",
   "dep:tower-service",
+  "dep:bytesize",
 ]
 cli = [
   "evm",
@@ -68,6 +69,7 @@ chrono = { version = "0.4", optional = true }
 toml = { version = "0.8", optional = true }
 dirs = { version = "6", optional = true }
 tempfile = { version = "3", optional = true }
+bytesize = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

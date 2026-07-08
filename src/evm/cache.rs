@@ -17,9 +17,11 @@
 //! Navigation queries (first/last log) live in the in-memory
 //! [`LogIndex`](super::LogIndex), not here.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use alloy::primitives::{Address, B256};
+use bytesize::ByteSize;
 use rusqlite::Connection;
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
@@ -147,12 +149,134 @@ pub(crate) fn col_address(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Resul
 pub const CACHE_VERSION: u32 = 3;
 
 /// Inserts the cache version before the file extension.
-/// `"./foo.db"` → `"./foo.v3.db"`, `"./foo"` → `"./foo.v3"`
-pub fn versioned_path(base: &str) -> String {
-    match base.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem}.v{CACHE_VERSION}.{ext}"),
-        None => format!("{base}.v{CACHE_VERSION}"),
+/// `"./foo.db"` → `"./foo.v3.db"`, `"./foo"` → `"./foo.v3"`.
+///
+/// Operates on the file-name component only, so dots elsewhere in the path
+/// (e.g. a `my.dir/` directory) are never mistaken for the extension.
+pub fn versioned_path(base: &Path) -> PathBuf {
+    let Some(stem) = base.file_stem() else {
+        // No file name to version (empty path or `..`) — nothing sensible to
+        // do; hand the path back for `Connection::open` to reject.
+        return base.to_path_buf();
+    };
+    let mut name = stem.to_os_string();
+    name.push(format!(".v{CACHE_VERSION}"));
+    if let Some(ext) = base.extension() {
+        name.push(".");
+        name.push(ext);
     }
+    base.with_file_name(name)
+}
+
+// ============================================================
+// Tables & sections
+// ============================================================
+
+/// One purgeable section of the cache — the unit `chainfold cache purge`
+/// selects. `History` bundles logs AND blocks because `scanned_ranges` is
+/// shared between them (partitioned by filter hash, including the synthetic
+/// blocks partition — see [`ScanPartition`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheSection {
+    /// Log/block scan history: cached logs and blocks, scanned-range
+    /// bookkeeping, reorg tombstones, and block headers.
+    History,
+    /// ERC20 token metadata + historical balances.
+    Erc20,
+    /// Resolved event signatures.
+    Signatures,
+}
+
+impl CacheSection {
+    pub const ALL: [Self; 3] = [Self::History, Self::Erc20, Self::Signatures];
+
+    /// Section name as surfaced by the CLI (matches the purge flag names).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::History => "history",
+            Self::Erc20 => "erc20",
+            Self::Signatures => "signatures",
+        }
+    }
+}
+
+/// The closed set of tables in the cache file, grouped by section. A
+/// migration adding a table (see `migrations()` below) must extend
+/// [`Self::ALL`] and [`Self::section`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheTable {
+    CachedLogs,
+    ReorgedBlocks,
+    ScannedRanges,
+    CachedBlockHeaders,
+    CachedBlocks,
+    Erc20Metadata,
+    Erc20Balances,
+    EventSignatures,
+}
+
+impl CacheTable {
+    pub const ALL: [Self; 8] = [
+        Self::CachedLogs,
+        Self::ReorgedBlocks,
+        Self::ScannedRanges,
+        Self::CachedBlockHeaders,
+        Self::CachedBlocks,
+        Self::Erc20Metadata,
+        Self::Erc20Balances,
+        Self::EventSignatures,
+    ];
+
+    /// The SQL table name. Identifiers can't be bound as parameters, so
+    /// queries interpolate this — always from this closed enum, never from a
+    /// caller-supplied string.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CachedLogs => "cached_logs",
+            Self::ReorgedBlocks => "reorged_blocks",
+            Self::ScannedRanges => "scanned_ranges",
+            Self::CachedBlockHeaders => "cached_block_headers",
+            Self::CachedBlocks => "cached_blocks",
+            Self::Erc20Metadata => "erc20_metadata",
+            Self::Erc20Balances => "erc20_balances",
+            Self::EventSignatures => "event_signatures",
+        }
+    }
+
+    /// Which purge section this table belongs to.
+    #[must_use]
+    pub fn section(self) -> CacheSection {
+        match self {
+            Self::CachedLogs
+            | Self::ReorgedBlocks
+            | Self::ScannedRanges
+            | Self::CachedBlockHeaders
+            | Self::CachedBlocks => CacheSection::History,
+            Self::Erc20Metadata | Self::Erc20Balances => CacheSection::Erc20,
+            Self::EventSignatures => CacheSection::Signatures,
+        }
+    }
+}
+
+/// Row count for one table — a [`CacheDb::purge`] report entry (rows
+/// deleted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableCount {
+    pub table: CacheTable,
+    pub rows: u64,
+}
+
+/// Size snapshot of one table — a [`CacheDb::table_stats`] entry. `bytes`
+/// is the table's b-tree pages *including its indexes* (via the `dbstat`
+/// vtab), so the per-table figures do not sum to the file size: freelist,
+/// schema, and `sqlite_sequence` pages belong to no table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableStat {
+    pub table: CacheTable,
+    pub rows: u64,
+    pub bytes: ByteSize,
 }
 
 // ============================================================
@@ -186,7 +310,7 @@ pub struct CacheDb {
 impl CacheDb {
     /// Open a cache at the given path. Creates the DB and runs migrations if
     /// needed.
-    pub fn open(path: &str) -> Result<Self, CacheError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, CacheError> {
         let _span =
             tracing::span!(target: "chainfold::setup", tracing::Level::DEBUG, "db_open").entered();
         let mut conn = Connection::open(path)?;
@@ -220,6 +344,67 @@ impl CacheDb {
     /// Event-signature resolver cache view.
     pub fn signatures(&self) -> EventSignatureCache {
         EventSignatureCache::from_conn(self.conn.clone())
+    }
+
+    /// Row count + byte size for every table, in [`CacheTable::ALL`] order.
+    ///
+    /// Bytes come from the `dbstat` virtual table (rusqlite's bundled
+    /// `SQLite` compiles with `SQLITE_ENABLE_DBSTAT_VTAB`), attributing each
+    /// index's pages to its table via `sqlite_schema.tbl_name`. Deliberately
+    /// no *file* size: an in-memory cache has no file, and the on-disk
+    /// footprint (main file + WAL/SHM sidecars) is a filesystem concern the
+    /// caller measures itself.
+    pub fn table_stats(&self) -> Result<Vec<TableStat>, CacheError> {
+        let conn = self.conn.lock().unwrap();
+        CacheTable::ALL
+            .iter()
+            .map(|&table| {
+                let rows = conn
+                    .prepare_cached(&format!("SELECT COUNT(*) FROM {}", table.name()))?
+                    .query_row([], |row| row.get(0))?;
+                let bytes: u64 = conn
+                    .prepare_cached(
+                        "SELECT COALESCE(SUM(st.pgsize), 0)
+                         FROM dbstat st JOIN sqlite_schema m ON st.name = m.name
+                         WHERE m.tbl_name = ?1",
+                    )?
+                    .query_row([table.name()], |row| row.get(0))?;
+                Ok(TableStat {
+                    table,
+                    rows,
+                    bytes: ByteSize::b(bytes),
+                })
+            })
+            .collect()
+    }
+
+    /// Delete every row of every table belonging to one of `sections`, in
+    /// one transaction. Returns the deleted count per in-scope table. Freed
+    /// pages are not returned to the filesystem until [`Self::vacuum`].
+    pub fn purge(&self, sections: &[CacheSection]) -> Result<Vec<TableCount>, CacheError> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        let mut report = Vec::new();
+        for &table in &CacheTable::ALL {
+            if !sections.contains(&table.section()) {
+                continue;
+            }
+            let rows = tx.execute(&format!("DELETE FROM {}", table.name()), [])? as u64;
+            report.push(TableCount { table, rows });
+        }
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// Rebuild the DB file to reclaim space freed by deletes, then truncate
+    /// the WAL — the rebuilt pages land there, so without the checkpoint the
+    /// on-disk footprint wouldn't actually shrink. VACUUM cannot run inside
+    /// a transaction; [`Self::purge`] commits before returning, and the
+    /// mutex guarantees no statement is in flight on this connection.
+    pub fn vacuum(&self) -> Result<(), CacheError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
     }
 }
 
@@ -401,9 +586,17 @@ mod tests {
 
     #[test]
     fn versioned_path_inserts_version_before_extension() {
-        assert_eq!(versioned_path("./foo.db"), "./foo.v3.db");
-        // No extension (and no other '.') → version is appended.
-        assert_eq!(versioned_path("foo"), "foo.v3");
+        assert_eq!(
+            versioned_path(Path::new("./foo.db")),
+            PathBuf::from("./foo.v3.db")
+        );
+        // No extension → version is appended.
+        assert_eq!(versioned_path(Path::new("foo")), PathBuf::from("foo.v3"));
+        // A dot in a directory name is not an extension separator.
+        assert_eq!(
+            versioned_path(Path::new("./my.dir/chainfold.db")),
+            PathBuf::from("./my.dir/chainfold.v3.db")
+        );
     }
 
     #[test]
@@ -429,5 +622,127 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // -- table_counts / purge / vacuum --
+
+    use crate::evm::types::{BlockRange, EvmBlock, Topic};
+    use alloy::primitives::U256;
+
+    /// Seed one row into every table, through the public cache APIs only.
+    fn seed_all_tables(db: &CacheDb) {
+        let fh = FilterHash::new([0xAA; 32]);
+        let bh = BlockHash::repeat_byte(0xBB);
+        let parent = BlockHash::repeat_byte(0x11);
+        let bn = BlockNumber::new(100);
+        let ts = Timestamp::new(1_700_000_000);
+
+        let logs = db.logs();
+        logs.insert_logs(&fh, &[log_cache::make_test_log(bn, LogIdx::new(0), bh)])
+            .unwrap();
+        logs.record_scanned_range(&ScanPartition::Filter(fh), BlockRange::new(bn, bn), &bh)
+            .unwrap();
+        logs.mark_reorged(&[(BlockHash::repeat_byte(0xBC), bn)])
+            .unwrap();
+        logs.insert_block_header(bn, &bh, &parent, ts).unwrap();
+        logs.insert_blocks(&[EvmBlock {
+            number: bn,
+            hash: bh,
+            parent_hash: parent,
+            timestamp: ts,
+            tx_count: TxCount::new(1),
+            gas_used: Gas::new(21_000),
+            gas_limit: Gas::new(30_000_000),
+            base_fee: None,
+            miner: Address::repeat_byte(0x99),
+        }])
+        .unwrap();
+
+        let addr = Address::repeat_byte(0x42);
+        let erc20 = db.erc20();
+        erc20
+            .insert_erc20_metadata(&addr, ChainId::new(1), "X", "X", 18)
+            .unwrap();
+        erc20
+            .insert_erc20_balance(
+                ChainId::new(1),
+                &addr,
+                &Address::repeat_byte(0x43),
+                100,
+                U256::from(1),
+            )
+            .unwrap();
+
+        db.signatures()
+            .insert_event_signature(
+                ChainId::new(1),
+                &addr,
+                "Transfer",
+                "Transfer(address,address,uint256)",
+                Topic::new(B256::repeat_byte(0xDD)),
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn table_stats_zero_rows_on_fresh_db() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let stats = db.table_stats().unwrap();
+        assert_eq!(
+            stats.iter().map(|s| s.table).collect::<Vec<_>>(),
+            CacheTable::ALL.to_vec()
+        );
+        assert!(stats.iter().all(|s| s.rows == 0));
+        // Even an empty table owns its root b-tree page — dbstat is wired up.
+        assert!(stats.iter().all(|s| s.bytes > ByteSize::b(0)));
+    }
+
+    #[test]
+    fn purge_section_clears_only_its_tables() {
+        let db = CacheDb::open_in_memory().unwrap();
+        seed_all_tables(&db);
+        assert!(db.table_stats().unwrap().iter().all(|s| s.rows == 1));
+
+        let report = db.purge(&[CacheSection::Erc20]).unwrap();
+        // The report covers exactly the in-scope tables...
+        assert_eq!(
+            report,
+            vec![
+                TableCount {
+                    table: CacheTable::Erc20Metadata,
+                    rows: 1,
+                },
+                TableCount {
+                    table: CacheTable::Erc20Balances,
+                    rows: 1,
+                },
+            ]
+        );
+        // ...which are now empty, while every other section is untouched.
+        for stat in db.table_stats().unwrap() {
+            let expected = u64::from(stat.table.section() != CacheSection::Erc20);
+            assert_eq!(stat.rows, expected, "{}", stat.table.name());
+        }
+    }
+
+    #[test]
+    fn purge_all_sections_clears_everything() {
+        let db = CacheDb::open_in_memory().unwrap();
+        seed_all_tables(&db);
+        let report = db.purge(&CacheSection::ALL).unwrap();
+        assert_eq!(report.len(), CacheTable::ALL.len());
+        assert!(db.table_stats().unwrap().iter().all(|s| s.rows == 0));
+    }
+
+    #[test]
+    fn vacuum_runs_on_shared_connection() {
+        // Pins the invariant that nothing holds a transaction or in-flight
+        // statement when vacuum() takes the connection — VACUUM errors
+        // inside a transaction.
+        let db = CacheDb::open_in_memory().unwrap();
+        seed_all_tables(&db);
+        db.purge(&CacheSection::ALL).unwrap();
+        db.vacuum().unwrap();
     }
 }
