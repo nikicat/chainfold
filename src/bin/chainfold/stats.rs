@@ -11,7 +11,10 @@
 //! anywhere in the library or CLI shows up here without a code change. The
 //! row label is the span's static name, except on `chainfold::rpc` where it
 //! is the `method` field (the method is dynamic wire data; span names can't
-//! carry it).
+//! carry it). RPC spans also carry a `reqs` field — one wire request may
+//! batch many JSON-RPC calls — so where batching makes them differ, the
+//! report shows the logical call count as the headline and annotates the
+//! wire round-trips.
 //!
 //! Per the contract's summing rule, wall-time reconciliation counts *root*
 //! spans only: a nested span (the connect handshake inside its first RPC)
@@ -52,6 +55,10 @@ const SECTIONS: &[(&str, &str)] = &[
 #[derive(Default)]
 struct Tally {
     count: u64,
+    /// Logical requests: RPC spans contribute their `reqs` field (the wire
+    /// packet's batch length), every other span contributes 1 — so
+    /// `reqs == count` exactly when nothing was batched.
+    reqs: u64,
     total: Duration,
     /// Wall-time of the *root* occurrences only. Spans are mostly sequential
     /// in the CLI, so summing this across all rows reconciles `duration`;
@@ -107,15 +114,26 @@ struct SpanTiming {
     root: bool,
     /// Row-label override captured at open (the RPC span's `method` field).
     label: Option<String>,
+    /// Logical requests this span covers (the RPC span's `reqs` field; 1
+    /// everywhere else).
+    reqs: u64,
 }
 
-/// Pulls the `method` field off an RPC span.
+/// Pulls the `method` and `reqs` fields off an RPC span.
 #[derive(Default)]
-struct MethodField(Option<String>);
-impl Visit for MethodField {
+struct RpcFields {
+    method: Option<String>,
+    reqs: Option<u64>,
+}
+impl Visit for RpcFields {
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "method" {
-            self.0 = Some(value.to_owned());
+            self.method = Some(value.to_owned());
+        }
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == "reqs" {
+            self.reqs = Some(value);
         }
     }
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
@@ -162,11 +180,13 @@ where
     }
 
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        let label = (attrs.metadata().target() == RPC_TARGET).then(|| {
-            let mut method = MethodField::default();
-            attrs.record(&mut method);
-            method.0
-        });
+        let (label, reqs) = if attrs.metadata().target() == RPC_TARGET {
+            let mut fields = RpcFields::default();
+            attrs.record(&mut fields);
+            (fields.method, fields.reqs.unwrap_or(1))
+        } else {
+            (None, 1)
+        };
         // Scope walks leaf → root; skip(1) drops the span itself. Foreign
         // ancestors (another layer's spans in the same registry) don't count.
         let root = !ctx
@@ -179,7 +199,8 @@ where
             span.extensions_mut().insert(SpanTiming {
                 start: Instant::now(),
                 root,
-                label: label.flatten(),
+                label,
+                reqs,
             });
         }
     }
@@ -202,6 +223,7 @@ where
             .entry(label)
             .or_default();
         tally.count += 1;
+        tally.reqs += timing.reqs;
         tally.total += elapsed;
         if timing.root {
             tally.root_total += elapsed;
@@ -285,16 +307,33 @@ impl Stats {
 }
 
 /// One section: header line with the total call count, then a row per label.
+/// Where batching makes logical calls outnumber wire requests (`reqs >
+/// count`), the logical count is the headline and the wire count is the
+/// trailing annotation; sections without batching print the one number.
 fn print_section(header: &str, rows: Option<&Rows>) {
-    let count: u64 = rows.into_iter().flatten().map(|(_, t)| t.count).sum();
-    eprintln!("  {header:<22}{count:>12}");
+    let (count, reqs) = rows
+        .into_iter()
+        .flatten()
+        .fold((0u64, 0u64), |(c, r), (_, t)| (c + t.count, r + t.reqs));
+    eprintln!("  {header:<22}{reqs:>12}{}", wire_note(count, reqs));
     for (label, tally) in rows.into_iter().flatten() {
         eprintln!(
-            "    {:<22}{:>5}  {:>12}",
+            "    {:<22}{:>5}  {:>12}{}",
             label,
-            tally.count,
-            fmt_dur(tally.total)
+            tally.reqs,
+            fmt_dur(tally.total),
+            wire_note(tally.count, tally.reqs),
         );
+    }
+}
+
+/// ` (N wire requests)` when batching packed several JSON-RPC calls into
+/// fewer wire round-trips; empty when the counts match (the unbatched case).
+fn wire_note(count: u64, reqs: u64) -> String {
+    if reqs == count {
+        String::new()
+    } else {
+        format!("   ({count} wire requests)")
     }
 }
 
@@ -323,10 +362,18 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     /// What the library's `RpcTimingLayer` emits — a span named `rpc` on the
-    /// rpc target with the wire method in the `method` field.
+    /// rpc target with the wire method in the `method` field and the
+    /// packet's request count in `reqs`. The one-argument form leaves `reqs`
+    /// off to pin the visitor's default of 1.
     macro_rules! rpc_span {
         ($method:literal) => {
             tracing::span!(target: "chainfold::rpc", Level::DEBUG, "rpc", method = $method)
+        };
+        ($method:literal, reqs = $reqs:expr) => {
+            tracing::span!(
+                target: "chainfold::rpc", Level::DEBUG, "rpc",
+                method = $method, reqs = $reqs
+            )
         };
     }
 
@@ -360,6 +407,30 @@ mod tests {
         assert_eq!((singleflight.hits, singleflight.misses), (1, 0));
         let header = &inner.cache_by_layer[&CacheLayer::BlockHeader];
         assert_eq!((header.hits, header.misses), (1, 1));
+    }
+
+    /// Batched RPC spans carry the packet's request count in `reqs`; the
+    /// tally sums it separately from the span count so the summary can show
+    /// logical JSON-RPC calls alongside wire round-trips. Spans without the
+    /// field count as one request each, so `reqs == count` off the RPC path.
+    #[test]
+    fn batched_rpc_spans_sum_logical_requests() {
+        let stats = Stats::default();
+        let subscriber = tracing_subscriber::registry().with(stats.clone());
+        with_default(subscriber, || {
+            drop(rpc_span!("eth_getBlockByNumber", reqs = 100u64).entered());
+            drop(rpc_span!("eth_getBlockByNumber", reqs = 100u64).entered());
+            drop(rpc_span!("eth_getLogs").entered());
+            drop(tracing::span!(target: "chainfold::setup", Level::DEBUG, "db_open").entered());
+        });
+
+        let inner = stats.inner.lock().unwrap();
+        let blocks = &inner.spans[RPC_TARGET]["eth_getBlockByNumber"];
+        assert_eq!((blocks.count, blocks.reqs), (2, 200));
+        let logs = &inner.spans[RPC_TARGET]["eth_getLogs"];
+        assert_eq!((logs.count, logs.reqs), (1, 1));
+        let setup = &inner.spans[SETUP_TARGET]["db_open"];
+        assert_eq!((setup.count, setup.reqs), (1, 1));
     }
 
     /// The contract's summing rule: a nested span (connect inside its RPC)

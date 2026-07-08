@@ -26,10 +26,13 @@
 //! callsite metadata, while the method is dynamic wire data read off the
 //! request, so RPC spans are named `rpc` and carry the method in a `method`
 //! field. Consumers label RPC rows by that field instead of the span name.
+//! RPC spans also carry a `reqs` field — the number of JSON-RPC requests in
+//! the wire packet (1 unless batched) — so a consumer can report logical
+//! call volume alongside wire round-trips.
 //!
 //! | Kind | target | row label |
 //! |---|---|---|
-//! | RPC call | `chainfold::rpc` | `method` field — the JSON-RPC method (`eth_getLogs`, …) |
+//! | RPC wire request | `chainfold::rpc` | `method` field — the JSON-RPC method (`eth_getLogs`, …); `reqs` counts the batched calls |
 //! | Connection setup | `chainfold::connect` | span name — `connect` |
 //! | `SQLite` read | `chainfold::sqlite` | span name — the query (`get_logs_in_range`, …) |
 //! | Setup phase | `chainfold::setup` | span name — the phase (`db_open`, `chainlist_load`, …) |

@@ -60,7 +60,10 @@ pub fn rpc_retry_layer() -> RetryBackoffLayer<OrRetryPolicyFn> {
 /// A batch is one wire request, so it gets one span. Chainfold only issues
 /// homogeneous batches; the span is labelled with their shared method, so
 /// per-method accounting (and the zero-RPC test guards) see through
-/// batching. A mixed batch would fall back to the literal `batch`.
+/// batching. A mixed batch would fall back to the literal `batch`. The
+/// span's `reqs` field carries the packet's request count (1 for singles),
+/// so consumers can report logical JSON-RPC calls alongside wire
+/// round-trips.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RpcTimingLayer;
 
@@ -106,7 +109,11 @@ where
             } else {
                 "batch"
             };
-            tracing::span!(target: "chainfold::rpc", Level::DEBUG, "rpc", method = method)
+            let reqs = match &req {
+                RequestPacket::Single(_) => 1,
+                RequestPacket::Batch(batch) => batch.len() as u64,
+            };
+            tracing::span!(target: "chainfold::rpc", Level::DEBUG, "rpc", method = method, reqs = reqs)
         };
         Box::pin(self.inner.call(req).instrument(span))
     }
@@ -127,11 +134,12 @@ mod tests {
 
     use crate::evm::observe::RPC_TARGET;
 
-    /// One rpc span the layer emitted: its target and `method` field.
+    /// One rpc span the layer emitted: its target and `method`/`reqs` fields.
     #[derive(Debug, PartialEq, Eq)]
     struct CapturedSpan {
         target: &'static str,
         method: Option<String>,
+        reqs: Option<u64>,
     }
 
     /// Records emitted spans so the tests can assert them without depending
@@ -142,11 +150,19 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MethodField(Option<String>);
-    impl Visit for MethodField {
+    struct SpanFields {
+        method: Option<String>,
+        reqs: Option<u64>,
+    }
+    impl Visit for SpanFields {
         fn record_str(&mut self, field: &Field, value: &str) {
             if field.name() == "method" {
-                self.0 = Some(value.to_owned());
+                self.method = Some(value.to_owned());
+            }
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            if field.name() == "reqs" {
+                self.reqs = Some(value);
             }
         }
         fn record_debug(&mut self, _f: &Field, _v: &dyn std::fmt::Debug) {}
@@ -157,11 +173,12 @@ mod tests {
         S: tracing::Subscriber + for<'a> LookupSpan<'a>,
     {
         fn on_new_span(&self, attrs: &Attributes<'_>, _id: &SpanId, _ctx: Context<'_, S>) {
-            let mut method = MethodField::default();
-            attrs.record(&mut method);
+            let mut fields = SpanFields::default();
+            attrs.record(&mut fields);
             self.spans.lock().unwrap().push(CapturedSpan {
                 target: attrs.metadata().target(),
-                method: method.0,
+                method: fields.method,
+                reqs: fields.reqs,
             });
         }
     }
@@ -208,7 +225,8 @@ mod tests {
     }
 
     /// A single request through [`RpcTimingLayer`] emits one span on
-    /// [`RPC_TARGET`] whose `method` field is the wire method name.
+    /// [`RPC_TARGET`] whose `method` field is the wire method name and whose
+    /// `reqs` field is 1.
     #[test]
     fn rpc_timing_layer_labels_span_with_method() {
         let cap = Capture::default();
@@ -220,12 +238,14 @@ mod tests {
         assert!(spans.contains(&CapturedSpan {
             target: RPC_TARGET,
             method: Some("eth_getLogs".to_owned()),
+            reqs: Some(1),
         }));
     }
 
     /// A homogeneous batch — the only kind chainfold issues — is labelled
-    /// with its shared method, so per-method accounting sees through
-    /// batching; a mixed batch falls back to `batch`.
+    /// with its shared method and carries the packet's request count in
+    /// `reqs`, so per-method accounting sees through batching; a mixed batch
+    /// falls back to `batch`.
     #[test]
     fn rpc_timing_layer_labels_batches() {
         let cap = Capture::default();
@@ -244,10 +264,12 @@ mod tests {
         assert!(spans.contains(&CapturedSpan {
             target: RPC_TARGET,
             method: Some("eth_getBlockByNumber".to_owned()),
+            reqs: Some(2),
         }));
         assert!(spans.contains(&CapturedSpan {
             target: RPC_TARGET,
             method: Some("batch".to_owned()),
+            reqs: Some(2),
         }));
     }
 }
