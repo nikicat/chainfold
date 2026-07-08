@@ -36,10 +36,26 @@ use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Timestamp,
 };
 
-/// Wall-clock → position estimation, injected by the source (for EVM it
-/// closes over the chain's block-time anchor). Synchronous — estimation
-/// must not RPC.
-pub type TimePosFn<P> = Arc<dyn Fn(Timestamp) -> Result<P, HistoryError> + Send + Sync>;
+/// Wall-clock → position estimation, injected by the source. Async because
+/// the estimator may need to resolve its anchor on first use (for EVM: a
+/// lazily fetched block-time anchor, cache-first, at most one header fetch
+/// per chain); after that it must be pure extrapolation.
+#[async_trait::async_trait]
+pub trait TimePos<P>: Send + Sync {
+    async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError>;
+}
+
+/// Demand signal for a store whose tip is still unset: a consumer is
+/// waiting for a first snapshot. [`request`](Self::request) is synchronous
+/// and non-blocking — the source observes its end in its own task (where
+/// RPC, retries and backoff live) and delivers through the store's normal
+/// wiring (`on_bump`); the store itself stays purely reactive, waiting on
+/// its tip channel. Must be idempotent — concurrent and repeated calls are
+/// expected. The lazy counterpart of the fetcher: histories fill on
+/// iteration, tips resolve on first consumption.
+pub trait TipSeed: Send + Sync {
+    fn request(&self);
+}
 
 /// Generic [`HistStoreBackend`] over a [`RangeIndex<S>`] plus a single
 /// reactive `end` tip. One instance per source stream (for EVM logs: per
@@ -50,7 +66,11 @@ pub struct RangeIndexStore<S: RangeSpec> {
     /// `end` field and `endChanged` event, fused into a watch channel).
     /// `None` until the first [`on_bump`](Self::on_bump).
     end: watch::Sender<Option<S::PubPos>>,
-    time_pos_fn: TimePosFn<S::PubPos>,
+    time_pos: Arc<dyn TimePos<S::PubPos>>,
+    /// Demand-driven tip observation for lazily seeded sources; `None` for
+    /// sources whose wiring seeds the tip unconditionally (bounded
+    /// backends, tests).
+    tip_seed: Option<Arc<dyn TipSeed>>,
     /// Background wiring driving `on_events`/`on_bump` (subscription loops,
     /// head-clock listeners). Aborted when the store drops — the wiring
     /// holds only a `Weak` back-reference, so there is no cycle.
@@ -62,13 +82,19 @@ pub struct RangeIndexStore<S: RangeSpec> {
 impl<S: RangeSpec> RangeIndexStore<S> {
     /// Wrap `index` with the reactive layer. The tip starts unset — the
     /// source wiring seeds it with the first [`on_bump`](Self::on_bump) /
-    /// [`on_events`](Self::on_events).
-    pub fn new(index: Arc<RangeIndex<S>>, time_pos_fn: TimePosFn<S::PubPos>) -> Arc<Self> {
+    /// [`on_events`](Self::on_events), prompted by `tip_seed` (when given)
+    /// the first time a consumer awaits a snapshot.
+    pub fn new(
+        index: Arc<RangeIndex<S>>,
+        time_pos: Arc<dyn TimePos<S::PubPos>>,
+        tip_seed: Option<Arc<dyn TipSeed>>,
+    ) -> Arc<Self> {
         let (end, _) = watch::channel(None);
         let store = Arc::new(Self {
             index,
             end,
-            time_pos_fn,
+            time_pos,
+            tip_seed,
             wiring: Mutex::new(Vec::new()),
             self_ref: OnceLock::new(),
         });
@@ -127,13 +153,19 @@ impl<S: RangeSpec> RangeIndexStore<S> {
             .expect("RangeIndexStore dropped while still in use")
     }
 
-    /// Await a set tip, yielding the current value if already set.
-    /// Cancel-safe.
+    /// Await a set tip, yielding the current value if already set. An
+    /// unset tip raises the [`TipSeed`] demand signal (when attached) —
+    /// the source observes its end in its own task and the tip arrives
+    /// through the normal wiring — then waits reactively on the tip
+    /// channel. Cancel-safe.
     async fn seeded_end(&self, rx: &mut watch::Receiver<Option<S::PubPos>>) -> S::PubPos {
         loop {
             let cur = rx.borrow_and_update().clone();
             if let Some(tip) = cur {
                 return tip;
+            }
+            if let Some(seed) = &self.tip_seed {
+                seed.request();
             }
             // The sender lives on `self`, which the caller borrows — the
             // channel cannot close while we wait.
@@ -222,7 +254,7 @@ impl<S: RangeSpec> HistStoreBackend<S::Event, S::PubPos> for RangeIndexStore<S> 
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<S::PubPos, HistoryError> {
-        (self.time_pos_fn)(time)
+        self.time_pos.time_pos(time).await
     }
 
     fn load(&self, value: serde_json::Value) -> Option<S::PubPos> {
@@ -248,13 +280,29 @@ mod tests {
     use crate::evm::types::BlockNumber;
     use crate::shared::Shared;
 
-    fn block_store() -> Arc<RangeIndexStore<BlockSpec>> {
+    /// Fixed-position estimator for tests that never exercise `time_pos`.
+    struct ZeroTimePos;
+
+    #[async_trait::async_trait]
+    impl TimePos<BlockNumber> for ZeroTimePos {
+        async fn time_pos(&self, _time: Timestamp) -> Result<BlockNumber, HistoryError> {
+            Ok(BlockNumber::ZERO)
+        }
+    }
+
+    fn block_store_with_seed(
+        tip_seed: Option<Arc<dyn TipSeed>>,
+    ) -> Arc<RangeIndexStore<BlockSpec>> {
         let cache = Shared::new(LogCache::open_in_memory().unwrap());
         let index = Arc::new(RangeIndex::new(
             BlockSpec::new(cache),
             never_fetch::<BlockSpec>(),
         ));
-        RangeIndexStore::new(index, Arc::new(|_| Ok(BlockNumber::ZERO)))
+        RangeIndexStore::new(index, Arc::new(ZeroTimePos), tip_seed)
+    }
+
+    fn block_store() -> Arc<RangeIndexStore<BlockSpec>> {
+        block_store_with_seed(None)
     }
 
     /// Regression: `snapshots()` must emit only when the tip *advances*, never
@@ -294,5 +342,50 @@ mod tests {
         store.on_bump(BlockNumber::new(6));
         let stale = timeout(Duration::from_millis(100), snaps.next()).await;
         assert!(stale.is_err(), "a non-advancing bump must not emit");
+    }
+
+    /// A [`TipSeed`] whose demand side-channel bumps the store — stands in
+    /// for the chain's demand-started clock + wiring.
+    #[derive(Default)]
+    struct BumpOnRequest {
+        target: OnceLock<Weak<RangeIndexStore<BlockSpec>>>,
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TipSeed for BumpOnRequest {
+        fn request(&self) {
+            self.requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(store) = self.target.get().and_then(Weak::upgrade) {
+                store.on_bump(BlockNumber::new(7));
+            }
+        }
+    }
+
+    /// An unset tip raises the demand signal while a consumer awaits, and
+    /// the snapshot resolves once the (source-delivered) tip lands.
+    #[tokio::test]
+    async fn awaiting_consumer_raises_tip_demand() {
+        let seed = Arc::new(BumpOnRequest::default());
+        let store = block_store_with_seed(Some(seed.clone() as Arc<dyn TipSeed>));
+        let _ = seed.target.set(Arc::downgrade(&store));
+
+        let hist = timeout(Duration::from_millis(100), store.next())
+            .await
+            .expect("demand-seeded tip resolves next()");
+        assert_eq!(*hist.end(), BlockNumber::new(7));
+        assert!(
+            seed.requests.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+            "the waiting consumer must raise the demand signal"
+        );
+
+        // A seeded store never raises demand again.
+        let before = seed.requests.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = store.next().await;
+        assert_eq!(
+            seed.requests.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "a set tip must not re-raise demand"
+        );
     }
 }

@@ -47,11 +47,9 @@ async fn build_store(
         EvmChainConfig {
             chunk_size: ChunkSize::new(chunk_size),
             block_time: Duration::from_secs(12),
-            follow: None,
+            ..Default::default()
         },
-    )
-    .await
-    .expect("EvmChain::new");
+    );
     let store = chain.logs(
         &LogFilter::new(USDC, [Some(TRANSFER_TOPIC), None, None, None]),
         Finality::Latest,

@@ -13,8 +13,6 @@
 //!     --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 //!     --from 2025-01-15 --to 2025-01-16
 
-use std::time::Duration;
-
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
@@ -23,7 +21,7 @@ use chainfold::Shared;
 use chainfold::arch::{HistStore, HistoryError, Positioned, Timestamp, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality,
-    LogFilter, SubscribeTransport, Topic, rpc_retry_layer, versioned_path,
+    LogFilter, Topic, rpc_retry_layer, versioned_path,
 };
 use chrono::NaiveDate;
 use clap::Parser;
@@ -176,15 +174,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Topic0:   {t}");
     }
 
-    // Follow mode is fixed at chain construction; --measure ignores --follow.
+    // Head tracking (a 2s poll) starts lazily on the first demand for a
+    // tip; --follow only changes how this example consumes the stores.
     let config = EvmChainConfig {
         chunk_size: ChunkSize::new(args.chunk_size),
-        follow: (args.follow && !args.measure).then(|| SubscribeTransport::Poll {
-            interval: Duration::from_secs(2),
-        }),
         ..Default::default()
     };
-    let chain = EvmChain::new(provider, config.clone()).await?;
+    let chain = EvmChain::new(provider, config.clone());
     let filter = LogFilter::new(address, topics);
     let hist_store = chain.logs(&filter, Finality::Latest);
 
@@ -233,7 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Shared::new(cache_db2.logs()),
         )
         .await?;
-        let chain2 = EvmChain::new(provider2, config).await?;
+        let chain2 = EvmChain::new(provider2, config);
         let hist_store2 = chain2.logs(&filter, Finality::Latest);
         let t1 = Instant::now();
         let warm_n = walk_window(&hist_store2, start, end).await?;

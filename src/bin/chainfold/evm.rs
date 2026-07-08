@@ -11,7 +11,7 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::evm::{
     CacheDb, ChainId, ChainProvider, ChunkSize, ConnectTimingLayer, EvmChain, EvmChainConfig,
-    RpcMethod, SubscribeTransport, rpc_retry_layer, rpc_span, versioned_path,
+    RpcMethod, rpc_retry_layer, rpc_span, versioned_path,
 };
 use tracing::Instrument;
 
@@ -167,21 +167,18 @@ pub async fn run(
         ChainIdCheck::Trust => {}
     }
 
-    // One chain entity per invocation. `--follow` fixes the live-tracking
-    // transport at construction: this binary always builds an HTTP provider,
-    // so follow mode polls (same 2s cadence the old subscribe calls used).
+    // One chain entity per invocation. Construction is free (no RPC, no
+    // tasks); head tracking starts lazily on the first demand for a tip.
+    // This binary always builds an HTTP provider, so the transport is the
+    // default 2s poll — `--follow` only changes how commands consume the
+    // stores, never the chain itself.
     let chain = EvmChain::new(
         provider,
         EvmChainConfig {
             chunk_size: ChunkSize::new(args.chunk_size),
-            follow: match follow {
-                FollowMode::Follow => Some(SubscribeTransport::poll_default()),
-                FollowMode::Once => None,
-            },
             ..EvmChainConfig::default()
         },
-    )
-    .await?;
+    );
 
     match &args.command {
         EvmCommand::Blocks(blocks_args) => {

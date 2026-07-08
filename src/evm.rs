@@ -38,8 +38,8 @@ pub use cache::{
     compute_gaps, versioned_path,
 };
 pub use chain::{
-    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, Finality, HeadEvent,
-    LogFilter, SubscribeTransport,
+    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, Finality, LogFilter,
+    SubscribeTransport,
 };
 pub use chain_provider::ChainProvider;
 pub use erc20::{
@@ -53,6 +53,6 @@ pub use observe::{
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use range_index::{
     BlockPage, BlockPos, BlockSpec, Fetcher, IndexPos, LoadedSpan, LogPage, LogRef, LogSpec,
-    RangeIndex, RangeIndexStore, RangeSpec, TimePosFn,
+    RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed,
 };
 pub use retry::rpc_retry_layer;

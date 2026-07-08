@@ -23,7 +23,6 @@
 //!     --from 2025-01-15 --to 2025-01-16
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
@@ -33,8 +32,8 @@ use chainfold::Shared;
 use chainfold::arch::{HistStore, Timestamp, watch_hist};
 use chainfold::evm::{
     CacheDb, ChainProvider, ChunkSize, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent,
-    EvmPosition, OwnedErc20, SubscribeTransport, TransferDirection, TxHash, apply_transfer,
-    decode_transfer, fetch_erc20_metadata, rpc_retry_layer, versioned_path,
+    EvmPosition, OwnedErc20, TransferDirection, TxHash, apply_transfer, decode_transfer,
+    fetch_erc20_metadata, rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::MergedItem;
 use chrono::NaiveDate;
@@ -295,19 +294,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  DB:       {db_path}");
     println!();
 
-    // One chain per example run; follow mode is fixed at construction. In
-    // follow mode the chain's head clock drives every log store's tip.
+    // One chain per example run. Head tracking (a 2s poll) starts lazily
+    // on the first demand for a tip and drives every log store's tip;
+    // --follow only changes how this example consumes the stores.
     let chain = EvmChain::new(
         provider,
         EvmChainConfig {
             chunk_size: ChunkSize::new(args.chunk_size),
-            follow: args.follow.then(|| SubscribeTransport::Poll {
-                interval: Duration::from_secs(2),
-            }),
             ..Default::default()
         },
-    )
-    .await?;
+    );
 
     for address in &addresses {
         let owned = OwnedErc20::new(&chain, owner, *address);

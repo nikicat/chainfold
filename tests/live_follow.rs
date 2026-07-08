@@ -43,7 +43,7 @@ fn sentinel_filter() -> LogFilter {
 
 fn poll_config(interval: Duration) -> EvmChainConfig {
     EvmChainConfig {
-        follow: Some(SubscribeTransport::Poll { interval }),
+        transport: SubscribeTransport::Poll { interval },
         ..Default::default()
     }
 }
@@ -85,21 +85,27 @@ async fn live_event_latency_ws() {
     let chain = EvmChain::new(
         provider.clone(),
         EvmChainConfig {
-            follow: Some(SubscribeTransport::Ws),
+            transport: SubscribeTransport::Ws,
             ..Default::default()
         },
-    )
-    .await
-    .expect("EvmChain::new");
+    );
     let store = chain.logs(&sentinel_filter(), Finality::Latest);
 
     let mut snapshots = store.snapshots();
-    // Drain the initial snapshot (tip seeded from the construction head).
+    // Awaiting the first snapshot demand-starts the ws clock, whose first
+    // observation is the next `newHeads` push — on a quiet local anvil
+    // that block must be mined. Mine it after a beat so the fresh
+    // subscriptions are installed when it lands.
+    let first_block = {
+        let provider = provider.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(300)).await;
+            mine_blocks(&provider, 1).await;
+        })
+    };
     let initial = snapshots.next().await.expect("initial snapshot");
     let initial_end = *initial.end();
-
-    // Give the WS subscriptions a beat to install.
-    sleep(Duration::from_millis(150)).await;
+    first_block.await.expect("miner task");
 
     let start = Instant::now();
     mine_blocks(&provider, 1).await;
@@ -156,9 +162,7 @@ async fn poll_drain_populates_scanned_ranges() {
     .await
     .expect("discover chain id");
 
-    let chain = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)))
-        .await
-        .expect("EvmChain::new");
+    let chain = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)));
     let store = chain.logs(&sentinel_filter(), Finality::Latest);
 
     let tip_before = store.next().await.end().block;
@@ -218,9 +222,7 @@ async fn resume_seeds_from_current_tip() {
 
     // First chain + store; drop both after a brief moment ("disconnect":
     // the wiring dies with the store, the head clock with the chain).
-    let chain1 = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)))
-        .await
-        .expect("EvmChain::new chain1");
+    let chain1 = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)));
     let store1 = chain1.logs(&sentinel_filter(), Finality::Latest);
     mine_blocks(&provider, 2).await;
     sleep(Duration::from_millis(200)).await;
@@ -234,9 +236,7 @@ async fn resume_seeds_from_current_tip() {
     // Fresh chain + store. Construction fetches the current head and the
     // new store seeds its tip from it (NOT from tip_at_disconnect), so
     // consumers wake up at the right place.
-    let chain2 = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)))
-        .await
-        .expect("EvmChain::new chain2");
+    let chain2 = EvmChain::new(provider.clone(), poll_config(Duration::from_millis(50)));
     let store2 = chain2.logs(&sentinel_filter(), Finality::Latest);
 
     let seeded_tip = store2.next().await.end().block;

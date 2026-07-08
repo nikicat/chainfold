@@ -39,7 +39,7 @@ use common::anvil::{local, skip_no_anvil};
 async fn build_chain(
     db_path: &std::path::Path,
     endpoint: Url,
-    follow: Option<SubscribeTransport>,
+    transport: SubscribeTransport,
 ) -> EvmChain<impl Provider<Ethereum> + Clone + 'static + use<>> {
     let cache = Shared::new(LogCache::open(db_path.to_str().unwrap()).expect("open cache"));
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
@@ -50,11 +50,9 @@ async fn build_chain(
         EvmChainConfig {
             chunk_size: ChunkSize::new(50),
             block_time: Duration::from_secs(12),
-            follow,
+            transport,
         },
     )
-    .await
-    .expect("EvmChain::new")
 }
 
 /// Mine `n` empty blocks on a local anvil. `anvil_mine` is synchronous.
@@ -128,7 +126,12 @@ async fn cold_then_warm_walk() {
     // Cold: walk genesis..=tip, populating cached_blocks via real
     // eth_getBlockByNumber batches against anvil. Starting from ZERO also
     // exercises the from-genesis (Bottom) walk over a real fetcher.
-    let chain_cold = build_chain(&db_path, endpoint.clone(), None).await;
+    let chain_cold = build_chain(
+        &db_path,
+        endpoint.clone(),
+        SubscribeTransport::poll_default(),
+    )
+    .await;
     let store_cold = chain_cold.blocks(Finality::Latest);
     let cold = walk_blocks(&store_cold, BlockNumber::ZERO, tip).await;
 
@@ -160,7 +163,7 @@ async fn cold_then_warm_walk() {
 
     // Warm: fresh chain + store over the same DB, served entirely from
     // cached_blocks (the zero-RPC guarantee is unit-pinned in chain.rs).
-    let chain_warm = build_chain(&db_path, endpoint, None).await;
+    let chain_warm = build_chain(&db_path, endpoint, SubscribeTransport::poll_default()).await;
     let store_warm = chain_warm.blocks(Finality::Latest);
     let warm = walk_blocks(&store_warm, BlockNumber::ZERO, tip).await;
 
@@ -179,7 +182,7 @@ async fn poll_follow_delivers_mined_blocks() {
     let db_path = dir.path().join("blocks_follow.v3.db");
     let provider = ProviderBuilder::new().connect_http(anvil.endpoint_url());
 
-    // Mine one block first so the construction head is a real block (not
+    // Mine one block first so the first observed head is a real block (not
     // genesis): following strictly-after a genesis (ZERO) anchor would also
     // surface block 0, since ZERO is the "before all blocks" sentinel.
     mine_blocks(&provider, 1).await;
@@ -187,14 +190,15 @@ async fn poll_follow_delivers_mined_blocks() {
     let chain = build_chain(
         &db_path,
         anvil.endpoint_url(),
-        Some(SubscribeTransport::Poll {
+        SubscribeTransport::Poll {
             interval: Duration::from_millis(50),
-        }),
+        },
     )
     .await;
     let store = chain.blocks(Finality::Latest);
 
-    // Anchor at the construction tip; follow blocks strictly after it.
+    // Anchor at the demanded tip (the first snapshot starts the clock);
+    // follow blocks strictly after it.
     let start = *store.next().await.end();
     assert!(
         start > BlockNumber::ZERO,

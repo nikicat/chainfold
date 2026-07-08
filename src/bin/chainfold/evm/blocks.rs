@@ -5,8 +5,8 @@
 
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
-use chainfold::arch::{HistStore, Positioned, watch_hist};
-use chainfold::evm::{BlockNumber, EvmBlock, EvmChain, Finality};
+use chainfold::arch::{Hist, Positioned, watch_hist};
+use chainfold::evm::{BlockNumber, BlockRange, EvmBlock, EvmChain, Finality};
 use futures_util::{StreamExt, TryStreamExt};
 
 use crate::cli::{BlocksArgs, BlocksCommand, BlocksListArgs, Direction, EvmArgs, FollowMode};
@@ -14,7 +14,7 @@ use crate::fmt::{
     explorer_base_url, format_base_fee, format_gas, format_timestamp, linked_addr,
     linked_block_hash,
 };
-use crate::util::resolve_blocks_range;
+use crate::util::{WindowSel, block_cut, estimate_date_range, inclusive_range, window_sel};
 
 /// Which columns to render — driven by the `--full` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,25 +58,31 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     direction: Direction,
     follow: FollowMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store: HistStore<EvmBlock, BlockNumber> = chain.blocks(Finality::Latest);
-    let (start, end) = resolve_blocks_range(evm_args, &store).await?;
     let columns = ColumnSet::from_full(args.full);
     let base_url = explorer_base_url(chain.chain_id().get());
-
-    println!("  Chain:    {}", chain.chain_id());
-    println!("  Range:    block {} ..= {}", start + 1, end);
-    println!("  DB:       {db_path}");
-    println!();
-    print_header(columns);
 
     if follow.is_follow() {
         if direction == Direction::Backward {
             eprintln!("note: --reverse is ignored with --follow (append-only stream)");
         }
-        // The chain was built with a poll transport, so the store's tip is
-        // already driven live; consume blocks past `start`.
+        let store = chain.blocks(Finality::Latest);
+        // Only the stream's start matters when following.
+        let from = match window_sel(evm_args)? {
+            WindowSel::Blocks { from_block, .. } => from_block,
+            WindowSel::Dates { from, to } => {
+                estimate_date_range(chain, evm_args, from, to).await?.from
+            }
+            WindowSel::Unspecified { num_blocks } => {
+                // Last N ending at the tip: awaiting the first snapshot
+                // demand-starts the head clock.
+                let tip = *store.next().await.end();
+                tip.saturating_sub(num_blocks.get() - 1)
+            }
+        };
+        print_info(chain, db_path, from, None);
+        print_header(columns);
         println!("Following new blocks (Ctrl+C to stop)...\n");
-        let mut stream = watch_hist(&store, start);
+        let mut stream = watch_hist(&store, block_cut(from));
         let mut count: usize = 0;
         while let Some(item) = stream.next().await {
             print_block(&item?.item, columns, base_url);
@@ -86,14 +92,35 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         return Ok(());
     }
 
-    // Window the current snapshot to (start, end]; split clamps to the
-    // snapshot's bounds (the chain head). The window is bounded by the
-    // resolved range (≤ --num-blocks), so collecting it is fine — and lets
-    // --reverse print newest-first.
-    let hist = store.next().await;
-    let (_, after_start) = hist.split(start);
-    let (window, _) = after_start.split(end);
-    let items: Vec<Positioned<EvmBlock, BlockNumber>> = window.iter().try_collect().await?;
+    // One-shot: a finite window. Explicit and date windows are bounded
+    // hists — head-free, fully offline when the cache is warm. Only the
+    // unspecified "last N blocks" inherently needs the head: it slices the
+    // tail off a snapshot of the reactive store.
+    let hist: Hist<EvmBlock, BlockNumber> = match window_sel(evm_args)? {
+        WindowSel::Blocks {
+            from_block,
+            num_blocks,
+        } => chain.blocks_hist(inclusive_range(from_block, num_blocks)),
+        WindowSel::Dates { from, to } => {
+            chain.blocks_hist(estimate_date_range(chain, evm_args, from, to).await?)
+        }
+        WindowSel::Unspecified { num_blocks } => {
+            let hist = chain.blocks(Finality::Latest).next().await;
+            let tip = *hist.end();
+            let from = tip.saturating_sub(num_blocks.get() - 1);
+            let (_, tail) = hist.split(block_cut(from));
+            tail
+        }
+    };
+
+    let from = *hist.start() + 1;
+    let to = *hist.end();
+    print_info(chain, db_path, from, Some(to));
+    print_header(columns);
+
+    // The window is bounded (≤ --num-blocks), so collecting it is fine —
+    // and lets --reverse print newest-first.
+    let items: Vec<Positioned<EvmBlock, BlockNumber>> = hist.iter().try_collect().await?;
 
     let total = items.len();
     let shown = total.min(evm_args.limit);
@@ -121,6 +148,21 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     }
 
     Ok(())
+}
+
+fn print_info<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
+    chain: &EvmChain<P>,
+    db_path: &str,
+    from: BlockNumber,
+    to: Option<BlockNumber>,
+) {
+    println!("  Chain:    {}", chain.chain_id());
+    match to {
+        Some(to) => println!("  Range:    block {}", BlockRange::new(from, to)),
+        None => println!("  Range:    block {from}..  (following)"),
+    }
+    println!("  DB:       {db_path}");
+    println!();
 }
 
 fn print_header(columns: ColumnSet) {

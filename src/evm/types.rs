@@ -445,6 +445,13 @@ impl BlockRange {
     }
 }
 
+impl std::fmt::Display for BlockRange {
+    /// Inclusive `from..=to`, matching Rust range syntax.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..={}", self.from, self.to)
+    }
+}
+
 // ============================================================
 // ChunkSize
 // ============================================================

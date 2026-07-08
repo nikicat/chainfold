@@ -165,7 +165,7 @@ async fn open_chain(
     rpc_url: &str,
     db_subdir: &str,
     chunk_size: u64,
-    follow: Option<SubscribeTransport>,
+    transport: SubscribeTransport,
 ) -> Result<EvmChain<impl Provider<Ethereum> + Clone + 'static + use<>>, Box<dyn std::error::Error>>
 {
     let url: Url = rpc_url.parse()?;
@@ -182,11 +182,10 @@ async fn open_chain(
         provider,
         EvmChainConfig {
             chunk_size: ChunkSize::new(chunk_size),
-            follow,
+            transport,
             ..Default::default()
         },
-    )
-    .await?)
+    ))
 }
 
 #[tokio::main]
@@ -214,14 +213,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Follow mode is fixed at chain construction; the chains stay alive for
     // the whole run so their head clocks keep driving the stores.
-    let follow = args.follow.then(SubscribeTransport::poll_default);
+    let transport = SubscribeTransport::poll_default();
 
     println!("Opening src history ({})...", args.src_rpc);
     let src_chain = open_chain(
         &args.src_rpc,
         &format!("{}/src", args.db.trim_end_matches('/')),
         args.chunk_size,
-        follow.clone(),
+        transport.clone(),
     )
     .await?;
     let src_store = src_chain.logs(
@@ -229,7 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Finality::Latest,
     );
     let src_chain_id = src_chain.chain_id();
-    let src_tip = src_chain.head(Finality::Latest).get().number;
+    // The first snapshot demands the head — the tip is the snapshot's end.
+    let src_hist = src_store.next().await;
+    let src_tip = src_hist.end().block;
     println!("  src chain_id={src_chain_id} tip_block={src_tip}");
 
     println!("Opening dst history ({})...", args.dst_rpc);
@@ -237,7 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.dst_rpc,
         &format!("{}/dst", args.db.trim_end_matches('/')),
         args.chunk_size,
-        follow,
+        transport,
     )
     .await?;
     let dst_store = dst_chain.logs(
@@ -245,7 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Finality::Latest,
     );
     let dst_chain_id = dst_chain.chain_id();
-    let dst_tip = dst_chain.head(Finality::Latest).get().number;
+    let dst_hist = dst_store.next().await;
+    let dst_tip = dst_hist.end().block;
     println!("  dst chain_id={dst_chain_id} tip_block={dst_tip}");
 
     // Pre-warm caches with a single window split so the matcher's first
@@ -253,9 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let src_from = src_tip.saturating_sub(args.num_blocks);
         let dst_from = dst_tip.saturating_sub(args.num_blocks);
-        let src_hist = src_store.next().await;
         let _ = src_hist.split(EvmPosition::new(src_from.saturating_sub(1).get(), u32::MAX));
-        let dst_hist = dst_store.next().await;
         let _ = dst_hist.split(EvmPosition::new(dst_from.saturating_sub(1).get(), u32::MAX));
     }
 

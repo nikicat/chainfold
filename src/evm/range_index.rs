@@ -43,7 +43,7 @@ pub use block_pos::{BlockPos, LogPage, LogRef};
 pub use block_spec::{BlockPage, BlockSpec};
 pub use log_spec::LogSpec;
 pub use spec::{Fetcher, IndexPos, LoadedSpan, RangeSpec};
-pub use store::{RangeIndexStore, TimePosFn};
+pub use store::{RangeIndexStore, TimePos, TipSeed};
 
 use range_tree::Range;
 

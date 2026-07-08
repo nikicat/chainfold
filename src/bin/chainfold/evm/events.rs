@@ -14,7 +14,7 @@ use crate::cli::{Direction, EventsArgs, EvmArgs, FollowMode};
 use crate::config::Config;
 use crate::fmt::format_timestamp;
 use crate::signature_cache::SqliteSignatureCache;
-use crate::util::{parse_hex_address, resolve_range};
+use crate::util::{log_cut, parse_hex_address, resolve_log_range};
 
 /// How much of a hex value to render — driven by the `--full` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,8 +66,8 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     };
 
     let topics: [Option<Topic>; 4] = [Some(Topic::from(resolved.topic0)), None, None, None];
-    let store = chain.logs(&LogFilter::new(address, topics), Finality::Latest);
-    let (start, end) = resolve_range(evm_args, &store).await?;
+    let filter = LogFilter::new(address, topics);
+    let range = resolve_log_range(chain, evm_args).await?;
 
     println!("  Address:  {address:#x}");
     if let Some(sig) = &resolved.signature {
@@ -75,15 +75,16 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     }
     println!("  Topic0:   {:#x}", resolved.topic0);
     println!("  Chain:    {chain_id}");
-    println!("  Range:    block {} .. {}", start.block, end.block);
+    println!("  Range:    block {range}");
     println!("  DB:       {db_path}");
     println!();
 
     if follow.is_follow() {
-        // The chain was built with a poll transport, so the store's tip is
-        // already driven live; just consume items past `start`.
+        // Awaiting the stream demand-starts the head clock; consume items
+        // past the window's start.
         println!("Following new events (Ctrl+C to stop)...\n");
-        let mut stream = watch_hist(&store, start);
+        let store = chain.logs(&filter, Finality::Latest);
+        let mut stream = watch_hist(&store, log_cut(range.from));
         let mut count = 0;
         while let Some(item) = stream.next().await {
             let item = item?;
@@ -92,12 +93,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         }
         println!("\nHistory closed ({count} events).");
     } else {
-        // Window the current snapshot to (start, end]; split clamps to the
-        // snapshot's bounds (the chain head).
-        let hist = store.next().await;
-        let (_, after_start) = hist.split(start);
-        let (window, _) = after_start.split(end);
-        let mut stream = window.iter();
+        // A bounded hist over exactly the resolved window — head-free,
+        // fully offline when the cache is warm.
+        let hist = chain.logs_hist(&filter, range);
+        let mut stream = hist.iter();
         let mut count = 0;
         while let Some(item) = stream.next().await {
             let item = item?;
