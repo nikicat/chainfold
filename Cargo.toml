@@ -101,6 +101,10 @@ name = "mock_provider_smoke"
 required-features = ["evm"]
 
 [[test]]
+name = "blocks_history"
+required-features = ["evm"]
+
+[[test]]
 name = "cache_layering"
 required-features = ["evm"]
 
