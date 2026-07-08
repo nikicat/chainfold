@@ -468,7 +468,6 @@ mod tests {
     use super::*;
     use crate::arch::{Hist, Position, Positioned};
     use crate::evm::cache::{LogCache, ScanPartition, compute_filter_hash};
-    use crate::evm::observe::RpcMethod;
     use crate::evm::types::{BlockHash, LogIdx};
     use crate::shared::Shared;
 
@@ -674,7 +673,7 @@ mod tests {
 
         // Install the counter only around the walk — the head observation
         // happens before this and isn't counted.
-        let counter = RpcCounter::new(RpcMethod::GetLogs);
+        let counter = RpcCounter::new("eth_getLogs");
         let guard = set_default(tracing_subscriber::registry().with(counter.clone()));
         let items = collect(hist).await;
         drop(guard);

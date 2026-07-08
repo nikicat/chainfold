@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U64, U256};
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::client::ClientBuilder;
 use alloy::rpc::types::Log;
-use alloy::transports::mock::Asserter;
+use alloy::transports::mock::{Asserter, MockTransport};
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
@@ -20,7 +21,8 @@ use super::{EvmChain, EvmChainConfig};
 use crate::arch::Timestamp;
 use crate::evm::cache::{LogCache, ScanPartition, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::observe::{RPC_TARGET, RpcMethod};
+use crate::evm::observe::RPC_TARGET;
+use crate::evm::transport::RpcTimingLayer;
 use crate::evm::types::{
     BlockHash, BlockNumber, BlockRange, ChainId, ChunkSize, EvmBlock, FilterHash, Gas, GasPrice,
     LogIdx, Topic, TxCount,
@@ -151,7 +153,13 @@ pub(super) fn chain_with_queued_heads(
     for _ in 0..responses {
         asserter.push_success(&U64::from(HEAD.get()));
     }
-    let provider = ProviderBuilder::default().connect_mocked_client(asserter);
+    // Same client stack as production wiring: the rpc-timing layer wraps the
+    // (mock) transport. Without it every rpc span disappears here and the
+    // RpcCounter zero-RPC guards would pass vacuously.
+    let client = ClientBuilder::default()
+        .layer(RpcTimingLayer)
+        .transport(MockTransport::new(asserter), true);
+    let provider = ProviderBuilder::default().connect_client(client);
     let provider = ChainProvider::new(provider, TEST_CHAIN, cache);
     EvmChain::new(
         provider,
@@ -178,7 +186,8 @@ pub(super) fn offline_chain(
     chain_with_queued_heads(cache, 0)
 }
 
-/// Tracing layer counting `rpc_span`s for one method — pins "zero RPC"
+/// Tracing layer counting the rpc spans [`RpcTimingLayer`] emits for one
+/// method (matched against the span's `method` field) — pins "zero RPC"
 /// guarantees loudly. Install with `tracing::subscriber::set_default`
 /// around the code under test.
 #[derive(Clone)]
@@ -188,9 +197,9 @@ pub(super) struct RpcCounter {
 }
 
 impl RpcCounter {
-    pub(super) fn new(method: RpcMethod) -> Self {
+    pub(super) fn new(method: &'static str) -> Self {
         Self {
-            method: method.as_str(),
+            method,
             count: Arc::new(AtomicUsize::new(0)),
         }
     }

@@ -7,6 +7,16 @@ use chrono::NaiveDate;
 
 use crate::cli::EvmArgs;
 
+/// Setup-phase span (target `chainfold::setup`): the name is the phase's row
+/// label in the `--stats` summary. A macro, not a fn — `tracing` span names
+/// are static callsite metadata, so each needs its own literal.
+macro_rules! setup_span {
+    ($name:literal) => {
+        tracing::span!(target: "chainfold::setup", tracing::Level::DEBUG, $name)
+    };
+}
+pub(crate) use setup_span;
+
 pub fn parse_hex_address(s: &str) -> Result<Address, String> {
     s.parse().map_err(|e| format!("invalid address: {e}"))
 }

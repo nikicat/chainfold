@@ -194,7 +194,7 @@ lib.rs                     pub mod {arch, combinators, matcher, merge, shared, s
 │  ├─ owned_erc20.rs       two-filter in/out ordered merge
 │  ├─ chain_provider.rs    ChainProvider<P> — chain-scoped RPC seam
 │  ├─ aligned_ranges.rs    aligned_block_ranges
-│  ├─ retry.rs             rpc_retry_layer
+│  ├─ transport.rs         alloy client-stack layers — RpcTimingLayer · rpc_retry_layer
 │  └─ observe.rs           the tracing contract
 └─ bin/chainfold/          ← cfg(feature = "cli"): the real binary
 ```
@@ -780,7 +780,7 @@ The concrete client for EVM log streams (`feature = "evm"`).
 | **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session. Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
-| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Shared<LogCache>`**. Internalizes `rpc_span` instrumentation + error mapping (inherent `get_block_number`/`get_logs`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
+| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Shared<LogCache>`**. Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
 | **`aligned_block_ranges`** | Snaps RPC ranges to `batch_size` boundaries so concurrent consumers hit the same cache entries. |
 
 **Position bridging:** `EvmPosition(0, 0)` ↔ `BlockPos::Bottom`; otherwise
@@ -1095,44 +1095,70 @@ the same rule expressed structurally.
 ## 15. Observability contract
 
 The two headline guarantees are only credible if they stay *measurable*.
-Chainfold emits a small, **stable** `tracing` contract at every RPC and cache
-boundary — a contract, not incidental logging — defined in one place
-(`src/evm/observe.rs`).
+Chainfold emits a small, **stable** `tracing` contract at every RPC, SQLite,
+and setup boundary — a contract, not incidental logging — described in one
+place (`src/evm/observe.rs`).
 
-| Kind | target | span/event | fields |
-|---|---|---|---|
-| RPC call (span) | `chainfold::rpc` | `rpc` | `method` |
-| Connection setup (span) | `chainfold::connect` | `connect` | — |
-| SQLite read (span) | `chainfold::sqlite` | `sqlite` | `op` |
-| Cache hit/miss (event) | `chainfold::cache` | — | `layer`, `outcome` |
+Every span lives under a `chainfold::*` target: the **target** names the kind
+of work (a section in a stats report), the **span name** labels the specific
+operation within it. Consumers aggregate generically by `(target, name)` and
+carry no per-label vocabulary — a span added at any call site shows up in
+every consumer with no consumer change. The one exception is the RPC method:
+`tracing` span names are static callsite metadata, while the method is
+dynamic wire data, so RPC spans are named `rpc` and carry the method in a
+`method` field; consumers label RPC rows by that field.
 
-The **wire format is strings** (what `tracing`/OTLP want); the **emission API
-is typed** — `RpcMethod`, `SqliteOp`, `CacheLayer`, `CacheOutcome` are closed
-enums with `as_str`/`from_wire` inverses, so a call site can't emit a stray
-method name. Spans carry duration (open→close); cache events are instantaneous
-counters. A `singleflight` cache hit means a concurrent caller was coalesced
+| Kind | target | row label |
+|---|---|---|
+| RPC call (span) | `chainfold::rpc` | `method` field — the JSON-RPC method (`eth_getLogs`, …) |
+| Connection setup (span) | `chainfold::connect` | span name — `connect` |
+| SQLite read (span) | `chainfold::sqlite` | span name — the query (`get_blocks_in_range`, …) |
+| Setup phase (span) | `chainfold::setup` | span name — the phase (`chainlist_load`, `client_build`, `db_open`, …) |
+| Cache hit/miss (event) | `chainfold::cache` | `layer` + `outcome` fields |
+
+Spans carry duration (open→close); cache events are instantaneous counters
+with typed `layer`/`outcome` fields (`CacheLayer`/`CacheOutcome` closed
+enums). A `singleflight` cache hit means a concurrent caller was coalesced
 onto an in-flight fetch — an RPC *saved*.
 
-Connect spans come from `ConnectTimingLayer` — a reqwest-agnostic tower layer
-the CLI installs via `reqwest::ClientBuilder::connector_layer`, timing each
-connection establishment (DNS + TCP + TLS). Connections open lazily inside the
-first request that needs one, so a connect span *nests within* that RPC span:
-consumers report it separately and never add it to an RPC total (that would
-double-count the handshake). This is what stops the first RPC of a session
-from reading as mysteriously slow.
+**RPC spans are emitted at the transport boundary**, not at call sites:
+`RpcTimingLayer` (`src/evm/transport.rs`, installed outermost in the alloy
+client stack, before the retry layer) times every request the client sends —
+retries and backoff included — so a new RPC call site cannot be forgotten. A
+batch is one wire request and gets one span, labelled with its shared method
+(chainfold only issues homogeneous batches).
+
+**Summing rule.** Spans may nest: a connection opens lazily inside the first
+request that needs one, so its connect span (`ConnectTimingLayer` — a
+reqwest-agnostic tower layer on the HTTP *connector*, timing DNS + TCP + TLS)
+nests within that RPC span. This is what stops the first RPC of a session
+from reading as mysteriously slow. Consumers that reconcile wall-clock
+against span time sum **root spans only** (no `chainfold::*` ancestor);
+nested spans get their own row but never enter a total — that would
+double-count the handshake.
+
+**Setup spans** time one-shot process-init phases that would otherwise hide
+in the "untracked" remainder: the ~2 MB chainlist JSON parse
+(`chainlist_load`), the TLS root-store load inside HTTP-client construction
+(`client_build` — paid even by sessions that issue zero RPCs), the SQLite
+open + migrations (`db_open`).
 
 **Two consumers, one contract:**
 
 - **CLI `--stats`** (`src/bin/chainfold/stats.rs`) — a `tracing_subscriber`
-  Layer that tallies an end-of-run summary (RPC by method + wall-time, SQLite
-  read time, cache hit/miss). Opt-in via `--stats` / `CHAINFOLD_STATS`; writes
-  to stderr so stdout stays pipeable.
+  Layer that tallies an end-of-run summary by `(target, row label)`: setup
+  phases, RPC by method, SQLite read time, cache hit/miss, and the untracked
+  remainder. Opt-in via `--stats` / `CHAINFOLD_STATS`; writes to stderr so
+  stdout stays pipeable.
 - **Daemon** (planned) — routes the same spans to an OTLP exporter
-  (Tempo/Jaeger); no chainfold-specific glue.
+  (Tempo/Jaeger); no chainfold-specific glue. (`tracing-opentelemetry`'s
+  `otel.name` convention can restore per-method operation names there.)
 
 This doubles as the **anti-regression guard**: the instrumentation that feeds
 the human summary also feeds test assertions on RPC counts (a second walk of a
-cached range must issue zero `eth_getLogs`), so "minimize RPC" can't rot.
+cached range must issue zero `eth_getLogs`), so "minimize RPC" can't rot —
+and because the spans come from the transport layer, the guard sees every
+request, batched or not.
 
 ---
 

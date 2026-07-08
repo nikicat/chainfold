@@ -1,42 +1,65 @@
 //! Observability contract — the structured `tracing` spans and events that
-//! chainfold emits at its RPC and cache boundaries.
+//! chainfold emits at its RPC, `SQLite`, and setup boundaries.
 //!
 //! This is a stable *contract*, not incidental logging. Two consumers depend
 //! on it:
 //!
 //! * The CLI `--stats` summary (`src/bin/chainfold/stats.rs`) installs a
 //!   [`tracing_subscriber::Layer`] that tallies these into an end-of-run
-//!   report: RPC calls by method (+ summed wall-time), `SQLite` read time, and
-//!   cache hit/miss counts. This is how the "minimize RPC" guarantee stays
-//!   visible — and assertable in tests — as the code grows.
+//!   report: wall-time per span kind, and cache hit/miss counts. This is how
+//!   the "minimize RPC" guarantee stays visible — and assertable in tests —
+//!   as the code grows.
 //! * A server-side daemon embedding chainfold routes the same spans to an
 //!   OTLP exporter (Tempo/Jaeger). RPC spans become child spans of whatever
 //!   request span the daemon opened — no chainfold-specific glue needed.
 //!
 //! ## The contract
 //!
-//! | Kind | target | span name | fields |
-//! |---|---|---|---|
-//! | RPC call (span) | `chainfold::rpc` | `rpc` | `method: &str` |
-//! | Connection setup (span) | `chainfold::connect` | `connect` | — |
-//! | `SQLite` read (span) | `chainfold::sqlite` | `sqlite` | `op: &str` |
-//! | Cache hit/miss (event) | `chainfold::cache` | — | `layer: &str`, `outcome: &str` |
+//! Every span chainfold emits lives under a `chainfold::*` target. The
+//! **target** names the kind of work (a section in a stats report); the
+//! **span name** labels the specific operation within it — the SQL query,
+//! the setup phase. Consumers aggregate generically by `(target, name)` and
+//! carry no per-label vocabulary: a new span added at any call site shows up
+//! in every consumer with no consumer change.
 //!
-//! Spans carry duration (open → close); a consumer sums it per `method`/`op`.
-//! Cache events are instantaneous counters keyed by `layer` + `outcome`.
+//! The one exception is the RPC method: `tracing` span names are static
+//! callsite metadata, while the method is dynamic wire data read off the
+//! request, so RPC spans are named `rpc` and carry the method in a `method`
+//! field. Consumers label RPC rows by that field instead of the span name.
 //!
-//! Connect spans ([`ConnectTimingLayer`]) time connection establishment
-//! (DNS + TCP + TLS). A connection is opened lazily by the first request that
-//! needs it, so a connect span *nests inside* that request's RPC span —
-//! consumers must report it separately, never add it to an RPC total (that
-//! would double-count the handshake).
+//! | Kind | target | row label |
+//! |---|---|---|
+//! | RPC call | `chainfold::rpc` | `method` field — the JSON-RPC method (`eth_getLogs`, …) |
+//! | Connection setup | `chainfold::connect` | span name — `connect` |
+//! | `SQLite` read | `chainfold::sqlite` | span name — the query (`get_logs_in_range`, …) |
+//! | Setup phase | `chainfold::setup` | span name — the phase (`db_open`, `chainlist_load`, …) |
+//! | Cache hit/miss (event) | `chainfold::cache` | `layer` + `outcome` fields |
 //!
-//! The wire-level field values are strings (what `tracing`/OTLP want), but the
-//! *emission API* is typed: [`RpcMethod`], [`SqliteOp`], [`CacheLayer`], and
-//! [`CacheOutcome`] are closed sets, so call sites can't emit a stray method
-//! name or flip a hit/miss boolean by accident. Everything is emitted at DEBUG
-//! (spans) / TRACE (events) and costs nothing when no interested subscriber is
-//! installed.
+//! RPC spans are emitted by
+//! [`RpcTimingLayer`](crate::evm::transport::RpcTimingLayer) — a tower layer
+//! installed in the alloy client stack (see
+//! [`transport`](crate::evm::transport)) — for **every** request the client
+//! sends, so a new RPC call site cannot be forgotten.
+//!
+//! Spans carry duration (open → close). Cache hit/miss are instantaneous
+//! *events* counted by their typed `layer`/`outcome` fields ([`CacheLayer`],
+//! [`CacheOutcome`] — closed sets, so a call site can't emit a stray layer or
+//! flip a hit/miss boolean by accident).
+//!
+//! **Summing rule**: spans may nest. A connection is opened lazily by the
+//! first request that needs it, so a connect span ([`ConnectTimingLayer`],
+//! DNS + TCP + TLS) *nests inside* that request's RPC span. A consumer that
+//! reconciles wall-clock against span time must therefore sum *root* spans
+//! only (those with no `chainfold::*` ancestor); nested spans get their own
+//! row but are never added to a total — that would double-count the
+//! handshake.
+//!
+//! Setup spans time one-shot process-initialization phases that would
+//! otherwise hide in a consumer's "untracked" remainder — the chainlist
+//! load, the cache-DB open, the HTTP client build (dominated by parsing the
+//! system TLS root store, and paid even by sessions that never issue an
+//! RPC). Everything is emitted at DEBUG (spans) / TRACE (events) and costs
+//! nothing when no interested subscriber is installed.
 
 use std::task::{Context, Poll};
 
@@ -44,83 +67,18 @@ use tracing::instrument::Instrumented;
 use tracing::{Instrument, Level, Span};
 
 /// Target for per-RPC-call spans. Kept in sync by hand with the literal in
-/// [`rpc_span`] — `tracing`'s `target:` slot only accepts a string literal,
-/// so the const exists for the *subscriber* side to match against.
+/// [`RpcTiming::call`](crate::evm::transport::RpcTiming) — `tracing`'s
+/// `target:` slot only accepts a string literal, so the const exists for the
+/// *subscriber* side to match against.
 pub const RPC_TARGET: &str = "chainfold::rpc";
 /// Target for connection-establishment spans (see [`connect_span`]).
 pub const CONNECT_TARGET: &str = "chainfold::connect";
-/// Target for durable SQLite-read spans (see [`sqlite_span`]).
+/// Target for durable SQLite-read spans.
 pub const SQLITE_TARGET: &str = "chainfold::sqlite";
+/// Target for one-shot setup-phase spans.
+pub const SETUP_TARGET: &str = "chainfold::setup";
 /// Target for cache hit/miss events (see [`cache_event`]).
 pub const CACHE_TARGET: &str = "chainfold::cache";
-
-/// A JSON-RPC method chainfold issues. Closed set: every wire call the library
-/// makes maps to one of these, so the stats summary and any trace exporter see
-/// a bounded, typed vocabulary instead of free-form method strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RpcMethod {
-    GetLogs,
-    GetBlockByNumber,
-    BlockNumber,
-    ChainId,
-    Call,
-}
-
-impl RpcMethod {
-    /// The wire method name, used both as the span field value and in the
-    /// stats summary.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            RpcMethod::GetLogs => "eth_getLogs",
-            RpcMethod::GetBlockByNumber => "eth_getBlockByNumber",
-            RpcMethod::BlockNumber => "eth_blockNumber",
-            RpcMethod::ChainId => "eth_chainId",
-            RpcMethod::Call => "eth_call",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`] — recover the method from a span's wire
-    /// label so a subscriber can key by the typed value, not a raw string.
-    pub fn from_wire(s: &str) -> Option<Self> {
-        Some(match s {
-            "eth_getLogs" => RpcMethod::GetLogs,
-            "eth_getBlockByNumber" => RpcMethod::GetBlockByNumber,
-            "eth_blockNumber" => RpcMethod::BlockNumber,
-            "eth_chainId" => RpcMethod::ChainId,
-            "eth_call" => RpcMethod::Call,
-            _ => return None,
-        })
-    }
-}
-
-/// A durable `SQLite` read worth timing. Closed set for the same reason as
-/// [`RpcMethod`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SqliteOp {
-    GetLogsInRange,
-    GetBlocksInRange,
-    GetScannedRanges,
-}
-
-impl SqliteOp {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            SqliteOp::GetLogsInRange => "get_logs_in_range",
-            SqliteOp::GetBlocksInRange => "get_blocks_in_range",
-            SqliteOp::GetScannedRanges => "get_scanned_ranges",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`].
-    pub fn from_wire(s: &str) -> Option<Self> {
-        Some(match s {
-            "get_logs_in_range" => SqliteOp::GetLogsInRange,
-            "get_blocks_in_range" => SqliteOp::GetBlocksInRange,
-            "get_scanned_ranges" => SqliteOp::GetScannedRanges,
-            _ => return None,
-        })
-    }
-}
 
 /// A cache whose hit/miss ratio is worth reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -185,30 +143,12 @@ impl CacheOutcome {
     }
 }
 
-/// Open a span around one JSON-RPC call. Attach it to the call's future with
-/// [`tracing::Instrument::instrument`] so its open → close duration measures
-/// real RPC latency:
-///
-/// ```ignore
-/// use tracing::Instrument;
-/// let logs = provider.get_logs(&filter).instrument(rpc_span(RpcMethod::GetLogs)).await?;
-/// ```
-pub fn rpc_span(method: RpcMethod) -> Span {
-    tracing::span!(target: "chainfold::rpc", Level::DEBUG, "rpc", method = method.as_str())
-}
-
 /// Open a span around one connection establishment (DNS + TCP + TLS).
 /// Emitted by [`ConnectTimingLayer`]; its open → close duration is the
 /// handshake cost that is otherwise invisible inside the first RPC span on a
 /// fresh connection.
 pub fn connect_span() -> Span {
     tracing::span!(target: "chainfold::connect", Level::DEBUG, "connect")
-}
-
-/// Open a span around one durable `SQLite` read. Enter it with [`Span::entered`]
-/// around the synchronous read so its duration is captured.
-pub fn sqlite_span(op: SqliteOp) -> Span {
-    tracing::span!(target: "chainfold::sqlite", Level::DEBUG, "sqlite", op = op.as_str())
 }
 
 /// Record the outcome of a cache lookup against `layer`.
@@ -272,19 +212,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use tracing::field::{Field, Visit};
-    use tracing::span::{Attributes, Id};
+    use tracing::span::{Attributes, Id as SpanId};
     use tracing::subscriber::with_default;
     use tracing_subscriber::layer::{Context, Layer};
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::registry::LookupSpan;
 
     /// One span the contract emitted: which boundary it marks (`target`, e.g.
-    /// [`RPC_TARGET`]) and its label — the `method` field for an RPC span, the
-    /// `op` field for a `SQLite` span.
+    /// [`CONNECT_TARGET`]) and its static name.
     #[derive(Debug, PartialEq, Eq)]
     struct CapturedSpan {
         target: &'static str,
-        label: String,
+        name: &'static str,
     }
 
     /// One cache hit/miss event the contract emitted.
@@ -304,16 +243,12 @@ mod tests {
 
     #[derive(Default)]
     struct FieldGrab {
-        method: Option<String>,
-        op: Option<String>,
         layer: Option<String>,
         outcome: Option<String>,
     }
     impl Visit for FieldGrab {
         fn record_str(&mut self, field: &Field, value: &str) {
             match field.name() {
-                "method" => self.method = Some(value.to_owned()),
-                "op" => self.op = Some(value.to_owned()),
                 "layer" => self.layer = Some(value.to_owned()),
                 "outcome" => self.outcome = Some(value.to_owned()),
                 _ => {}
@@ -326,13 +261,10 @@ mod tests {
     where
         S: tracing::Subscriber + for<'a> LookupSpan<'a>,
     {
-        fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
-            let mut g = FieldGrab::default();
-            attrs.record(&mut g);
-            let label = g.method.or(g.op).unwrap_or_default();
+        fn on_new_span(&self, attrs: &Attributes<'_>, _id: &SpanId, _ctx: Context<'_, S>) {
             self.spans.lock().unwrap().push(CapturedSpan {
                 target: attrs.metadata().target(),
-                label,
+                name: attrs.metadata().name(),
             });
         }
 
@@ -356,6 +288,7 @@ mod tests {
         assert_eq!(RPC_TARGET, "chainfold::rpc");
         assert_eq!(CONNECT_TARGET, "chainfold::connect");
         assert_eq!(SQLITE_TARGET, "chainfold::sqlite");
+        assert_eq!(SETUP_TARGET, "chainfold::setup");
         assert_eq!(CACHE_TARGET, "chainfold::cache");
     }
 
@@ -364,22 +297,6 @@ mod tests {
     /// emitted label.
     #[test]
     fn wire_labels_round_trip() {
-        for m in [
-            RpcMethod::GetLogs,
-            RpcMethod::GetBlockByNumber,
-            RpcMethod::BlockNumber,
-            RpcMethod::ChainId,
-            RpcMethod::Call,
-        ] {
-            assert_eq!(RpcMethod::from_wire(m.as_str()), Some(m));
-        }
-        for op in [
-            SqliteOp::GetLogsInRange,
-            SqliteOp::GetBlocksInRange,
-            SqliteOp::GetScannedRanges,
-        ] {
-            assert_eq!(SqliteOp::from_wire(op.as_str()), Some(op));
-        }
         for layer in [
             CacheLayer::BlockHeader,
             CacheLayer::Erc20Metadata,
@@ -391,25 +308,6 @@ mod tests {
         for outcome in [CacheOutcome::Hit, CacheOutcome::Miss] {
             assert_eq!(CacheOutcome::from_wire(outcome.as_str()), Some(outcome));
         }
-    }
-
-    #[test]
-    fn emits_rpc_and_sqlite_spans_with_labels() {
-        let cap = Capture::default();
-        let subscriber = tracing_subscriber::registry().with(cap.clone());
-        with_default(subscriber, || {
-            drop(rpc_span(RpcMethod::GetLogs).entered());
-            drop(sqlite_span(SqliteOp::GetLogsInRange).entered());
-        });
-        let spans = cap.spans.lock().unwrap();
-        assert!(spans.contains(&CapturedSpan {
-            target: RPC_TARGET,
-            label: RpcMethod::GetLogs.as_str().to_owned(),
-        }));
-        assert!(spans.contains(&CapturedSpan {
-            target: SQLITE_TARGET,
-            label: SqliteOp::GetLogsInRange.as_str().to_owned(),
-        }));
     }
 
     /// The connector layer emits one connect span per service call — driving
@@ -452,7 +350,7 @@ mod tests {
         let spans = cap.spans.lock().unwrap();
         assert!(spans.contains(&CapturedSpan {
             target: CONNECT_TARGET,
-            label: String::new(),
+            name: "connect",
         }));
     }
 

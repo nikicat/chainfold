@@ -16,12 +16,10 @@ use alloy::network::Ethereum;
 use alloy::providers::Provider;
 use alloy::rpc::types::Block;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::Instrument;
 
 use super::{EvmChain, Finality, LazyAnchor, estimate_block_from_time, wiring};
 use crate::arch::{Hist, HistStore, HistoryError, Timestamp};
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::observe::{RpcMethod, rpc_span};
 use crate::evm::range_index::{
     BlockPage, BlockSpec, Fetcher, RangeIndex, RangeIndexStore, TimePos, TipSeed,
 };
@@ -201,7 +199,6 @@ where
 
     batch
         .send()
-        .instrument(rpc_span(RpcMethod::GetBlockByNumber))
         .await
         .map_err(|e| HistoryError::internal(format!("batch send: {e}")))?;
 
@@ -319,7 +316,7 @@ mod tests {
         let chain = make_chain(warm_blocks_cache());
         let hist = chain.blocks(Finality::Latest).next().await;
 
-        let counter = RpcCounter::new(RpcMethod::GetBlockByNumber);
+        let counter = RpcCounter::new("eth_getBlockByNumber");
         let guard = set_default(tracing_subscriber::registry().with(counter.clone()));
         let items: Vec<Positioned<EvmBlock, BlockNumber>> =
             hist.iter().try_collect().await.unwrap();

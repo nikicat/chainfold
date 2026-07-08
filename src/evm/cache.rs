@@ -187,6 +187,8 @@ impl CacheDb {
     /// Open a cache at the given path. Creates the DB and runs migrations if
     /// needed.
     pub fn open(path: &str) -> Result<Self, CacheError> {
+        let _span =
+            tracing::span!(target: "chainfold::setup", tracing::Level::DEBUG, "db_open").entered();
         let mut conn = Connection::open(path)?;
         configure_connection(&conn)?;
         migrations().to_latest(&mut conn)?;

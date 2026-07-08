@@ -11,7 +11,7 @@
 > integration (anvil_smoke + mock_provider_smoke + the hist_store /
 > combinators / interleave / matcher suites), plus anvil/fork-only ignored
 > tests (owned_erc20, cache_layering, live_follow, anvil_smoke) and an ignored
-> `rpc_span` doctest. Run the command for the live count — this file
+> `evm::transport` doctest. Run the command for the live count — this file
 > deliberately doesn't pin a number that goes stale.
 
 ---
@@ -41,7 +41,7 @@ layering. Built on three locked-in structural shifts:
 - **EVM source** (concrete): `src/evm/` — `chain/` (`EvmChain`, head clock,
   per-store wiring), `range_index/` (generic tree + `RangeIndexStore` +
   `LogSpec`), `cache/`, `chain_provider.rs`, `erc20.rs`, `owned_erc20.rs`,
-  `types.rs`, `retry.rs`, `aligned_ranges.rs`, `signatures.rs`.
+  `types.rs`, `transport.rs`, `aligned_ranges.rs`, `signatures.rs`.
 - **Product CLI:** `src/bin/chainfold/` (behind the `cli` feature) — the real
   binary, carrying its own unit tests. Distinct from the per-feature **demo
   binaries** in `examples/` (`history_explorer`, `erc20_explorer`,

@@ -22,7 +22,7 @@ pub mod erc20;
 pub mod observe;
 mod owned_erc20;
 mod range_index;
-mod retry;
+mod transport;
 mod types;
 
 pub use aligned_ranges::{AlignedRange, Alignment, aligned_block_ranges};
@@ -48,11 +48,11 @@ pub use erc20::{
 };
 pub use observe::{
     CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, ConnectTimingLayer, RPC_TARGET,
-    RpcMethod, SQLITE_TARGET, SqliteOp, cache_event, connect_span, rpc_span, sqlite_span,
+    SETUP_TARGET, SQLITE_TARGET, cache_event, connect_span,
 };
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use range_index::{
     BlockPage, BlockPos, BlockSpec, Fetcher, IndexPos, LoadedSpan, LogPage, LogRef, LogSpec,
     RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed,
 };
-pub use retry::rpc_retry_layer;
+pub use transport::{RpcTimingLayer, rpc_retry_layer};

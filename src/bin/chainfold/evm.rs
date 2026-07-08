@@ -11,13 +11,13 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::evm::{
     CacheDb, ChainId, ChainProvider, ChunkSize, ConnectTimingLayer, EvmChain, EvmChainConfig,
-    RpcMethod, rpc_retry_layer, rpc_span, versioned_path,
+    RpcTimingLayer, rpc_retry_layer, versioned_path,
 };
-use tracing::Instrument;
 
 use crate::chains::{ChainHandle, ChainResolver, ChainSelector, select_chain};
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
 use crate::config::{ChainIdCheck, Config, ConfigError, RpcSource};
+use crate::util::setup_span;
 
 /// Env var overriding the configured/built-in default chain, consulted when
 /// neither `--chain` nor `--chain-id` is passed.
@@ -135,12 +135,20 @@ pub async fn run(
     // connector is wrapped with the connect-timing layer: DNS+TCP+TLS setup
     // gets its own `connect` span in --stats, and the first RPC on a fresh
     // connection stops looking mysteriously slow.
-    let http_client = reqwest::Client::builder()
-        .connector_layer(ConnectTimingLayer)
-        .build()?;
+    let http_client = {
+        // `build()` eagerly loads and PEM-parses the system TLS root store —
+        // several ms paid even when the whole run is served from cache.
+        let _span = setup_span!("client_build").entered();
+        reqwest::Client::builder()
+            .connector_layer(ConnectTimingLayer)
+            .build()?
+    };
     let transport = Http::with_client(http_client, url);
     let is_local = transport.guess_local();
+    // Rpc timing goes outermost (before retry) so one `rpc` span covers each
+    // logical request end-to-end, retries and backoff included.
     let client = ClientBuilder::default()
+        .layer(RpcTimingLayer)
         .layer(rpc_retry_layer())
         .transport(transport, is_local);
     // The chain id is already resolved (and typed) from args — bundle it into
@@ -154,10 +162,7 @@ pub async fn run(
 
     match config.chain_id_check() {
         ChainIdCheck::Verify => {
-            let rpc_chain_id = provider
-                .get_chain_id()
-                .instrument(rpc_span(RpcMethod::ChainId))
-                .await?;
+            let rpc_chain_id = provider.get_chain_id().await?;
             if rpc_chain_id != chain_id.get() {
                 eprintln!(
                     "warning: requested chain {chain_id} but RPC reports chain {rpc_chain_id}"

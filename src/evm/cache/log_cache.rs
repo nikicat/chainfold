@@ -16,12 +16,20 @@ use rusqlite::types::{ToSql, ToSqlOutput};
 
 use super::{CacheError, SharedConn, col_address, col_b256, col_b256_opt};
 use crate::arch::Timestamp;
-use crate::evm::observe::{SqliteOp, sqlite_span};
 use crate::evm::types::{BlockHash, BlockNumber, BlockRange, EvmBlock, FilterHash, LogIdx, Topic};
 
 // ============================================================
 // Helpers
 // ============================================================
+
+/// `SQLite`-read span (target `chainfold::sqlite`): the name is the query's
+/// row label in a stats report. A macro, not a fn — `tracing` span names are
+/// static callsite metadata, so each needs its own literal.
+macro_rules! sqlite_span {
+    ($name:literal) => {
+        tracing::span!(target: "chainfold::sqlite", tracing::Level::DEBUG, $name)
+    };
+}
 
 /// Compute a deterministic BLAKE3 hash of (address, topic0-3).
 ///
@@ -231,7 +239,7 @@ impl LogCache {
         filter_hash: &FilterHash,
         range: BlockRange,
     ) -> Result<Vec<Log>, CacheError> {
-        let _span = sqlite_span(SqliteOp::GetLogsInRange).entered();
+        let _span = sqlite_span!("get_logs_in_range").entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT block_number, log_index, address, topic0, topic1, topic2, topic3,
@@ -277,7 +285,7 @@ impl LogCache {
         &self,
         partition: &ScanPartition,
     ) -> Result<Vec<BlockRange>, CacheError> {
-        let _span = sqlite_span(SqliteOp::GetScannedRanges).entered();
+        let _span = sqlite_span!("get_scanned_ranges").entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT start_block, end_block FROM scanned_ranges
@@ -496,7 +504,7 @@ impl LogCache {
     /// All cached, non-reorged blocks with heights in `range` (inclusive),
     /// ordered by height.
     pub fn get_blocks_in_range(&self, range: BlockRange) -> Result<Vec<EvmBlock>, CacheError> {
-        let _span = sqlite_span(SqliteOp::GetBlocksInRange).entered();
+        let _span = sqlite_span!("get_blocks_in_range").entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT height, hash, parent_hash, timestamp, tx_count, gas_used, gas_limit,

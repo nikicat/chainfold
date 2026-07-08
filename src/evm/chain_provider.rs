@@ -8,11 +8,13 @@
 //! instead of `(provider, cache)` pairs, and gives the wrapper a home for
 //! cross-cutting RPC concerns:
 //!
-//! * **Observability** — the inherent [`get_block_number`], [`get_logs`]
-//!   and [`ensure_block_header`] methods carry their `rpc_span` and error
-//!   mapping internally, so call sites don't repeat the ceremony. The
-//!   inherent methods deliberately shadow the [`Provider`] trait methods of
-//!   the same name.
+//! * **Error mapping** — the inherent [`get_block_number`], [`get_logs`]
+//!   and [`ensure_block_header`] methods map transport errors into
+//!   [`HistoryError`] internally, so call sites don't repeat the ceremony.
+//!   (RPC *timing* needs no ceremony anywhere: the transport stack's
+//!   [`RpcTimingLayer`](crate::evm::transport::RpcTimingLayer) times every
+//!   request.) The inherent methods deliberately shadow the [`Provider`]
+//!   trait methods of the same name.
 //! * **Header singleflight** — [`ensure_block_header`] is cache-first and
 //!   coalesces concurrent misses for the same block onto one
 //!   `eth_getBlockByNumber` (per-block gate + double-checked cache read).
@@ -30,7 +32,6 @@
 //! [`ensure_block_header`]: ChainProvider::ensure_block_header
 
 use std::collections::HashMap;
-use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -38,11 +39,10 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::{Filter, Log};
-use tracing::Instrument;
 
 use crate::arch::{HistoryError, Timestamp};
 use crate::evm::cache::{BlockHeader, LogCache};
-use crate::evm::observe::{CacheLayer, CacheOutcome, RpcMethod, cache_event, rpc_span};
+use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};
 use crate::evm::types::{BlockHash, BlockNumber, ChainId};
 use crate::shared::Shared;
 
@@ -120,25 +120,22 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
     pub async fn discover(inner: P, cache: Shared<LogCache>) -> Result<Self, HistoryError> {
         let chain_id = inner
             .get_chain_id()
-            .instrument(rpc_span(RpcMethod::ChainId))
             .await
             .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
         Ok(Self::new(inner, ChainId::new(chain_id), cache))
     }
 
-    /// `eth_blockNumber`, instrumented. Shadows the [`Provider`] method.
+    /// `eth_blockNumber`, error-mapped. Shadows the [`Provider`] method.
     pub async fn get_block_number(&self) -> Result<BlockNumber, HistoryError> {
         Provider::get_block_number(&self.inner)
-            .instrument(rpc_span(RpcMethod::BlockNumber))
             .await
             .map(BlockNumber::new)
             .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))
     }
 
-    /// `eth_getLogs`, instrumented. Shadows the [`Provider`] method.
+    /// `eth_getLogs`, error-mapped. Shadows the [`Provider`] method.
     pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>, HistoryError> {
         Provider::get_logs(&self.inner, filter)
-            .instrument(rpc_span(RpcMethod::GetLogs))
             .await
             .map_err(|e| HistoryError::internal(format!("eth_getLogs failed: {e}")))
     }
@@ -180,8 +177,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
         let fetched = self
             .inner
             .get_block_by_number(BlockNumberOrTag::Number(block.get()))
-            .into_future()
-            .instrument(rpc_span(RpcMethod::GetBlockByNumber))
             .await
             .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
             .ok_or_else(|| HistoryError::internal(format!("block {block} not found")))?;

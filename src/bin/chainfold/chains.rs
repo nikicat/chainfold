@@ -15,6 +15,9 @@ use chainfold::evm::ChainId;
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 use thiserror::Error;
+use tracing::Instrument;
+
+use crate::util::setup_span;
 
 const CHAINLIST_URL: &str = "https://chainlist.org/rpcs.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -344,6 +347,8 @@ impl ChainResolver {
     /// Load the resolver from a JSON file on disk. The path is captured into
     /// `Io`/`Parse` errors so the message tells the user what to delete.
     pub fn load_from_path(path: &Path) -> Result<Self, ChainResolveError> {
+        // ~2 MB of serde_json — one of the larger fixed costs of a run.
+        let _span = setup_span!("chainlist_load").entered();
         let bytes = fs::read(path).map_err(|source| ChainResolveError::Io {
             path: path.to_owned(),
             source,
@@ -364,7 +369,11 @@ impl ChainResolver {
     pub async fn load_or_fetch() -> Result<Self, ChainResolveError> {
         let path = default_cache_path();
         if !path.exists() {
-            Self::fetch_and_persist(&path).await?;
+            // Sequential sibling of `chainlist_load`, not its parent — nested
+            // setup spans would double-count in a stats consumer's sum.
+            Self::fetch_and_persist(&path)
+                .instrument(setup_span!("chainlist_fetch"))
+                .await?;
         }
         Self::load_from_path(&path)
     }
