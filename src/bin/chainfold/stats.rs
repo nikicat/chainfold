@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chainfold::evm::{
-    CACHE_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, RpcMethod, SQLITE_TARGET, SqliteOp,
+    CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, RpcMethod, SQLITE_TARGET,
+    SqliteOp,
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
@@ -55,6 +56,11 @@ impl HitMiss {
 #[derive(Default)]
 struct Inner {
     rpc_by_method: BTreeMap<RpcMethod, Tally>,
+    /// Connection establishment (DNS + TCP + TLS). One label, so a plain
+    /// tally — no map. NOT part of the tracked sum: connects happen lazily
+    /// inside the first RPC on a fresh connection, so their time already
+    /// sits within an RPC span's duration.
+    connect: Tally,
     sqlite_by_op: BTreeMap<SqliteOp, Tally>,
     cache_by_layer: BTreeMap<CacheLayer, HitMiss>,
 }
@@ -70,6 +76,7 @@ pub struct Stats {
 #[derive(Clone, Copy)]
 enum TimedOp {
     Rpc(RpcMethod),
+    Connect,
     Sqlite(SqliteOp),
 }
 
@@ -114,7 +121,10 @@ impl Visit for CacheFields {
 }
 
 fn is_ours(target: &str) -> bool {
-    target == RPC_TARGET || target == SQLITE_TARGET || target == CACHE_TARGET
+    target == RPC_TARGET
+        || target == CONNECT_TARGET
+        || target == SQLITE_TARGET
+        || target == CACHE_TARGET
 }
 
 impl<S> Layer<S> for Stats
@@ -145,6 +155,8 @@ where
                 .as_deref()
                 .and_then(RpcMethod::from_wire)
                 .map(TimedOp::Rpc),
+            // Connect spans carry no label — the target alone identifies them.
+            CONNECT_TARGET => Some(TimedOp::Connect),
             SQLITE_TARGET => label
                 .op
                 .as_deref()
@@ -169,6 +181,7 @@ where
         let mut inner = self.inner.lock().unwrap();
         let tally = match timing.op {
             TimedOp::Rpc(method) => inner.rpc_by_method.entry(method).or_default(),
+            TimedOp::Connect => &mut inner.connect,
             TimedOp::Sqlite(op) => inner.sqlite_by_op.entry(op).or_default(),
         };
         tally.count += 1;
@@ -215,6 +228,20 @@ impl Stats {
             );
         }
 
+        // Connection setup is reported on its own but NOT subtracted from the
+        // RPC rows: a connect happens lazily inside the first RPC on a fresh
+        // connection, so that RPC's end-to-end time honestly includes it.
+        // This row is why that first call reads slower than its siblings.
+        if inner.connect.count > 0 {
+            eprintln!("  connections           {:>12}", inner.connect.count);
+            eprintln!(
+                "    {:<22}{:>5}  {:>12}",
+                "dns+tcp+tls",
+                inner.connect.count,
+                fmt_dur(inner.connect.total)
+            );
+        }
+
         if !inner.sqlite_by_op.is_empty() {
             let sqlite_total: u64 = inner.sqlite_by_op.values().map(|t| t.count).sum();
             eprintln!("  sqlite reads          {sqlite_total:>12}");
@@ -242,10 +269,12 @@ impl Stats {
         }
 
         // Everything not inside a tracked span: process/provider setup, chain
-        // resolution (chainlist parse), TLS/DNS, and idle between calls. Spans
-        // are mostly sequential in the CLI, so this reconciles `duration` with
+        // resolution (chainlist parse), and idle between calls. Spans are
+        // mostly sequential in the CLI, so this reconciles `duration` with
         // the tracked totals; with concurrent fetches it's an upper bound on
         // what's truly untracked (overlapping spans get double-counted out).
+        // Connect time is deliberately absent from the sum — it nests inside
+        // RPC spans, so adding it would subtract the handshake twice.
         let tracked: Duration = inner
             .rpc_by_method
             .values()
@@ -257,7 +286,7 @@ impl Stats {
                 .map(|t| t.total)
                 .sum::<Duration>();
         eprintln!(
-            "  untracked             {:>12}   (setup, chain resolution, TLS, gaps)",
+            "  untracked             {:>12}   (setup, chain resolution, gaps)",
             fmt_dur(wall.saturating_sub(tracked))
         );
         eprintln!();
@@ -283,7 +312,7 @@ fn fmt_dur(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chainfold::evm::{cache_event, rpc_span, sqlite_span};
+    use chainfold::evm::{cache_event, connect_span, rpc_span, sqlite_span};
     use tracing::subscriber::with_default;
     use tracing_subscriber::prelude::*;
 
@@ -295,6 +324,7 @@ mod tests {
             drop(rpc_span(RpcMethod::GetLogs).entered());
             drop(rpc_span(RpcMethod::GetLogs).entered());
             drop(rpc_span(RpcMethod::GetBlockByNumber).entered());
+            drop(connect_span().entered());
             drop(sqlite_span(SqliteOp::GetLogsInRange).entered());
             cache_event(CacheLayer::Singleflight, CacheOutcome::Hit);
             cache_event(CacheLayer::BlockHeader, CacheOutcome::Miss);
@@ -304,6 +334,7 @@ mod tests {
         let inner = stats.inner.lock().unwrap();
         assert_eq!(inner.rpc_by_method[&RpcMethod::GetLogs].count, 2);
         assert_eq!(inner.rpc_by_method[&RpcMethod::GetBlockByNumber].count, 1);
+        assert_eq!(inner.connect.count, 1);
         assert_eq!(inner.sqlite_by_op[&SqliteOp::GetLogsInRange].count, 1);
 
         let singleflight = &inner.cache_by_layer[&CacheLayer::Singleflight];

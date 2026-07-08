@@ -6,11 +6,12 @@ use std::path::PathBuf;
 
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
+use alloy::transports::http::Http;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, RpcMethod,
-    SubscribeTransport, rpc_retry_layer, rpc_span, versioned_path,
+    CacheDb, ChainId, ChainProvider, ChunkSize, ConnectTimingLayer, EvmChain, EvmChainConfig,
+    RpcMethod, SubscribeTransport, rpc_retry_layer, rpc_span, versioned_path,
 };
 use tracing::Instrument;
 
@@ -130,7 +131,18 @@ pub async fn run(
     let db_path = versioned_path(&db_path_buf.to_string_lossy());
     let cache = CacheDb::open(&db_path)?;
 
-    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
+    // Hand-build the HTTP client (instead of `ClientBuilder::http`) so the
+    // connector is wrapped with the connect-timing layer: DNS+TCP+TLS setup
+    // gets its own `connect` span in --stats, and the first RPC on a fresh
+    // connection stops looking mysteriously slow.
+    let http_client = reqwest::Client::builder()
+        .connector_layer(ConnectTimingLayer)
+        .build()?;
+    let transport = Http::with_client(http_client, url);
+    let is_local = transport.guess_local();
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
+        .transport(transport, is_local);
     // The chain id is already resolved (and typed) from args — bundle it into
     // the provider so the EVM layer reads it for free instead of re-fetching
     // eth_chainId.

@@ -47,8 +47,8 @@ pub use erc20::{
     fetch_erc20_metadata,
 };
 pub use observe::{
-    CACHE_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, RpcMethod, SQLITE_TARGET, SqliteOp,
-    cache_event, rpc_span, sqlite_span,
+    CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, ConnectTimingLayer, RPC_TARGET,
+    RpcMethod, SQLITE_TARGET, SqliteOp, cache_event, connect_span, rpc_span, sqlite_span,
 };
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use range_index::{

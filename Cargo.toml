@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-evm = ["dep:alloy", "dep:tracing", "dep:blake3"]
+evm = [
+  "dep:alloy",
+  "dep:tracing",
+  "dep:blake3",
+  "dep:tower-layer",
+  "dep:tower-service",
+]
 cli = [
   "evm",
   "dep:clap",
@@ -47,6 +53,10 @@ alloy = { version = "1", features = [
 ], optional = true }
 tracing = { version = "0.1", optional = true }
 blake3 = { version = "1.8", optional = true }
+# Trait-only crates (the same traits `tower` re-exports) for the connect-timing
+# connector layer in `evm::observe` — no need for the full tower stack.
+tower-layer = { version = "0.3", optional = true }
+tower-service = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",

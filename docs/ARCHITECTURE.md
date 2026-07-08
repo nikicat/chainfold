@@ -1084,6 +1084,7 @@ boundary — a contract, not incidental logging — defined in one place
 | Kind | target | span/event | fields |
 |---|---|---|---|
 | RPC call (span) | `chainfold::rpc` | `rpc` | `method` |
+| Connection setup (span) | `chainfold::connect` | `connect` | — |
 | SQLite read (span) | `chainfold::sqlite` | `sqlite` | `op` |
 | Cache hit/miss (event) | `chainfold::cache` | — | `layer`, `outcome` |
 
@@ -1093,6 +1094,14 @@ enums with `as_str`/`from_wire` inverses, so a call site can't emit a stray
 method name. Spans carry duration (open→close); cache events are instantaneous
 counters. A `singleflight` cache hit means a concurrent caller was coalesced
 onto an in-flight fetch — an RPC *saved*.
+
+Connect spans come from `ConnectTimingLayer` — a reqwest-agnostic tower layer
+the CLI installs via `reqwest::ClientBuilder::connector_layer`, timing each
+connection establishment (DNS + TCP + TLS). Connections open lazily inside the
+first request that needs one, so a connect span *nests within* that RPC span:
+consumers report it separately and never add it to an RPC total (that would
+double-count the handshake). This is what stops the first RPC of a session
+from reading as mysteriously slow.
 
 **Two consumers, one contract:**
 
