@@ -27,14 +27,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v5
+        # rust-cache prunes before saving (drops workspace-own artifacts,
+        # incremental state, and lockfile-stale deps), so the cache stays
+        # bounded — raw actions/cache with restore-keys grew a superset
+        # every generation until the runner disk overflowed.
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          cache-on-failure: true
 
       - name: rustfmt
         run: cargo fmt --all -- --check
@@ -86,14 +85,11 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v5
+        # Keyed per job automatically, so this stays separate from the
+        # `ci` job's cache (as the old -coverage- key did).
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-coverage-
+          cache-on-failure: true
 
       - name: Collect coverage (lcov)
         # Anvil/fork tests are #[ignore]'d and excluded for the same
