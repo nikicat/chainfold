@@ -4,14 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-evm = [
-  "dep:alloy",
-  "dep:tracing",
-  "dep:blake3",
-  "dep:tower-layer",
-  "dep:tower-service",
-  "dep:bytesize",
-]
+evm = ["dep:alloy"]
 cli = [
   "evm",
   "dep:clap",
@@ -54,13 +47,13 @@ alloy = { version = "1", features = [
   # RequestPacket, for the rpc-timing layer in `evm::transport`.
   "json-rpc",
 ], optional = true }
-tracing = { version = "0.1", optional = true }
-blake3 = { version = "1.8", optional = true }
+tracing = "0.1"
+blake3 = "1.8"
 # Trait-only crates (the same traits `tower` re-exports) for the timing
-# layers in `evm::observe` / `evm::transport` — no need for the full tower
+# layers in `observe` / `evm::transport` — no need for the full tower
 # stack.
-tower-layer = { version = "0.3", optional = true }
-tower-service = { version = "0.3", optional = true }
+tower-layer = "0.3"
+tower-service = "0.3"
 clap = { version = "4", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",
@@ -69,7 +62,7 @@ chrono = { version = "0.4", optional = true }
 toml = { version = "0.8", optional = true }
 dirs = { version = "6", optional = true }
 tempfile = { version = "3", optional = true }
-bytesize = { version = "2", optional = true }
+bytesize = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
