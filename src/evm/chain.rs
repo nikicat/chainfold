@@ -49,8 +49,8 @@ use tokio::sync::OnceCell;
 
 use crate::arch::{HistoryError, Timestamp};
 use crate::chain::{
-    BlockNumber, BlockTimeSource, ChunkSize, HeadClock, HeadSeeder, LazyAnchor, TimeAnchor,
-    estimate_block_from_time,
+    BlockNumber, BlockRange, BlockTimeSource, ChunkSize, HeadClock, HeadSeeder, TimeAnchor,
+    TimeLocator,
 };
 use crate::evm::cache::LogCache;
 use crate::evm::chain_provider::ChainProvider;
@@ -129,33 +129,32 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
         &self.provider
     }
 
-    /// Estimate the block mined around wall-clock `time`, from the lazily
-    /// resolved anchor + the configured block time. The first call demands
-    /// the head (starting tracking if needed) and reads one header
-    /// (cache-first); afterwards it is pure arithmetic.
+    /// The first block minted at/after wall-clock `time` (clamped to the
+    /// head observed when the anchor resolved). The nominal block cadence
+    /// seeds only an initial guess, refined against real block timestamps
+    /// by the shared [`TimeLocator`] — cache-first, so warm searches are
+    /// offline. The first call demands the head (starting tracking if
+    /// needed).
     pub async fn estimate_block(&self, time: Timestamp) -> Result<BlockNumber, HistoryError> {
-        let anchor = self.lazy_anchor().get().await?;
-        Ok(estimate_block_from_time(
-            anchor.block,
-            anchor.time,
-            self.block_time,
-            time,
-        ))
+        self.locator().locate(time).await
     }
 
-    fn lazy_anchor(&self) -> LazyAnchor {
-        LazyAnchor::new(
+    fn locator(&self) -> TimeLocator {
+        TimeLocator::new(
             self.seeder.clone(),
             Arc::new(EvmBlockTimeSource {
                 provider: self.provider.clone(),
             }),
             self.anchor.clone(),
+            self.block_time,
         )
     }
 }
 
-/// The EVM [`BlockTimeSource`]: block `n`'s timestamp via the cache-first,
-/// singleflight [`ChainProvider::ensure_block_header`].
+/// The EVM [`BlockTimeSource`]: block `n`'s timestamp, cache-first across
+/// both durable tables — `cached_block_headers`, then `cached_blocks` (the
+/// blocks history stores full rows the header writers never see) — before
+/// the singleflight [`ChainProvider::ensure_block_header`] fetch.
 struct EvmBlockTimeSource<P> {
     provider: ChainProvider<P>,
 }
@@ -165,6 +164,16 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlockTimeSource
     for EvmBlockTimeSource<P>
 {
     async fn block_time_at(&self, n: BlockNumber) -> Result<Timestamp, HistoryError> {
+        let cache = self.provider.log_cache();
+        if let Some(block) = cache
+            .get_blocks_in_range(BlockRange::new(n, n))
+            .map_err(|e| HistoryError::internal(format!("get_blocks_in_range: {e}")))?
+            .first()
+        {
+            return Ok(block.timestamp);
+        }
+        // ensure_block_header is itself cache-first (headers table) and
+        // singleflights the fetch on a miss.
         Ok(self.provider.ensure_block_header(n).await?.timestamp)
     }
 }

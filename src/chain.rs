@@ -28,7 +28,7 @@ mod head;
 mod height;
 mod wiring;
 
-pub use anchor::{BlockTimeSource, LazyAnchor, TimeAnchor, estimate_block_from_time};
+pub use anchor::{BlockTimeSource, LazyAnchor, TimeAnchor, TimeLocator, estimate_block_from_time};
 pub use head::{
     Finality, HeadCell, HeadClock, HeadEvent, HeadSeeder, INITIAL_BACKOFF, MAX_BACKOFF,
 };

@@ -9,7 +9,6 @@
 //! poll transports behave identically here.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;
@@ -20,7 +19,7 @@ use tokio_util::task::AbortOnDropHandle;
 use super::EvmChain;
 use crate::arch::{Hist, HistStore, HistoryError, Timestamp};
 use crate::chain::{BlockCount, BlockNumber, BlockRange, TxCount};
-use crate::chain::{Finality, LazyAnchor, estimate_block_from_time, follow_head};
+use crate::chain::{Finality, TimeLocator, follow_head};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmBlock, Gas, GasPrice};
 use crate::evm::{BlockPage, BlockSpec};
@@ -80,8 +79,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
         RangeIndexStore::new(
             index,
             Arc::new(BlockTimePos {
-                anchor: self.lazy_anchor(),
-                block_time: self.block_time,
+                locator: self.locator(),
             }),
             tip_seed,
         )
@@ -99,19 +97,18 @@ fn block_cut_before(block: BlockNumber) -> BlockNumber {
     block.checked_sub(1).unwrap_or(BlockNumber::ZERO)
 }
 
-/// [`TimePos`] for the dense blocks space: the cut "just before" the
-/// estimated block.
+/// [`TimePos`] for the dense blocks space: the cut "just before" the first
+/// block minted at/after the target time (located against real block
+/// timestamps, cache-first — see [`TimeLocator`]), so iteration after the
+/// cut starts with that block.
 struct BlockTimePos {
-    anchor: LazyAnchor,
-    block_time: Duration,
+    locator: TimeLocator,
 }
 
 #[async_trait::async_trait]
 impl TimePos<BlockNumber> for BlockTimePos {
     async fn time_pos(&self, time: Timestamp) -> Result<BlockNumber, HistoryError> {
-        let anchor = self.anchor.get().await?;
-        let block = estimate_block_from_time(anchor.block, anchor.time, self.block_time, time);
-        Ok(block_cut_before(block))
+        Ok(block_cut_before(self.locator.locate(time).await?))
     }
 }
 

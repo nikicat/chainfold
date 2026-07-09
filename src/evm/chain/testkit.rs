@@ -85,10 +85,18 @@ pub(super) fn warm_cache() -> (Shared<LogCache>, FilterHash) {
     let cache = Shared::new(LogCache::open_in_memory().unwrap());
     let fh = compute_filter_hash(&ADDR, &TOPICS);
 
-    insert_header(&cache, BlockNumber::ZERO, BH_0, GENESIS);
-    insert_header(&cache, BlockNumber::new(100), BH_100, ts(1200));
-    insert_header(&cache, BlockNumber::new(101), BH_101, ts(1212));
-    insert_header(&cache, HEAD, BH_200, ts(2400));
+    // Dense headers on the 12 s cadence: the time locator's search probes
+    // arbitrary heights (cache-first), and this fixture pins offline-ness.
+    for n in 0..=HEAD.get() {
+        let hash = match n {
+            0 => BH_0,
+            100 => BH_100,
+            101 => BH_101,
+            200 => BH_200,
+            _ => BlockHash::new(B256::from(U256::from(n + 1_000))),
+        };
+        insert_header(&cache, BlockNumber::new(n), hash, ts(n * 12));
+    }
 
     let logs = vec![
         make_log(BlockNumber::new(100), LogIdx::ZERO, BH_100),
@@ -129,6 +137,8 @@ pub(super) fn warm_blocks_cache() -> Shared<LogCache> {
     insert_header(&cache, BlockNumber::ZERO, BH_0, GENESIS);
     insert_header(&cache, HEAD, BH_200, ts(2400));
 
+    // The dense cached_blocks rows below double as the locator's probe
+    // source (EvmBlockTimeSource reads them before any header fetch).
     let blocks: Vec<EvmBlock> = (0..=HEAD.get()).map(test_block).collect();
     let end_hash = blocks.last().unwrap().hash;
     cache.insert_blocks(&blocks).unwrap();
