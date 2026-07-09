@@ -30,19 +30,6 @@ impl SubscribeTransport {
     }
 }
 
-/// Chain-wide finality tier (see `docs/ARCHITECTURE.md`, "three finality
-/// levels"). Until Phase 7 wires `best`/`safe` producers into the head
-/// clock, all tiers resolve to `Latest`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Finality {
-    /// Chain head as announced (may reorg).
-    Latest,
-    /// Mined + confidence heuristic. **Currently mirrors `Latest`.**
-    Best,
-    /// Finalized. **Currently mirrors `Latest`.**
-    Safe,
-}
-
 /// Construction options for [`EvmChain`](super::EvmChain).
 #[derive(Clone, Debug)]
 pub struct EvmChainConfig {

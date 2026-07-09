@@ -35,10 +35,10 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::Timestamp;
 use chainfold::cache::{CacheDb, versioned_path};
-use chainfold::chain::ChunkSize;
+use chainfold::chain::{ChunkSize, Finality};
 use chainfold::evm::{
-    ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogFilter,
-    SubscribeTransport, TRANSFER_TOPIC, Topic, rpc_retry_layer,
+    ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, LogFilter, SubscribeTransport,
+    TRANSFER_TOPIC, Topic, rpc_retry_layer,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,

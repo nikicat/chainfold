@@ -27,13 +27,13 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::{HistStore, watch_hist};
 use chainfold::evm::{
-    ChainProvider, EvmBlock, EvmChain, EvmChainConfig, Finality, LogCache, SubscribeTransport,
+    ChainProvider, EvmBlock, EvmChain, EvmChainConfig, LogCache, SubscribeTransport,
 };
 use futures_util::StreamExt;
 use tempfile::TempDir;
 use tokio::time::{sleep, timeout};
 
-use chainfold::chain::{BlockNumber, ChunkSize};
+use chainfold::chain::{BlockNumber, ChunkSize, Finality};
 use common::anvil::{local, skip_no_anvil};
 
 async fn build_chain(

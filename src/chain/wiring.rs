@@ -1,7 +1,6 @@
 //! The shared per-store wiring task: one per reactive store, driving its
 //! `on_bump` entry point off the chain's head channel. Source-specific
-//! wiring (the ws log session) lives with its source, in
-//! [`logs`](super::logs).
+//! wiring (e.g. the EVM ws log session) lives with its source.
 //!
 //! The task holds only a [`Weak`] reference to its store (the store owns
 //! the task via `AbortOnDropHandle`, so a strong reference would leak
@@ -11,7 +10,7 @@ use std::sync::Weak;
 
 use tokio::sync::watch;
 
-use super::HeadEvent;
+use crate::chain::head::HeadEvent;
 use crate::chain::{BlockNumber, BlockRange};
 use crate::range_index::{RangeIndexStore, RangeSpec};
 
@@ -20,7 +19,7 @@ use crate::range_index::{RangeIndexStore, RangeSpec};
 /// bump the tip. The first observed head only bumps — there is no baseline
 /// to fill from; iteration falls back to lazy fill. A fill failure still
 /// bumps — the tree keeps its gap, so no false coverage is possible.
-pub(super) async fn follow_head<S: RangeSpec>(
+pub async fn follow_head<S: RangeSpec>(
     mut head: watch::Receiver<Option<HeadEvent>>,
     store: Weak<RangeIndexStore<S>>,
 ) {

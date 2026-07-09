@@ -1,13 +1,13 @@
-//! The chain-wide head clock: one demand-started task per
+//! [`EvmHeadClock`] — the EVM [`HeadClock`] sessions, one per
 //! [`EvmChain`](super::EvmChain), publishing head observations into the
-//! chain's head channel (see [`HeadCell`]).
+//! chain's head channel. The demand-start and reconnect-with-backoff
+//! machinery lives in the shared [`HeadSeeder`](crate::chain::HeadSeeder).
 //!
 //! Ws heads have their block header persisted *before* publication — the
 //! headers-present invariant for push-delivered logs (the `newHeads`
 //! payload carries the header for free). Poll heads publish the bare
 //! number: in poll mode every log arrives through the fetcher, which
-//! ensures its own headers. Errors reconnect with exponential backoff; the
-//! task is aborted when the chain and all its stores drop.
+//! ensures its own headers.
 
 use std::time::Duration;
 
@@ -16,39 +16,46 @@ use alloy::providers::Provider;
 use tokio::time::sleep;
 
 use super::config::SubscribeTransport;
-use super::{HeadCell, INITIAL_BACKOFF, MAX_BACKOFF};
 use crate::arch::{HistoryError, Timestamp};
-use crate::chain::BlockNumber;
+use crate::chain::{BlockNumber, HeadCell, HeadClock};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::BlockHash;
 
-pub(super) async fn run<P>(
+/// The EVM head-tracking session: `newHeads` over ws, or an
+/// `eth_blockNumber` poll.
+pub(super) struct EvmHeadClock<P> {
     provider: ChainProvider<P>,
     transport: SubscribeTransport,
-    head: HeadCell,
-) where
+}
+
+impl<P> EvmHeadClock<P> {
+    pub(super) fn new(provider: ChainProvider<P>, transport: SubscribeTransport) -> Self {
+        Self {
+            provider,
+            transport,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<P> HeadClock for EvmHeadClock<P>
+where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
-    let mut backoff = INITIAL_BACKOFF;
-    loop {
-        let err = match &transport {
-            SubscribeTransport::Ws => ws_heads(&provider, &head).await,
-            SubscribeTransport::Poll { interval } => poll_heads(&provider, *interval, &head).await,
-        };
-        tracing::warn!(
-            error = %err,
-            backoff_ms = backoff.as_millis(),
-            "head clock error, will reconnect"
-        );
-        sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+    async fn session(&self, head: &HeadCell) -> HistoryError {
+        match &self.transport {
+            SubscribeTransport::Ws => ws_heads(&self.provider, head).await,
+            SubscribeTransport::Poll { interval } => {
+                poll_heads(&self.provider, *interval, head).await
+            }
+        }
     }
 }
 
 /// Poll `eth_blockNumber` and publish (the publish is monotonic, so
 /// non-advances are no-ops). Polls immediately on entry — the clock is
 /// demand-started, so a consumer is already waiting on the first
-/// observation. Only returns on error (the caller reconnects with
+/// observation. Only returns on error (the shared runner reconnects with
 /// backoff).
 async fn poll_heads<P>(
     provider: &ChainProvider<P>,

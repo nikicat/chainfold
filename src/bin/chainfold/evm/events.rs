@@ -7,7 +7,8 @@ use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 use chainfold::arch::{Positioned, watch_hist};
 use chainfold::cache::CacheDb;
-use chainfold::evm::{ChainId, EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, Topic};
+use chainfold::chain::Finality;
+use chainfold::evm::{ChainId, EvmChain, EvmEvent, EvmPosition, LogFilter, Topic};
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 

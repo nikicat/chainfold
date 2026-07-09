@@ -17,9 +17,10 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Block;
 use tokio_util::task::AbortOnDropHandle;
 
-use super::{EvmChain, Finality, LazyAnchor, estimate_block_from_time, wiring};
+use super::EvmChain;
 use crate::arch::{Hist, HistStore, HistoryError, Timestamp};
 use crate::chain::{BlockCount, BlockNumber, BlockRange, TxCount};
+use crate::chain::{Finality, LazyAnchor, estimate_block_from_time, follow_head};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmBlock, Gas, GasPrice};
 use crate::evm::{BlockPage, BlockSpec};
@@ -41,8 +42,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
 
         let store = self.block_store(Some(self.seeder.clone() as Arc<dyn TipSeed>));
 
-        let wiring = tokio::spawn(wiring::follow_head::<BlockSpec>(
-            self.seeder.head.subscribe(),
+        let wiring = tokio::spawn(follow_head::<BlockSpec>(
+            self.seeder.head().subscribe(),
             Arc::downgrade(&store),
         ));
         store.attach_wiring(AbortOnDropHandle::new(wiring));
@@ -100,15 +101,13 @@ fn block_cut_before(block: BlockNumber) -> BlockNumber {
 
 /// [`TimePos`] for the dense blocks space: the cut "just before" the
 /// estimated block.
-struct BlockTimePos<P> {
-    anchor: LazyAnchor<P>,
+struct BlockTimePos {
+    anchor: LazyAnchor,
     block_time: Duration,
 }
 
 #[async_trait::async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> TimePos<BlockNumber>
-    for BlockTimePos<P>
-{
+impl TimePos<BlockNumber> for BlockTimePos {
     async fn time_pos(&self, time: Timestamp) -> Result<BlockNumber, HistoryError> {
         let anchor = self.anchor.get().await?;
         let block = estimate_block_from_time(anchor.block, anchor.time, self.block_time, time);

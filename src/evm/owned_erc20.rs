@@ -43,7 +43,8 @@ use alloy::primitives::Address;
 use alloy::providers::Provider;
 
 use crate::arch::HistStore;
-use crate::evm::{EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, TRANSFER_TOPIC, Topic};
+use crate::chain::Finality;
+use crate::evm::{EvmChain, EvmEvent, EvmPosition, LogFilter, TRANSFER_TOPIC, Topic};
 use crate::merge::{MergedItem, SourceKey, merge_hist_stores};
 
 /// Direction of an owned-ERC20 transfer relative to the tracked owner.

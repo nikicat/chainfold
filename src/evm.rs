@@ -39,8 +39,7 @@ pub use cache::{
     compute_filter_hash,
 };
 pub use chain::{
-    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, Finality, LogFilter,
-    SubscribeTransport,
+    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, LogFilter, SubscribeTransport,
 };
 pub use chain_provider::ChainProvider;
 pub use erc20::{

@@ -22,9 +22,9 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::{HistStore, HistoryError, Positioned, Timestamp, watch_hist};
 use chainfold::cache::{CacheDb, versioned_path};
-use chainfold::chain::ChunkSize;
+use chainfold::chain::{ChunkSize, Finality};
 use chainfold::evm::{
-    ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogFilter, Topic,
+    ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, LogFilter, Topic,
     rpc_retry_layer,
 };
 use chrono::NaiveDate;

@@ -33,25 +33,28 @@
 //!   ws push wiring, store + bounded hist.
 //! - [`blocks`] — the blocks source: batched `eth_getBlockByNumber`
 //!   fetcher, store + bounded hist.
-//! - [`config`] — [`EvmChainConfig`], [`SubscribeTransport`], [`Finality`].
-//! - [`head_clock`] — the chain-wide head-tracking task.
-//! - [`wiring`] — the shared per-store task driving `on_bump` off the
-//!   head channel.
+//! - [`config`] — [`EvmChainConfig`], [`SubscribeTransport`].
+//! - [`head_clock`] — the EVM [`HeadClock`] sessions (ws / poll).
+//!
+//! The demand-started clock owner ([`HeadSeeder`]), the head channel, the
+//! per-store `follow_head` wiring, [`Finality`], and the wall-clock anchor
+//! machinery are shared scaffolding in [`crate::chain`].
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
-use tokio::sync::{OnceCell, watch};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::sync::OnceCell;
 
 use crate::arch::{HistoryError, Timestamp};
-use crate::chain::{BlockNumber, ChunkSize};
+use crate::chain::{
+    BlockNumber, BlockTimeSource, ChunkSize, HeadClock, HeadSeeder, LazyAnchor, TimeAnchor,
+    estimate_block_from_time,
+};
 use crate::evm::cache::LogCache;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::ChainId;
-use crate::range_index::TipSeed;
 use crate::shared::Shared;
 
 mod blocks;
@@ -60,16 +63,9 @@ mod head_clock;
 mod logs;
 #[cfg(test)]
 mod testkit;
-mod wiring;
 
-pub use config::{
-    DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChainConfig, Finality, SubscribeTransport,
-};
+pub use config::{DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChainConfig, SubscribeTransport};
 pub use logs::LogFilter;
-
-/// Reconnect backoff bounds shared by the head clock and the ws wiring.
-const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 // ============================================================
 // EvmChain
@@ -79,11 +75,16 @@ pub struct EvmChain<P> {
     provider: ChainProvider<P>,
     chunk_size: ChunkSize,
     block_time: Duration,
+    /// Head-tracking transport; also steers the per-filter log wiring
+    /// (ws push session vs. head-driven fetch).
+    transport: SubscribeTransport,
 
     /// Shared head machinery: the head channel plus the demand-started
-    /// clock. Every store holds it as its [`TipSeed`], so tracking (and
-    /// the stores it drives) outlives the chain handle itself.
-    seeder: Arc<HeadSeeder<P>>,
+    /// clock (an [`EvmHeadClock`](head_clock::EvmHeadClock) session under
+    /// the shared backoff runner). Every store holds it as its
+    /// [`TipSeed`](crate::range_index::TipSeed), so tracking (and the
+    /// stores it drives) outlives the chain handle itself.
+    seeder: Arc<HeadSeeder>,
 
     /// Wall-clock → block-number estimation anchor, resolved lazily on the
     /// first `time_pos` / [`Self::estimate_block`] call.
@@ -103,16 +104,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
             "EvmChain created"
         );
 
+        let clock = head_clock::EvmHeadClock::new(provider.clone(), config.transport.clone());
         Self {
-            seeder: Arc::new(HeadSeeder {
-                provider: provider.clone(),
-                transport: config.transport,
-                head: HeadCell::new(),
-                clock: OnceLock::new(),
-            }),
+            seeder: Arc::new(HeadSeeder::new(Arc::new(clock) as Arc<dyn HeadClock>)),
             provider,
             chunk_size: config.chunk_size,
             block_time: config.block_time,
+            transport: config.transport,
             anchor: Arc::new(OnceCell::new()),
         }
     }
@@ -145,145 +143,29 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
         ))
     }
 
-    fn lazy_anchor(&self) -> LazyAnchor<P> {
-        LazyAnchor {
-            seeder: self.seeder.clone(),
-            cell: self.anchor.clone(),
-        }
+    fn lazy_anchor(&self) -> LazyAnchor {
+        LazyAnchor::new(
+            self.seeder.clone(),
+            Arc::new(EvmBlockTimeSource {
+                provider: self.provider.clone(),
+            }),
+            self.anchor.clone(),
+        )
     }
 }
 
-// ============================================================
-// Head machinery
-// ============================================================
-
-/// One observation of the chain head, as published on the internal head
-/// channel by the clock. Heads published by the **ws** clock have their
-/// block header persisted to the cache before the event goes out (the
-/// headers-present invariant for push-delivered logs); poll heads carry no
-/// header claim. Consumers needing the hash read it from the cache by
-/// number (`ensure_block_header`).
-#[derive(Clone, Copy, Debug)]
-struct HeadEvent {
-    number: BlockNumber,
-}
-
-/// The chain-wide head channel: `None` until the first observation;
-/// publishes are monotonic. The chain-level analog of the store's
-/// unset-until-seeded tip.
-#[derive(Clone)]
-struct HeadCell {
-    chan: watch::Sender<Option<HeadEvent>>,
-}
-
-impl HeadCell {
-    fn new() -> Self {
-        Self {
-            chan: watch::channel(None).0,
-        }
-    }
-
-    fn subscribe(&self) -> watch::Receiver<Option<HeadEvent>> {
-        self.chan.subscribe()
-    }
-
-    /// Monotonic publish: a no-op unless `number` advances past the
-    /// current head.
-    fn publish(&self, number: BlockNumber) {
-        self.chan.send_if_modified(|cur| match cur {
-            Some(c) if c.number >= number => false,
-            _ => {
-                *cur = Some(HeadEvent { number });
-                true
-            }
-        });
-    }
-
-    /// Await the first head observation — purely reactive, no fetching.
-    async fn observed(&self) -> BlockNumber {
-        let mut rx = self.subscribe();
-        loop {
-            if let Some(h) = *rx.borrow_and_update() {
-                return h.number;
-            }
-            // `self` holds the sender — the channel cannot close.
-            rx.changed().await.expect("head sender lives with the cell");
-        }
-    }
-}
-
-/// Chain-side [`TipSeed`]: the first demand for a tip starts head tracking
-/// over the configured transport, exactly once; observed heads flow
-/// through the [`HeadCell`] to every store's wiring. Tracking runs until
-/// the chain and all its stores drop (no stop-on-idle yet).
-struct HeadSeeder<P> {
+/// The EVM [`BlockTimeSource`]: block `n`'s timestamp via the cache-first,
+/// singleflight [`ChainProvider::ensure_block_header`].
+struct EvmBlockTimeSource<P> {
     provider: ChainProvider<P>,
-    transport: SubscribeTransport,
-    head: HeadCell,
-    clock: OnceLock<AbortOnDropHandle<()>>,
 }
 
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> TipSeed for HeadSeeder<P> {
-    fn request(&self) {
-        self.clock.get_or_init(|| {
-            AbortOnDropHandle::new(tokio::spawn(head_clock::run(
-                self.provider.clone(),
-                self.transport.clone(),
-                self.head.clone(),
-            )))
-        });
-    }
-}
-
-// ============================================================
-// Wall-clock → block estimation
-// ============================================================
-
-/// Anchor for wall-clock → block estimation: a recent `(block, timestamp)`
-/// observation. Anchored at a recent head rather than genesis because some
-/// chains use timestamp 0 there.
-#[derive(Clone, Copy)]
-struct TimeAnchor {
-    block: BlockNumber,
-    time: Timestamp,
-}
-
-/// Lazy shared resolver for the chain's [`TimeAnchor`]: demands the head
-/// (starting tracking if needed), awaits the observation reactively, then
-/// reads the header cache-first — at most one resolution per chain.
-struct LazyAnchor<P> {
-    seeder: Arc<HeadSeeder<P>>,
-    cell: Arc<OnceCell<TimeAnchor>>,
-}
-
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> LazyAnchor<P> {
-    async fn get(&self) -> Result<TimeAnchor, HistoryError> {
-        self.cell
-            .get_or_try_init(|| async {
-                self.seeder.request();
-                let block = self.seeder.head.observed().await;
-                let header = self.seeder.provider.ensure_block_header(block).await?;
-                Ok(TimeAnchor {
-                    block,
-                    time: header.timestamp,
-                })
-            })
-            .await
-            .copied()
-    }
-}
-
-fn estimate_block_from_time(
-    anchor_block: BlockNumber,
-    anchor_time: Timestamp,
-    block_time: Duration,
-    time: Timestamp,
-) -> BlockNumber {
-    let block_time = block_time.as_secs().max(1);
-    if time >= anchor_time {
-        anchor_block + (time.get() - anchor_time.get()) / block_time
-    } else {
-        anchor_block.saturating_sub((anchor_time.get() - time.get()) / block_time)
+#[async_trait::async_trait]
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlockTimeSource
+    for EvmBlockTimeSource<P>
+{
+    async fn block_time_at(&self, n: BlockNumber) -> Result<Timestamp, HistoryError> {
+        Ok(self.provider.ensure_block_header(n).await?.timestamp)
     }
 }
 
@@ -296,6 +178,7 @@ mod tests {
     use super::testkit;
     use super::testkit::{GENESIS, TEST_CHAIN, make_chain, offline_chain, ts, warm_cache};
     use super::*;
+    use crate::chain::Finality;
     use crate::evm::types::EvmPosition;
 
     /// Construction (and opening stores) is completely offline: the mock

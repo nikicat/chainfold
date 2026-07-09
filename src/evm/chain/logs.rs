@@ -34,12 +34,13 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 use tokio_util::task::AbortOnDropHandle;
 
-use super::{
-    EvmChain, Finality, HeadEvent, INITIAL_BACKOFF, LazyAnchor, MAX_BACKOFF,
-    estimate_block_from_time, wiring,
-};
+use super::EvmChain;
 use crate::arch::{Hist, HistStore, HistoryError, Timestamp};
 use crate::chain::{BlockNumber, BlockRange};
+use crate::chain::{
+    Finality, HeadEvent, INITIAL_BACKOFF, LazyAnchor, MAX_BACKOFF, estimate_block_from_time,
+    follow_head,
+};
 use crate::evm::cache::compute_filter_hash;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx, Topic};
@@ -111,10 +112,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
 
         let store = self.log_store(filter, Some(self.seeder.clone() as Arc<dyn TipSeed>));
 
-        let head_rx = self.seeder.head.subscribe();
-        let wiring = match &self.seeder.transport {
+        let head_rx = self.seeder.head().subscribe();
+        let wiring = match &self.transport {
             super::SubscribeTransport::Poll { .. } => {
-                tokio::spawn(wiring::follow_head(head_rx, Arc::downgrade(&store)))
+                tokio::spawn(follow_head(head_rx, Arc::downgrade(&store)))
             }
             super::SubscribeTransport::Ws => {
                 // Live pages persist via the async drain (never SQLite on
@@ -205,13 +206,13 @@ fn log_cut_before(block: BlockNumber) -> EvmPosition {
 /// [`TimePos`] for the log position space: the cut "just before" the
 /// estimated block, so iteration after the anchor starts with that block's
 /// first log.
-struct LogTimePos<P> {
-    anchor: LazyAnchor<P>,
+struct LogTimePos {
+    anchor: LazyAnchor,
     block_time: Duration,
 }
 
 #[async_trait::async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> TimePos<EvmPosition> for LogTimePos<P> {
+impl TimePos<EvmPosition> for LogTimePos {
     async fn time_pos(&self, time: Timestamp) -> Result<EvmPosition, HistoryError> {
         let anchor = self.anchor.get().await?;
         let block = estimate_block_from_time(anchor.block, anchor.time, self.block_time, time);
