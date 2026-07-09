@@ -1,4 +1,5 @@
 pub mod arch;
+pub mod cache;
 pub mod chain;
 pub mod combinators;
 pub mod matcher;

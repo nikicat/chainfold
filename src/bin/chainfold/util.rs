@@ -4,7 +4,8 @@ use alloy::network::Ethereum;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use chainfold::arch::Timestamp;
-use chainfold::evm::{EvmChain, EvmPosition, LogIdx, versioned_path};
+use chainfold::cache::versioned_path;
+use chainfold::evm::{EvmChain, EvmPosition, LogIdx};
 use chrono::NaiveDate;
 
 use crate::cli::EvmArgs;

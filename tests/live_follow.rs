@@ -24,9 +24,10 @@ use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
 
 use chainfold::Shared;
+use chainfold::cache::ScanPartition;
 use chainfold::evm::{
-    ChainProvider, EvmChain, EvmChainConfig, Finality, LogCache, LogFilter, ScanPartition,
-    SubscribeTransport, Topic, compute_filter_hash,
+    ChainProvider, EvmChain, EvmChainConfig, Finality, LogCache, LogFilter, SubscribeTransport,
+    Topic, compute_filter_hash,
 };
 
 use chainfold::chain::BlockNumber;
@@ -184,6 +185,7 @@ async fn poll_drain_populates_scanned_ranges() {
     let filter = sentinel_filter();
     let ranges = chain
         .cache()
+        .coverage()
         .get_scanned_ranges(&ScanPartition::Filter(compute_filter_hash(
             &filter.address,
             &filter.topics,

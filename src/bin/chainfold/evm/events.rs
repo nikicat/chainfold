@@ -6,9 +6,8 @@ use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 use chainfold::arch::{Positioned, watch_hist};
-use chainfold::evm::{
-    CacheDb, ChainId, EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, Topic,
-};
+use chainfold::cache::CacheDb;
+use chainfold::evm::{ChainId, EvmChain, EvmEvent, EvmPosition, Finality, LogFilter, Topic};
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 

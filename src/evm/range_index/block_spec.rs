@@ -15,8 +15,9 @@
 use super::block_pos::BlockPos;
 use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
+use crate::cache::ScanPartition;
 use crate::chain::{BlockNumber, BlockRange};
-use crate::evm::cache::{LogCache, ScanPartition};
+use crate::evm::cache::LogCache;
 use crate::evm::types::{BlockHash, EvmBlock};
 use crate::shared::Shared;
 
@@ -80,10 +81,11 @@ impl RangeSpec for BlockSpec {
                 .map_err(|e| HistoryError::internal(format!("insert_blocks: {e}")))?;
         }
         self.store
+            .coverage()
             .record_scanned_range(
                 &ScanPartition::Blocks,
                 BlockRange::new(page.from_block, page.to_block),
-                &page.end_block_hash,
+                page.end_block_hash.into(),
             )
             .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))
     }
@@ -91,6 +93,7 @@ impl RangeSpec for BlockSpec {
     fn load_window(&self, window: BlockRange) -> Result<Vec<LoadedSpan<EvmBlock>>, HistoryError> {
         let scanned = self
             .store
+            .coverage()
             .get_scanned_ranges(&ScanPartition::Blocks)
             .map_err(|e| HistoryError::internal(format!("get_scanned_ranges: {e}")))?;
 

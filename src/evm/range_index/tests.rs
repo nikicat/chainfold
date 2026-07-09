@@ -21,9 +21,10 @@ use super::gap_fill::never_fetch;
 use super::range_tree::align_window;
 use super::*;
 use crate::arch::Timestamp;
+use crate::cache::{FilterHash, ScanPartition};
 use crate::chain::BlockNumber;
-use crate::evm::cache::{LogCache, ScanPartition};
-use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, FilterHash, LogIdx};
+use crate::evm::cache::LogCache;
+use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx};
 use crate::shared::Shared;
 
 const FH: FilterHash = FilterHash::new([0xAA; 32]);
@@ -276,10 +277,11 @@ fn is_loaded_lazy_first_access_only() {
         .insert_logs(&FH, &[mk_log(bn(150), LogIdx::ZERO, HASH_A)])
         .unwrap();
     store
+        .coverage()
         .record_scanned_range(
             &ScanPartition::Filter(FH),
             BlockRange::from_u64(100, 200),
-            &HASH_A,
+            HASH_A.into(),
         )
         .unwrap();
 
@@ -431,6 +433,7 @@ async fn items_into_uncached_gap_calls_store_and_caches() {
 
     // And the persisted scanned_ranges row is there.
     let ranges = store
+        .coverage()
         .get_scanned_ranges(&ScanPartition::Filter(FH))
         .unwrap();
     assert!(!ranges.is_empty(), "scanned range was persisted");
@@ -526,6 +529,7 @@ async fn insert_page_drains_to_store_asynchronously() {
         .unwrap();
     assert_eq!(logs.len(), 2, "drain wrote both logs to the store");
     let ranges = store
+        .coverage()
         .get_scanned_ranges(&ScanPartition::Filter(FH))
         .unwrap();
     assert_eq!(
@@ -560,6 +564,7 @@ async fn insert_page_without_drain_does_not_touch_store() {
     );
     assert!(
         store
+            .coverage()
             .get_scanned_ranges(&ScanPartition::Filter(FH))
             .unwrap()
             .is_empty(),

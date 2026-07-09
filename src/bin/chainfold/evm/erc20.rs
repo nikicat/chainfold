@@ -5,8 +5,9 @@ use alloy::network::Ethereum;
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use chainfold::arch::{Positioned, watch_hist};
+use chainfold::cache::CacheDb;
 use chainfold::evm::{
-    CacheDb, Erc20Metadata, EvmChain, EvmEvent, EvmPosition, OwnedErc20, apply_transfer,
+    Erc20Metadata, EvmChain, EvmEvent, EvmPosition, OwnedErc20, apply_transfer,
     fetch_erc20_metadata,
 };
 use chainfold::merge::MergedItem;

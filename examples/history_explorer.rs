@@ -21,10 +21,11 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::{HistStore, HistoryError, Positioned, Timestamp, watch_hist};
+use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::ChunkSize;
 use chainfold::evm::{
-    CacheDb, ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogFilter,
-    Topic, rpc_retry_layer, versioned_path,
+    ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogFilter, Topic,
+    rpc_retry_layer,
 };
 use chrono::NaiveDate;
 use clap::Parser;

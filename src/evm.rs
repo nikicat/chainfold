@@ -27,13 +27,12 @@ mod types;
 pub use aligned_ranges::{AlignedRange, Alignment, aligned_block_ranges};
 pub use types::{
     Amount, Asset, BlockHash, ChainId, Erc20, Erc20Balance, Erc20Burn, Erc20Mint, Erc20Transfer,
-    EvmBlock, EvmEvent, EvmPosition, FilterHash, Gas, GasPrice, LogIdx, Topic, TxHash,
+    EvmBlock, EvmEvent, EvmPosition, Gas, GasPrice, LogIdx, Topic, TxHash,
 };
 
 pub use cache::{
-    BlockHeader, CACHE_VERSION, CacheDb, CacheError, CacheSection, CacheTable, CachedErc20Metadata,
-    Erc20Cache, EventSignatureCache, EventSignatureRow, LogCache, ScanPartition, TableCount,
-    TableStat, compute_filter_hash, compute_gaps, versioned_path,
+    BlockHeader, CachedErc20Metadata, Erc20Cache, EventSignatureCache, EventSignatureRow, LogCache,
+    compute_filter_hash,
 };
 pub use chain::{
     DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, Finality, LogFilter,

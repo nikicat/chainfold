@@ -468,7 +468,8 @@ mod tests {
     };
     use super::*;
     use crate::arch::{Hist, Position, Positioned};
-    use crate::evm::cache::{LogCache, ScanPartition, compute_filter_hash};
+    use crate::cache::ScanPartition;
+    use crate::evm::cache::{LogCache, compute_filter_hash};
     use crate::evm::types::{BlockHash, LogIdx};
     use crate::shared::Shared;
 
@@ -567,10 +568,11 @@ mod tests {
         log.block_timestamp = Some(ts(1800).get());
         cache.insert_logs(&fh, std::slice::from_ref(&log)).unwrap();
         cache
+            .coverage()
             .record_scanned_range(
                 &ScanPartition::Filter(fh),
                 BlockRange::new(BlockNumber::ZERO, HEAD),
-                &BH_200,
+                BH_200.into(),
             )
             .unwrap();
 

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use alloy::primitives::{Address, B256};
 
-use super::{CacheError, SharedConn};
+use crate::cache::{CacheDb, CacheError, SharedConn};
 use crate::evm::types::{ChainId, Topic};
 
 /// A single resolved row from `event_signatures`.
@@ -39,12 +39,12 @@ impl EventSignatureCache {
     /// runs migrations if needed. Equivalent to
     /// `CacheDb::open(path)?.signatures()`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CacheError> {
-        Ok(super::CacheDb::open(path)?.signatures())
+        Ok(CacheDb::open(path)?.signatures())
     }
 
     /// Open a standalone in-memory signature cache. Useful for tests.
     pub fn open_in_memory() -> Result<Self, CacheError> {
-        Ok(super::CacheDb::open_in_memory()?.signatures())
+        Ok(CacheDb::open_in_memory()?.signatures())
     }
 
     pub fn get_event_signature(

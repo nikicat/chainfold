@@ -1,37 +1,29 @@
 //! [`LogCache`] — the durable EVM log cache.
 //!
-//! Owns the reorg-coherent set of tables: raw logs (`cached_logs`),
-//! scanned-range bookkeeping (`scanned_ranges`), reorg tombstones
-//! (`reorged_blocks`), and cached block headers (`cached_block_headers`).
+//! Owns the EVM payload tables: raw logs (`cached_logs`), full blocks
+//! (`cached_blocks`), and cached block headers (`cached_block_headers`).
+//! The cross-family scanned-range/reorg bookkeeping lives in the shared
+//! [`Coverage`](crate::cache::Coverage) view, reachable via
+//! [`LogCache::coverage`].
 //!
-//! Exposes only the narrow durable surface — bulk read/write, scanned-range
-//! bookkeeping, reorg invalidation, and header lookup. Navigation queries
-//! (first/last log) live in the in-memory [`LogIndex`](crate::evm::LogIndex).
+//! Exposes only the narrow durable surface — bulk read/write and header
+//! lookup. Navigation queries (first/last log) live in the in-memory
+//! [`LogIndex`](crate::evm::LogIndex).
 
 use std::path::Path;
-use std::sync::LazyLock;
 
 use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
 use alloy::rpc::types::Log;
-use rusqlite::types::{ToSql, ToSqlOutput};
 
-use super::{CacheError, SharedConn, col_address, col_b256, col_b256_opt};
+use super::{col_address, col_b256, col_b256_opt};
 use crate::arch::Timestamp;
+use crate::cache::{CacheDb, CacheError, Coverage, FilterHash, SharedConn, sqlite_span};
 use crate::chain::{BlockNumber, BlockRange};
-use crate::evm::types::{BlockHash, EvmBlock, FilterHash, LogIdx, Topic};
+use crate::evm::types::{BlockHash, EvmBlock, LogIdx, Topic};
 
 // ============================================================
 // Helpers
 // ============================================================
-
-/// `SQLite`-read span (target `chainfold::sqlite`): the name is the query's
-/// row label in a stats report. A macro, not a fn — `tracing` span names are
-/// static callsite metadata, so each needs its own literal.
-macro_rules! sqlite_span {
-    ($name:literal) => {
-        tracing::span!(target: "chainfold::sqlite", tracing::Level::DEBUG, $name)
-    };
-}
 
 /// Compute a deterministic BLAKE3 hash of (address, topic0-3).
 ///
@@ -50,36 +42,6 @@ pub fn compute_filter_hash(address: &Address, topics: &[Option<Topic>; 4]) -> Fi
     FilterHash::new(*hasher.finalize().as_bytes())
 }
 
-/// Compute uncovered sub-ranges within `requested` given sorted, non-overlapping `scanned` ranges.
-///
-/// Both `requested` and each entry in `scanned` are inclusive block ranges.
-/// The set arithmetic stays in raw `u64` internally; only the boundary is typed.
-pub fn compute_gaps(requested: BlockRange, scanned: &[BlockRange]) -> Vec<BlockRange> {
-    let (req_from, req_to) = requested.as_u64();
-    let mut gaps = Vec::new();
-    let mut cursor = req_from;
-    for &range in scanned {
-        let (start, end) = range.as_u64();
-        if start > req_to {
-            break;
-        }
-        if end < cursor {
-            continue;
-        }
-        if start > cursor {
-            gaps.push(BlockRange::from_u64(cursor, start - 1));
-        }
-        cursor = cursor.max(end + 1);
-        if cursor > req_to {
-            break;
-        }
-    }
-    if cursor <= req_to {
-        gaps.push(BlockRange::from_u64(cursor, req_to));
-    }
-    gaps
-}
-
 // ============================================================
 // Types
 // ============================================================
@@ -93,54 +55,16 @@ pub struct BlockHeader {
     pub timestamp: Timestamp,
 }
 
-/// Partition key for `scanned_ranges` rows: which source's coverage a range
-/// belongs to. A closed enum rather than a bare [`FilterHash`] — the blocks
-/// history's coverage is not the hash of any filter, and pretending it is
-/// would be a type fib.
-///
-/// [`Blocks`](Self::Blocks) encodes to a fixed derived blob
-/// (`BLAKE3("chainfold:blocks")`) in the same BLOB column real filter hashes
-/// use; collision with a genuine filter hash is a 2^-256 event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScanPartition {
-    /// Coverage for one log filter's `eth_getLogs` scans.
-    Filter(FilterHash),
-    /// Coverage for the chain's block history (the blocks source).
-    Blocks,
-}
-
-static BLOCKS_PARTITION_BLOB: LazyLock<[u8; 32]> =
-    LazyLock::new(|| *blake3::hash(b"chainfold:blocks").as_bytes());
-
-impl ScanPartition {
-    /// The raw 32 bytes this partition binds as in `scanned_ranges`.
-    fn as_blob(&self) -> &[u8; 32] {
-        match self {
-            Self::Filter(fh) => fh.as_bytes(),
-            Self::Blocks => &BLOCKS_PARTITION_BLOB,
-        }
-    }
-}
-
-/// `ScanPartition` persists as its 32-byte blob in the `filter_hash` BLOB
-/// column of `scanned_ranges`. Lives here (the persistence layer) like the
-/// [`FilterHash`]/[`ChainId`](crate::evm::types::ChainId) `ToSql` impls in
-/// [`cache`](super).
-impl ToSql for ScanPartition {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::from(&self.as_blob()[..]))
-    }
-}
-
 // ============================================================
 // LogCache
 // ============================================================
 
-/// Durable SQLite-backed log + range + reorg + header cache.
+/// Durable SQLite-backed log + block + header cache.
 ///
 /// A cheap handle over the shared connection vended by
-/// [`CacheDb`](super::CacheDb). Logs are append-only; reorgs are handled by
-/// marking blocks in `reorged_blocks` and filtering them out at query time.
+/// [`CacheDb`](crate::cache::CacheDb). Logs are append-only; reorgs are
+/// handled by tombstoning blocks via the shared [`Coverage`] view and
+/// filtering them out at query time.
 ///
 /// Navigation queries (first/last log) live in
 /// [`LogIndex`](crate::evm::LogIndex), not here.
@@ -156,12 +80,18 @@ impl LogCache {
     /// Open a standalone log cache at the given path. Creates the DB and runs
     /// migrations if needed. Equivalent to `CacheDb::open(path)?.logs()`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CacheError> {
-        Ok(super::CacheDb::open(path)?.logs())
+        Ok(CacheDb::open(path)?.logs())
     }
 
     /// Open a standalone in-memory log cache. Useful for tests.
     pub fn open_in_memory() -> Result<Self, CacheError> {
-        Ok(super::CacheDb::open_in_memory()?.logs())
+        Ok(CacheDb::open_in_memory()?.logs())
+    }
+
+    /// The shared cross-family coverage view (scanned ranges + reorg
+    /// tombstones) over this cache's connection.
+    pub fn coverage(&self) -> Coverage {
+        Coverage::from_conn(self.conn.clone())
     }
 
     // --------------------------------------------------------
@@ -258,172 +188,6 @@ impl LogCache {
             )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(logs)
-    }
-
-    // --------------------------------------------------------
-    // Scanned ranges
-    // --------------------------------------------------------
-
-    /// Record a scanned block range (inclusive). Does NOT merge — call
-    /// [`Self::compact_ranges`] separately for finalized ranges.
-    pub fn record_scanned_range(
-        &self,
-        partition: &ScanPartition,
-        range: BlockRange,
-        end_block_hash: &BlockHash,
-    ) -> Result<(), CacheError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO scanned_ranges (filter_hash, start_block, end_block, end_block_hash)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![partition, range.from, range.to, end_block_hash],
-        )?;
-        Ok(())
-    }
-
-    /// All valid scanned ranges for `partition`, sorted by start.
-    /// Excludes ranges whose `end_block_hash` is in `reorged_blocks`.
-    pub fn get_scanned_ranges(
-        &self,
-        partition: &ScanPartition,
-    ) -> Result<Vec<BlockRange>, CacheError> {
-        let _span = sqlite_span!("get_scanned_ranges").entered();
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached(
-            "SELECT start_block, end_block FROM scanned_ranges
-             WHERE filter_hash = ?1
-               AND end_block_hash NOT IN (SELECT block_hash FROM reorged_blocks)
-             ORDER BY start_block ASC",
-        )?;
-        let ranges = stmt
-            .query_map(rusqlite::params![partition], |row| {
-                Ok(BlockRange::new(
-                    row.get("start_block")?,
-                    row.get("end_block")?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ranges)
-    }
-
-    /// Merge adjacent/overlapping scanned ranges that are entirely within
-    /// `[0, up_to_block]`. Only call this for finalized block heights.
-    ///
-    /// After compaction, the merged range's `end_block_hash` is taken from
-    /// the constituent range with the highest `end_block`.
-    pub fn compact_ranges(
-        &self,
-        partition: &ScanPartition,
-        up_to_block: BlockNumber,
-    ) -> Result<(), CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction()?;
-
-        let ranges: Vec<(i64, u64, u64, Vec<u8>)> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, start_block, end_block, end_block_hash FROM scanned_ranges
-                 WHERE filter_hash = ?1 AND end_block <= ?2
-                   AND end_block_hash NOT IN (SELECT block_hash FROM reorged_blocks)
-                 ORDER BY start_block ASC",
-            )?;
-            let result: Vec<(i64, u64, u64, Vec<u8>)> = stmt
-                .query_map(rusqlite::params![partition, up_to_block], |row| {
-                    Ok((
-                        row.get("id")?,
-                        row.get("start_block")?,
-                        row.get("end_block")?,
-                        row.get("end_block_hash")?,
-                    ))
-                })?
-                .collect::<Result<_, _>>()?;
-            result
-        };
-
-        if ranges.len() < 2 {
-            return Ok(());
-        }
-
-        let mut merged: Vec<(u64, u64, Vec<u8>)> = Vec::new();
-        let mut ids_to_delete: Vec<i64> = Vec::new();
-        for (id, start, end, end_hash) in &ranges {
-            ids_to_delete.push(*id);
-            if let Some(last) = merged.last_mut()
-                && last.1 + 1 >= *start
-            {
-                if *end > last.1 {
-                    last.1 = *end;
-                    last.2.clone_from(end_hash);
-                }
-                continue;
-            }
-            merged.push((*start, *end, end_hash.clone()));
-        }
-
-        if merged.len() < ranges.len() {
-            for id in &ids_to_delete {
-                tx.execute("DELETE FROM scanned_ranges WHERE id = ?1", [id])?;
-            }
-            for (start, end, end_hash) in &merged {
-                tx.execute(
-                    "INSERT INTO scanned_ranges (filter_hash, start_block, end_block, end_block_hash)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![partition, start, end, &end_hash[..]],
-                )?;
-            }
-            tx.commit()?;
-        }
-
-        Ok(())
-    }
-
-    // --------------------------------------------------------
-    // Reorg handling
-    // --------------------------------------------------------
-
-    /// Mark blocks as reorged. Logs from these blocks will be excluded from
-    /// queries. Scanned ranges ending at these blocks become invalid.
-    pub fn mark_reorged(&self, blocks: &[(BlockHash, BlockNumber)]) -> Result<(), CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR IGNORE INTO reorged_blocks (block_hash, block_number) VALUES (?1, ?2)",
-            )?;
-            for (hash, number) in blocks {
-                stmt.execute(rusqlite::params![hash, number])?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Delete scanned ranges whose `end_block_hash` is in `reorged_blocks`.
-    /// Call after [`Self::mark_reorged`] so gaps are recomputed for affected
-    /// block ranges.
-    pub fn invalidate_reorged_ranges(
-        &self,
-        partition: &ScanPartition,
-    ) -> Result<usize, CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let deleted = conn.execute(
-            "DELETE FROM scanned_ranges
-             WHERE filter_hash = ?1
-               AND end_block_hash IN (SELECT block_hash FROM reorged_blocks)",
-            rusqlite::params![partition],
-        )?;
-        Ok(deleted)
-    }
-
-    /// Remove entries from `reorged_blocks` below the finality boundary.
-    /// Once a block is finalized, it can't be reorged so the tombstone is
-    /// safe to drop.
-    pub fn cleanup_reorged_before(&self, block_number: BlockNumber) -> Result<usize, CacheError> {
-        let conn = self.conn.lock().unwrap();
-        let deleted = conn.execute(
-            "DELETE FROM reorged_blocks WHERE block_number < ?1",
-            rusqlite::params![block_number],
-        )?;
-        Ok(deleted)
     }
 
     // --------------------------------------------------------
@@ -605,10 +369,8 @@ mod tests {
     use crate::chain::TxCount;
 
     const FH: FilterHash = FilterHash::new([0xAA; 32]);
-    const SP: ScanPartition = ScanPartition::Filter(FH);
     const BLOCK_HASH_A: BlockHash = BlockHash::repeat_byte(0xBB);
     const BLOCK_HASH_B: BlockHash = BlockHash::repeat_byte(0xBC);
-    const BLOCK_HASH_C: BlockHash = BlockHash::repeat_byte(0xBD);
 
     /// Shorthand [`BlockNumber`] constructor.
     const fn bn(n: u64) -> BlockNumber {
@@ -721,126 +483,17 @@ mod tests {
                 ],
             )
             .unwrap();
-        store.mark_reorged(&[(BLOCK_HASH_A, bn(100))]).unwrap();
+        store
+            .coverage()
+            .mark_reorged(&[(BLOCK_HASH_A.into(), bn(100))])
+            .unwrap();
         let retrieved = store.get_logs_in_range(&FH, br(100, 101)).unwrap();
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].block_number, Some(101));
     }
 
-    // -- scanned ranges --
-
-    #[test]
-    fn range_records_without_merging() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&SP, br(100, 200), &BLOCK_HASH_A)
-            .unwrap();
-        store
-            .record_scanned_range(&SP, br(201, 300), &BLOCK_HASH_B)
-            .unwrap();
-        let ranges = store.get_scanned_ranges(&SP).unwrap();
-        assert_eq!(ranges, vec![br(100, 200), br(201, 300)]);
-    }
-
-    #[test]
-    fn range_reorged_end_block_excluded() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&SP, br(100, 200), &BLOCK_HASH_A)
-            .unwrap();
-        store.mark_reorged(&[(BLOCK_HASH_A, bn(200))]).unwrap();
-        assert!(store.get_scanned_ranges(&SP).unwrap().is_empty());
-    }
-
-    #[test]
-    fn invalidate_reorged_ranges_deletes() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&SP, br(100, 200), &BLOCK_HASH_A)
-            .unwrap();
-        store
-            .record_scanned_range(&SP, br(201, 300), &BLOCK_HASH_B)
-            .unwrap();
-        store.mark_reorged(&[(BLOCK_HASH_A, bn(200))]).unwrap();
-        let deleted = store.invalidate_reorged_ranges(&SP).unwrap();
-        assert_eq!(deleted, 1);
-        // After physical deletion, get_scanned_ranges no longer filters via the reorged join.
-        let ranges = store.get_scanned_ranges(&SP).unwrap();
-        assert_eq!(ranges, vec![br(201, 300)]);
-    }
-
-    #[test]
-    fn compact_merges_finalized_ranges() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&SP, br(100, 199), &BLOCK_HASH_A)
-            .unwrap();
-        store
-            .record_scanned_range(&SP, br(200, 299), &BLOCK_HASH_B)
-            .unwrap();
-        store
-            .record_scanned_range(&SP, br(300, 399), &BLOCK_HASH_C)
-            .unwrap();
-        store.compact_ranges(&SP, bn(399)).unwrap();
-        assert_eq!(store.get_scanned_ranges(&SP).unwrap(), vec![br(100, 399)]);
-    }
-
-    #[test]
-    fn compact_preserves_end_block_hash_of_highest() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&SP, br(100, 199), &BLOCK_HASH_A)
-            .unwrap();
-        store
-            .record_scanned_range(&SP, br(200, 299), &BLOCK_HASH_B)
-            .unwrap();
-        store.compact_ranges(&SP, bn(299)).unwrap();
-        // Mark the highest range's end hash reorged; should excise the merged range.
-        store.mark_reorged(&[(BLOCK_HASH_B, bn(299))]).unwrap();
-        assert!(store.get_scanned_ranges(&SP).unwrap().is_empty());
-    }
-
-    #[test]
-    fn compact_skips_reorged_ranges() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&SP, br(100, 199), &BLOCK_HASH_A)
-            .unwrap();
-        store
-            .record_scanned_range(&SP, br(200, 299), &BLOCK_HASH_B)
-            .unwrap();
-        store.mark_reorged(&[(BLOCK_HASH_A, bn(199))]).unwrap();
-        store.compact_ranges(&SP, bn(299)).unwrap();
-        // The reorged range is left alone (filtered out of visible ranges); the
-        // non-reorged range stays as-is since it's the only compactable entry.
-        assert_eq!(store.get_scanned_ranges(&SP).unwrap(), vec![br(200, 299)]);
-    }
-
-    // -- compute_gaps --
-
     fn br(from: u64, to: u64) -> BlockRange {
         BlockRange::from_u64(from, to)
-    }
-
-    #[test]
-    fn gaps_no_scanned_returns_full_range() {
-        assert_eq!(compute_gaps(br(100, 200), &[]), vec![br(100, 200)]);
-    }
-
-    #[test]
-    fn gaps_fully_covered_returns_empty() {
-        assert_eq!(
-            compute_gaps(br(100, 200), &[br(50, 250)]),
-            Vec::<BlockRange>::new()
-        );
-    }
-
-    #[test]
-    fn gaps_partial_coverage() {
-        assert_eq!(
-            compute_gaps(br(100, 300), &[br(150, 200)]),
-            vec![br(100, 149), br(201, 300)]
-        );
     }
 
     // -- blocks (cached_blocks) --
@@ -902,45 +555,15 @@ mod tests {
                 make_test_block(bn(101), BLOCK_HASH_B, None),
             ])
             .unwrap();
-        store.mark_reorged(&[(BLOCK_HASH_A, bn(100))]).unwrap();
+        store
+            .coverage()
+            .mark_reorged(&[(BLOCK_HASH_A.into(), bn(100))])
+            .unwrap();
         let got = store
             .get_blocks_in_range(BlockRange::from_u64(100, 101))
             .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].number, bn(101));
-    }
-
-    #[test]
-    fn blocks_scan_partition_disjoint_from_filters() {
-        // Coverage recorded under the Blocks partition must not leak into any
-        // filter's partition, and vice versa — they share one table.
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&ScanPartition::Blocks, br(100, 200), &BLOCK_HASH_A)
-            .unwrap();
-        store
-            .record_scanned_range(&SP, br(300, 400), &BLOCK_HASH_B)
-            .unwrap();
-        assert_eq!(
-            store.get_scanned_ranges(&ScanPartition::Blocks).unwrap(),
-            vec![br(100, 200)]
-        );
-        assert_eq!(store.get_scanned_ranges(&SP).unwrap(), vec![br(300, 400)]);
-    }
-
-    #[test]
-    fn blocks_scanned_range_reorged_end_hash_excluded() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .record_scanned_range(&ScanPartition::Blocks, br(100, 200), &BLOCK_HASH_A)
-            .unwrap();
-        store.mark_reorged(&[(BLOCK_HASH_A, bn(200))]).unwrap();
-        assert!(
-            store
-                .get_scanned_ranges(&ScanPartition::Blocks)
-                .unwrap()
-                .is_empty()
-        );
     }
 
     // -- block headers --
@@ -956,21 +579,5 @@ mod tests {
         assert_eq!(h.hash, BLOCK_HASH_A);
         assert_eq!(h.parent_hash, BLOCK_HASH_B);
         assert_eq!(h.timestamp, ts(0));
-    }
-
-    // -- reorg cleanup --
-
-    #[test]
-    fn cleanup_reorged_before() {
-        let store = LogCache::open_in_memory().unwrap();
-        store
-            .mark_reorged(&[
-                (BLOCK_HASH_A, bn(100)),
-                (BLOCK_HASH_B, bn(200)),
-                (BLOCK_HASH_C, bn(300)),
-            ])
-            .unwrap();
-        let deleted = store.cleanup_reorged_before(bn(250)).unwrap();
-        assert_eq!(deleted, 2);
     }
 }

@@ -7,8 +7,9 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::Http;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
+use chainfold::cache::CacheDb;
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, EvmChain, EvmChainConfig, RpcTimingLayer, rpc_retry_layer,
+    ChainId, ChainProvider, EvmChain, EvmChainConfig, RpcTimingLayer, rpc_retry_layer,
 };
 use chainfold::observe::ConnectTimingLayer;
 

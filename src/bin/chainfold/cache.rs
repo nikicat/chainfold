@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bytesize::ByteSize;
-use chainfold::evm::{CACHE_VERSION, CacheDb, CacheSection, versioned_path};
+use chainfold::cache::{CACHE_VERSION, CacheDb, CacheSection, versioned_path};
 
 use crate::cli::{CacheArgs, CacheCommand, CachePurgeArgs};
 use crate::util::db_base_path;

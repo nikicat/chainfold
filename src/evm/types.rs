@@ -246,49 +246,6 @@ impl std::str::FromStr for Topic {
 }
 
 // ============================================================
-// FilterHash
-// ============================================================
-
-/// A chainfold cache **partition key**: the BLAKE3 hash of a log filter's
-/// `(address, topic0..3)`. A newtype over `[u8; 32]`, *not* a [`B256`] or a
-/// `BlockHash`/`TxHash` alias — a filter hash never appears on-chain, so
-/// confusing it with an EVM hash would be a category error.
-///
-/// Scopes every cached log, scanned range, and in-memory tree to one filter.
-/// Compute one with
-/// [`compute_filter_hash`](crate::evm::cache::compute_filter_hash); it is
-/// threaded through [`LogCache`](crate::evm::LogCache) and
-/// [`LogIndex`](crate::evm::LogIndex). It binds to `SQLite` as a 32-byte BLOB
-/// via a `ToSql` impl that lives in the cache layer, keeping this type
-/// persistence-free (the same split [`ChainId`] uses).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FilterHash([u8; 32]);
-
-impl FilterHash {
-    pub const fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    /// The raw 32 bytes — for hashing and the cache layer's `SQLite` binds.
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// Byte slice view, for `SQLite` binds and `hex` formatting.
-    pub fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for FilterHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // A short prefix is enough to correlate logs; the full 32 bytes are
-        // rarely useful in diagnostics.
-        write!(f, "FilterHash(0x{})", hex::encode(&self.0[..8]))
-    }
-}
-
-// ============================================================
 // LogIdx
 // ============================================================
 

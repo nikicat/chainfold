@@ -19,11 +19,12 @@ use tracing_subscriber::registry::LookupSpan;
 
 use super::{EvmChain, EvmChainConfig};
 use crate::arch::Timestamp;
+use crate::cache::{FilterHash, ScanPartition};
 use crate::chain::{BlockNumber, BlockRange, ChunkSize, TxCount};
-use crate::evm::cache::{LogCache, ScanPartition, compute_filter_hash};
+use crate::evm::cache::{LogCache, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::transport::RpcTimingLayer;
-use crate::evm::types::{BlockHash, ChainId, EvmBlock, FilterHash, Gas, GasPrice, LogIdx, Topic};
+use crate::evm::types::{BlockHash, ChainId, EvmBlock, Gas, GasPrice, LogIdx, Topic};
 use crate::observe::RPC_TARGET;
 use crate::shared::Shared;
 
@@ -96,10 +97,11 @@ pub(super) fn warm_cache() -> (Shared<LogCache>, FilterHash) {
     ];
     cache.insert_logs(&fh, &logs).unwrap();
     cache
+        .coverage()
         .record_scanned_range(
             &ScanPartition::Filter(fh),
             BlockRange::new(BlockNumber::ZERO, HEAD),
-            &BH_200,
+            BH_200.into(),
         )
         .unwrap();
     (cache, fh)
@@ -131,10 +133,11 @@ pub(super) fn warm_blocks_cache() -> Shared<LogCache> {
     let end_hash = blocks.last().unwrap().hash;
     cache.insert_blocks(&blocks).unwrap();
     cache
+        .coverage()
         .record_scanned_range(
             &ScanPartition::Blocks,
             BlockRange::new(BlockNumber::ZERO, HEAD),
-            &end_hash,
+            end_hash.into(),
         )
         .unwrap();
     cache

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use alloy::primitives::{Address, U256};
 
-use super::{CacheError, SharedConn};
+use crate::cache::{CacheDb, CacheError, SharedConn};
 use crate::evm::types::ChainId;
 
 /// Cached ERC20 token metadata (name, symbol, decimals).
@@ -33,12 +33,12 @@ impl Erc20Cache {
     /// Open a standalone ERC20 cache at the given path. Creates the DB and
     /// runs migrations if needed. Equivalent to `CacheDb::open(path)?.erc20()`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CacheError> {
-        Ok(super::CacheDb::open(path)?.erc20())
+        Ok(CacheDb::open(path)?.erc20())
     }
 
     /// Open a standalone in-memory ERC20 cache. Useful for tests.
     pub fn open_in_memory() -> Result<Self, CacheError> {
-        Ok(super::CacheDb::open_in_memory()?.erc20())
+        Ok(CacheDb::open_in_memory()?.erc20())
     }
 
     // --------------------------------------------------------

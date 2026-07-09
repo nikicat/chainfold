@@ -11,9 +11,10 @@ use alloy::rpc::types::Log;
 use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
 use super::spec::{LoadedSpan, RangeSpec};
 use crate::arch::{HistoryError, Positioned, Timestamp};
+use crate::cache::{FilterHash, ScanPartition};
 use crate::chain::{BlockNumber, BlockRange};
-use crate::evm::cache::{LogCache, ScanPartition};
-use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic, TxHash};
+use crate::evm::cache::LogCache;
+use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx, Topic, TxHash};
 use crate::shared::Shared;
 
 /// [`RangeSpec`] for a single EVM log filter over a [`LogCache`].
@@ -94,10 +95,11 @@ impl RangeSpec for LogSpec {
                 .map_err(|e| HistoryError::internal(format!("insert_logs: {e}")))?;
         }
         self.store
+            .coverage()
             .record_scanned_range(
                 &ScanPartition::Filter(self.filter_hash),
                 BlockRange::new(page.from_block, page.to_block),
-                &page.end_block_hash,
+                page.end_block_hash.into(),
             )
             .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))
     }
@@ -105,6 +107,7 @@ impl RangeSpec for LogSpec {
     fn load_window(&self, window: BlockRange) -> Result<Vec<LoadedSpan<LogRef>>, HistoryError> {
         let scanned = self
             .store
+            .coverage()
             .get_scanned_ranges(&ScanPartition::Filter(self.filter_hash))
             .map_err(|e| HistoryError::internal(format!("get_scanned_ranges: {e}")))?;
 
