@@ -115,11 +115,15 @@ the front-ends stay thin.
 ## 4. Module map & layering
 
 The cardinal rule: **the source-agnostic core never names a concrete
-source.** `arch`, `combinators`, `merge`, and `matcher` know nothing about
-EVM — their tests use a synthetic `MockPos`, never `EvmPosition`.
-`signatures` is a standalone resolver (Sourcify → Etherscan) that also names
-no source; the caller injects a cache impl. Concrete sources live behind
-feature flags (`evm` today; `solana`/`bitcoin`/CEX later).
+source.** `arch`, `combinators`, `merge`, `matcher` — and, since the Bitcoin
+source landed, the shared engine modules `chain`, `cache`, `range_index`,
+`observe` — know nothing about any family; their tests use synthetic
+`MockPos`/`MockSpec` fixtures, never `EvmPosition`. `signatures` is a
+standalone resolver (Sourcify → Etherscan) that also names no source; the
+caller injects a cache impl. Concrete sources live behind feature flags
+(`evm` and `bitcoin` today; `solana`/CEX later) as thin siblings over the
+shared engine: domain types + hashes, a `RangeSpec` impl per stream, the
+family's `HeadClock`/`BlockTimeSource` sessions, and the wire client.
 
 ```mermaid
 flowchart TB
@@ -136,19 +140,33 @@ flowchart TB
         signatures["src/signatures.rs<br/>event-signature resolution"]
     end
 
+    subgraph ENGINE["Shared chain engine — always compiled"]
+        direction LR
+        chainmod["src/chain/<br/>BlockNumber · BlockRange · Finality<br/>HeadCell · HeadSeeder · HeadClock seam<br/>TimeLocator · follow_head"]
+        RangeIndex["src/range_index/<br/>RangeIndex&lt;S&gt; · RangeIndexStore&lt;S&gt;<br/>RangeSpec seam · HeightPos · gap_fill"]
+        Cache["src/cache/<br/>CacheDb · Coverage (scanned ranges + reorg)<br/>ScanPartition · CoverageHash"]
+        observe["src/observe.rs<br/>the tracing contract"]
+    end
+
     subgraph EVM["EVM source — cfg(feature = evm)"]
         direction TB
-        EvmChain["EvmChain&lt;P&gt;<br/>ONE head clock · Finality · vends log stores"]
+        EvmChain["EvmChain&lt;P&gt;<br/>ws/poll HeadClock · vends log + block stores"]
         OwnedErc20["OwnedErc20<br/>2 narrow filters + ordered merge"]
         Erc20["erc20<br/>Transfer decode · metadata · balance fold"]
-        RIStore["RangeIndexStore&lt;LogSpec&gt;<br/>generic HistStoreBackend + HistBackend"]
-        RangeIndex["RangeIndex&lt;LogSpec&gt;<br/>in-memory BTreeMap range tree"]
-        Cache["CacheDb → LogCache / Erc20Cache / EventSignatureCache<br/>durable SQLite"]
+        LogCache["LogCache / Erc20Cache / EventSignatureCache<br/>EVM views over CacheDb"]
         ChainProvider["ChainProvider&lt;P&gt;<br/>alloy Provider + ChainId + LogCache<br/>header singleflight"]
+    end
+
+    subgraph BTC["Bitcoin source — cfg(feature = bitcoin)"]
+        direction TB
+        BitcoinChain["BitcoinChain<br/>getblockcount poll HeadClock · vends block store"]
+        BtcCache["BtcBlockCache<br/>Bitcoin view over CacheDb"]
+        BtcRpc["BtcRpcClient<br/>jsonrpc 0.20 over reqwest · batched"]
     end
 
     subgraph TRANSPORT["Transport / persistence"]
         Alloy["alloy Provider<br/>HTTP · WebSocket · pubsub"]
+        Bitcoind["bitcoind JSON-RPC<br/>HTTP (cookie/basic auth)"]
         SQLite[("SQLite file<br/>rusqlite, bundled")]
     end
 
@@ -157,54 +175,85 @@ flowchart TB
     combinators --> arch
     merge --> arch
     matcher --> arch
+    RangeIndex --> chainmod
     OwnedErc20 --> merge
     OwnedErc20 --> EvmChain
-    Erc20 --> Cache
-    EvmChain -- "logs(filter, tier)" --> RIStore
+    Erc20 --> LogCache
+    EvmChain -- "logs(filter, tier) · blocks(tier)" --> RangeIndex
     EvmChain --> ChainProvider
-    RIStore --> RangeIndex
-    RangeIndex --> Cache
+    BitcoinChain -- "blocks(tier)" --> RangeIndex
+    BitcoinChain --> BtcRpc
+    LogCache --> Cache
+    BtcCache --> Cache
+    RangeIndex -.spec persist/load.-> LogCache
+    RangeIndex -.spec persist/load.-> BtcCache
     ChainProvider -.RPC + WS push.-> Alloy
+    BtcRpc -.batched RPC.-> Bitcoind
     Cache --> SQLite
 
     classDef core fill:#e8f0fe,stroke:#4477cc
+    classDef engine fill:#e8fee8,stroke:#44aa66
     classDef evm fill:#fef3e8,stroke:#cc7744
+    classDef btc fill:#fef8e0,stroke:#ccaa22
     classDef transport fill:#eee,stroke:#888
     class arch,combinators,merge,matcher,signatures core
-    class EvmChain,OwnedErc20,Erc20,RIStore,RangeIndex,Cache,ChainProvider evm
-    class Alloy,SQLite transport
+    class chainmod,RangeIndex,Cache,observe engine
+    class EvmChain,OwnedErc20,Erc20,LogCache,ChainProvider evm
+    class BitcoinChain,BtcCache,BtcRpc btc
+    class Alloy,Bitcoind,SQLite transport
 ```
 
 **Crate layout** (`src/`):
 
 ```
-lib.rs                     pub mod {arch, combinators, matcher, merge, shared, signatures}; cfg(evm) evm
+lib.rs                     pub mod {arch, cache, chain, combinators, matcher, merge, observe, range_index, shared, signatures}; cfg(evm) evm; cfg(bitcoin) bitcoin
 ├─ arch.rs                 Position · Positioned · Hist · HistStore · Store · backend traits
+├─ chain/                  shared chain-family scaffolding
+│  ├─ height.rs            BlockNumber · BlockRange · BlockCount · ChunkSize · TxCount
+│  ├─ head.rs              HeadEvent · HeadCell · HeadClock (session seam) · HeadSeeder · Finality
+│  ├─ anchor.rs            BlockTimeSource seam · TimeLocator (guess → timestamp-refined search)
+│  └─ wiring.rs            follow_head::<S> — per-store head-channel driver
+├─ range_index/            RangeIndex<S> · spec.rs (RangeSpec/IndexPos seam) · height_pos.rs (HeightPos) ·
+│                          range_tree · gap_fill · store.rs (RangeIndexStore · TimePos · TipSeed) · testkit (MockSpec)
+├─ cache.rs + cache/       CacheDb (open/migrate/purge/stats, one shared schema) ·
+│                          coverage.rs (Coverage — scanned_ranges + reorged_blocks · ScanPartition · CoverageHash)
+├─ observe.rs              the tracing contract (targets · CacheLayer/CacheOutcome · ConnectTimingLayer)
 ├─ combinators/            mapped.rs · map_pos.rs · filtered.rs · since.rs
 ├─ merge/                  ordered.rs (merge_hist_stores, plain-P anchors) · interleave.rs (interleave_hist_stores · MergedPos) · types.rs · kway.rs
 ├─ matcher/                matcher.rs + anchor_store_sqlite.rs
 ├─ shared.rs               Shared<T> — Arc newtype; .share() names the refcount bump
 ├─ signatures.rs           event-name → signature/topic0 resolution
 ├─ evm/                    ← cfg(feature = "evm")
-│  ├─ types.rs             EvmEvent · EvmPosition · ChainId · Topic · BlockNumber · LogIdx · ChunkSize · …
-│  ├─ chain.rs + chain/    EvmChain — config · head_clock · wiring · rpc
-│  ├─ range_index/         spec (RangeSpec seam) · block_pos · range_tree · gap_fill · log_spec · store (RangeIndexStore)
-│  ├─ cache.rs + cache/    CacheDb → LogCache · Erc20Cache · EventSignatureCache (SQLite)
+│  ├─ types.rs             EvmEvent · EvmPosition · ChainId · Topic · BlockHash/TxHash · LogIdx · Gas · …
+│  ├─ chain.rs + chain/    EvmChain — config · head_clock (EvmHeadClock ws/poll sessions) · logs · blocks
+│  ├─ log_spec.rs          LogSpec (RangeSpec for logs) — with block_pos.rs (BlockPos · LogRef · LogPage)
+│  ├─ block_spec.rs        BlockSpec (RangeSpec for blocks, over the shared HeightPos)
+│  ├─ cache.rs + cache/    EVM views over CacheDb — LogCache · Erc20Cache · EventSignatureCache + EVM sql binds
 │  ├─ erc20.rs             Transfer decode · metadata · balance apply
 │  ├─ owned_erc20.rs       two-filter in/out ordered merge
 │  ├─ chain_provider.rs    ChainProvider<P> — chain-scoped RPC seam
 │  ├─ aligned_ranges.rs    aligned_block_ranges
-│  ├─ transport.rs         alloy client-stack layers — RpcTimingLayer · rpc_retry_layer
-│  └─ observe.rs           the tracing contract
-└─ bin/chainfold/          ← cfg(feature = "cli"): the real binary
+│  └─ transport.rs         alloy client-stack layers — RpcTimingLayer · rpc_retry_layer
+├─ bitcoin/                ← cfg(feature = "bitcoin")
+│  ├─ types.rs             BtcBlock · BtcBlockHash (display-order hex) · CompactTarget
+│  ├─ transport.rs         BtcAuth · ReqwestTransport (jsonrpc async Transport) · TracingTransport
+│  ├─ rpc.rs               BtcRpcClient — getblockcount · batched getblockhash/getblockheader
+│  ├─ cache.rs             BtcBlockCache — Bitcoin view over CacheDb (cached_btc_blocks)
+│  ├─ spec.rs              BtcBlockSpec (RangeSpec for blocks, over the shared HeightPos)
+│  └─ chain.rs             BitcoinChain — BtcHeadClock poll session · blocks()/blocks_hist()
+└─ bin/chainfold/          ← cfg(feature = "cli"): the real binary (evm + bitcoin subtrees)
 ```
 
 Feature gating:
 
 | Feature | Default | Pulls in |
 |---|---|---|
-| `evm` | off | `alloy` (HTTP+WS), `blake3`, `tracing` |
-| `cli` | off | implies `evm`; adds `clap`, `tracing-subscriber`, `chrono`, `toml`, `dirs` |
+| `evm` | off | `alloy` (HTTP+WS) |
+| `bitcoin` | off | `jsonrpc` (framing only — the wire transport is our reqwest impl) |
+| `cli` | off | implies `evm` + `bitcoin`; adds `clap`, `tracing-subscriber`, `chrono`, `toml`, `dirs` |
+
+(`tracing`, `blake3`, `tower-layer`/`tower-service`, `bytesize`, `reqwest`,
+`rusqlite` are unconditional — the shared engine compiles featureless.)
 
 ---
 
@@ -436,7 +485,7 @@ mirrors the reference [`history.ts`](../../reference/src/history.ts)'s
 
 ### Generic reactive layer — written once
 
-`RangeIndexStore<S: RangeSpec>` (`src/evm/range_index/store.rs`) implements
+`RangeIndexStore<S: RangeSpec>` (`src/range_index/store.rs`) implements
 **both** §5 backend traits over a `RangeIndex<S>` plus one reactive tip:
 
 - **One nullable end tip** — a single `watch::Sender<Option<S::PubPos>>` (the
@@ -486,9 +535,12 @@ trait RangeSpec: Clone + Send + Sync + 'static {
 
 Fetching is a separately injected closure — `Fetcher<Page>`, wrapping the
 source's RPC (`eth_getLogs` for logs) — so tests pass a pure-Rust stub and the
-provider-capturing fetch stays out of the persistence spec. `LogSpec` (a cache
-handle + `FilterHash`) is the EVM-logs impl; an EVM-**blocks** spec is the
-planned second instance (the `blocks` command, M1).
+provider-capturing fetch stays out of the persistence spec. Three instances
+exist: `LogSpec` (a cache handle + `FilterHash`; sparse, `LogRef`-indirect
+resolution) and `BlockSpec` (dense EVM blocks) in `src/evm/`, and
+`BtcBlockSpec` (dense Bitcoin blocks) in `src/bitcoin/`. The dense specs
+share the `HeightPos` tree key from `src/range_index/`; the seam itself is
+exercised featureless by the synthetic `MockSpec` testkit.
 
 ### Client — the chain entity (concrete per source)
 
@@ -507,10 +559,19 @@ chain.estimate_block(time).await -> BlockNumber                   // wall-clock 
 `EvmChain` is concrete because it vends *many* item types (`logs`, `blocks`,
 later traces/state) — no single trait/`dyn` expresses that; each source
 lives in its own `chain/` submodule (methods + fetcher + `TimePos` impl +
-source-specific wiring). The chain owns the chain-wide concerns **once**:
-the `ChainProvider` (which carries the `LogCache`,
-[§12](#12-caching-mechanics)), the single demand-started head clock, the
-lazy `time_pos` block-time anchor. `logs(filter, tier)` builds a `LogSpec` +
+source-specific wiring). **`BitcoinChain`** (`src/bitcoin/chain.rs`) is the
+concrete sibling — same construction contract (sync, infallible, RPC-free),
+same `blocks(tier)`/`blocks_hist(range)`/`estimate_block(time)` surface over
+its own `BtcRpcClient` — with no shared `Chain` trait (decision #6: no
+client demands one yet). What *is* shared is the scaffolding in
+`crate::chain`: the head channel (`HeadCell`), the demand-started clock
+owner (`HeadSeeder`, running the family's `HeadClock` *sessions* under one
+reconnect-backoff loop — ws/poll for EVM, a `getblockcount` poll for
+Bitcoin), the per-store `follow_head` wiring, `Finality`, and the
+`TimeLocator` (below). The chain owns the chain-wide concerns **once**: the
+`ChainProvider` (which carries the `LogCache`,
+[§12](#12-caching-mechanics)) or `BtcRpcClient`, the single demand-started
+head clock, the lazy `time_pos` anchor. `logs(filter, tier)` builds a `LogSpec` +
 fetcher + `RangeIndexStore`, spawns the store's wiring, and hands back a
 plain `HistStore` — cheap, synchronous and side-effect-free; cached state
 materializes lazily. `blocks(tier)` is the same shape over a `BlockSpec`: a
@@ -524,6 +585,15 @@ The `*_hist(range)` variants return a finite `Hist` over an explicit
 inclusive `BlockRange`: no tip, no wiring, no head demand — a fully-cached
 walk is completely offline, and a range beyond the real head fails loudly at
 iteration rather than clamping.
+
+**Wall-clock → height** (`estimate_block`, the stores' `time_pos`) is a
+two-step search in the shared `TimeLocator` (`src/chain/anchor.rs`): the
+nominal block cadence extrapolates an *initial guess only*, which an
+interpolation search (bisection fallback past a probe cap) refines against
+**real block timestamps**, read through the family's cache-first
+`BlockTimeSource` — warm searches are fully offline, and the result is the
+first block minted at/after the target (exact up to Bitcoin's local
+timestamp wobble; consensus only enforces median-time monotonicity).
 
 **There is no bare-head API.** The head is not an entity consumers read —
 it is the `end()` of the reactive histories ("last N blocks" = snapshot,
@@ -773,10 +843,10 @@ The concrete client for EVM log streams (`feature = "evm"`).
 | Component | Role |
 |---|---|
 | **`EvmChain<P>`** | The per-chain entity. Owns the `ChainProvider`, **one** demand-started head clock (`newHeads` or poll per `EvmChainConfig::transport`; ws heads persist headers before publishing), and vends per-source histories from per-source submodules: reactive stores (`logs(&LogFilter, tier)` / `blocks(tier)` — sync, side-effect-free) and bounded hists (`logs_hist(&filter, range)` / `blocks_hist(range)` — head-free, offline when cached). Construction does nothing; the first snapshot await (or `estimate_block`) starts tracking, which then runs until the chain and its stores drop. |
-| **`RangeIndexStore<S: RangeSpec>`** | The reactive layer, written once: `HistStoreBackend` + `HistBackend` over a `RangeIndex<S>` plus a single nullable `end` tip (`watch::Sender<Option<PubPos>>`; monotonic `on_bump`, `on_events` = insert page + bump). Wiring tasks attach as `AbortOnDropHandle`s holding `Weak` back-refs. |
-| **`RangeIndex<S>`** | Generic in-memory `BTreeMap<S::Pos, Range>` per source stream. Empty-range tombstones, singleflight via `Arc<Notify>` per range, lazy first-touch window load, async drain to SQLite. **The hot path.** |
-| **`LogSpec`** | The `RangeSpec` for EVM logs: `LogRef` tree items, sync `resolve` to `EvmEvent` (headers-present invariant), persist/load against `LogCache`, `EvmPosition` load. |
-| **`CacheDb` → `LogCache` / `Erc20Cache` / `EventSignatureCache`** | Durable SQLite over one shared connection. Narrow per-concern views; **never on the live path.** |
+| **`RangeIndexStore<S: RangeSpec>`** *(shared — `src/range_index/`)* | The reactive layer, written once: `HistStoreBackend` + `HistBackend` over a `RangeIndex<S>` plus a single nullable `end` tip (`watch::Sender<Option<PubPos>>`; monotonic `on_bump`, `on_events` = insert page + bump). Wiring tasks attach as `AbortOnDropHandle`s holding `Weak` back-refs. |
+| **`RangeIndex<S>`** *(shared — `src/range_index/`)* | Generic in-memory `BTreeMap<S::Pos, Range>` per source stream. Empty-range tombstones, singleflight via `Arc<Notify>` per range, lazy first-touch window load, async drain to SQLite. **The hot path.** |
+| **`LogSpec` / `BlockSpec`** | The EVM `RangeSpec`s. Logs: `LogRef` tree items, sync `resolve` to `EvmEvent` (headers-present invariant), persist/load against `LogCache`, `EvmPosition` load. Blocks: dense, whole-`EvmBlock` items over the shared `HeightPos` key, coverage under `ScanPartition::Blocks`. |
+| **`LogCache` / `Erc20Cache` / `EventSignatureCache`** | The EVM views over the shared `CacheDb` (§10): payload tables + the `.coverage()` accessor to the shared scanned-range/reorg bookkeeping. **Never on the live path.** |
 | **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session. Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
@@ -791,6 +861,28 @@ history fetches *its own* subset at the RPC level (`topic1=owner` and
 `topic2=owner`), so the node returns only the owner's transfers — not the
 whole Transfer stream filtered client-side. See design decision #11 in
 `MEMORY.md`.
+
+---
+
+## 9B. The Bitcoin source layer
+
+The concrete client for the Bitcoin block history (`feature = "bitcoin"`) —
+the second chain family, and deliberately thin: everything reactive rides
+the shared engine, so the module holds only what is Bitcoin about it.
+
+| Component | Role |
+|---|---|
+| **`BitcoinChain`** | The per-chain entity, `EvmChain`'s concrete sibling (no shared trait — decision #6). Owns the `BtcRpcClient`, one demand-started head clock (`BtcHeadClock`: a `getblockcount` poll session under the shared backoff runner; ZMQ `hashblock` push is the noted future upgrade), and vends `blocks(tier)` / `blocks_hist(range)` / `estimate_block(time)` with the same offline guarantees as the EVM side. |
+| **`BtcBlockSpec`** | The `RangeSpec` for Bitcoin blocks: dense, whole-`BtcBlock` items (all-`Copy`, pure-copy `resolve`) over the shared `HeightPos` key; persist/load against `BtcBlockCache`, coverage under `ScanPartition::BtcBlocks`. |
+| **`BtcRpcClient`** | The narrow bitcoind JSON-RPC surface: `getblockcount`, batched `getblockhash(height)` → batched `getblockheader(hash, verbose)` — one verbose header carries every `BtcBlock` field including `nTx`. Batches are id-matched (the `jsonrpc` client re-orders), sized in the low hundreds (bitcoind processes a batch sequentially and buffers the whole response). Responses decode through thin local serde structs — deliberately no typed-client dependency. |
+| **`ReqwestTransport` / `TracingTransport`** | `jsonrpc` 0.20's async `Transport` over the crate's reqwest (cookie/basic auth via the `BtcAuth` funnel; cookie-file IO at build time, never per-request), wrapped in the decorator emitting the same `chainfold::rpc` span contract as the EVM `RpcTimingLayer` (§15). |
+| **`BtcBlockCache`** | The Bitcoin view over the shared `CacheDb`: `cached_btc_blocks` (height-keyed INSERT-OR-REPLACE) + `.coverage()`. |
+| **`BtcBlock` / `BtcBlockHash` / `CompactTarget`** | The domain types. `BtcBlockHash` stores bytes in **RPC/display order** (parse/display are plain hex round-trips — no byte-reversal logic exists to get wrong). `CompactTarget` keeps the exact consensus `bits` (`difficulty()` is derived, display-only) so `BtcBlock` stays all-`Copy` + `Eq`. |
+
+**Position model:** the public position is the bare shared `BlockNumber`
+(block `N` at position `N`), identical to the EVM blocks source — a future
+tx-level source would introduce a `(height, tx_index)` position, mirroring
+`EvmPosition`.
 
 ---
 
@@ -825,8 +917,15 @@ flowchart LR
 
 ### Durable: SQLite (via `rusqlite`, bundled)
 
-`CacheDb` opens one file and vends narrow views; migrations live in
-`src/evm/cache.rs`.
+`CacheDb` (`src/cache.rs`, shared) opens one file and runs the single
+unified migration list — every family's tables exist in every cache file
+(an empty table costs one b-tree page). The narrow views are vended per
+concern: the cross-family `Coverage` (scanned ranges + reorg tombstones,
+`src/cache/coverage.rs`) by the shared layer, and the per-family payload
+views by `impl CacheDb` blocks in the family modules (`LogCache` /
+`Erc20Cache` / `EventSignatureCache` for EVM, `BtcBlockCache` for Bitcoin) —
+the shared layer never names a family. One DB file scopes one chain: the
+history tables carry no chain/network column.
 
 ```mermaid
 erDiagram
@@ -860,6 +959,25 @@ erDiagram
         blob parent_hash
         int  timestamp
     }
+    cached_blocks {
+        int  height PK
+        blob hash
+        blob parent_hash
+        int  timestamp
+        int  tx_count
+        int  gas_used
+        int  gas_limit
+        int  base_fee "nullable — pre-EIP-1559"
+        blob miner
+    }
+    cached_btc_blocks {
+        int  height PK
+        blob hash
+        blob prev_hash
+        int  time
+        int  tx_count
+        int  bits "compact target"
+    }
     erc20_metadata {
         blob address PK
         int  chain_id PK
@@ -883,7 +1001,11 @@ erDiagram
         text abi_json "nullable"
     }
     cached_logs        }o--|| scanned_ranges  : "same filter_hash partition"
+    cached_blocks      }o--|| scanned_ranges  : "ScanPartition::Blocks"
+    cached_btc_blocks  }o--|| scanned_ranges  : "ScanPartition::BtcBlocks"
     cached_logs        }o--o{ reorged_blocks   : "filtered out by block_hash at query time"
+    cached_blocks      }o--o{ reorged_blocks   : "filtered out by hash at query time"
+    cached_btc_blocks  }o--o{ reorged_blocks   : "filtered out by hash at query time"
     scanned_ranges     }o--o{ reorged_blocks   : "end_block_hash reorged ⇒ rescan"
 ```
 
@@ -896,7 +1018,24 @@ Key modelling decisions baked into the schema:
   #7.)
 - **`filter_hash`** = `BLAKE3(address ++ topic0..3)` partitions logs by the
   `eth_getLogs` filter that produced them. Different filters on the same
-  contract (Transfer vs Approval) get separate partitions.
+  contract (Transfer vs Approval) get separate partitions. The same BLOB
+  column carries the typed `ScanPartition` for non-filter coverage: fixed
+  derived blobs `BLAKE3("chainfold:blocks")` (EVM blocks) and
+  `BLAKE3("chainfold:bitcoin:blocks")` — a closed enum, pinned three-way
+  disjoint, so two families' block coverage can share one table and one
+  file.
+- **Hashes cross the coverage seam as the opaque `CoverageHash`** (32 raw
+  bytes): the coverage tables only compare identity, so each family's hash
+  newtype (EVM `0x` hex, Bitcoin display-order hex) converts via `From`
+  exactly where a page is persisted or a reorg recorded — no per-source
+  display convention leaks into shared storage. `reorged_blocks` is
+  therefore cross-family; its height-scoped `cleanup_reorged_before` must be
+  partitioned per family before Phase 7 wires finality-driven cleanup
+  (flagged in `TODO.md`).
+- **The dense block tables** (`cached_blocks`, `cached_btc_blocks`) are
+  height-keyed with INSERT-OR-REPLACE: a reorg refetch overwrites the stale
+  fork row in place; until then the stale row is filtered at query time via
+  `reorged_blocks`.
 - **`scanned_ranges`** records *which ranges were fetched* even when they
   returned zero logs — that's how a gap query knows what it still needs. Its
   `end_block_hash` is the reorg-invalidation key: if that hash lands in
@@ -1097,7 +1236,8 @@ the same rule expressed structurally.
 The two headline guarantees are only credible if they stay *measurable*.
 Chainfold emits a small, **stable** `tracing` contract at every RPC, SQLite,
 and setup boundary — a contract, not incidental logging — described in one
-place (`src/evm/observe.rs`).
+place (`src/observe.rs`, shared: a second family participates by emitting
+the same targets, with zero consumer changes).
 
 Every span lives under a `chainfold::*` target: the **target** names the kind
 of work (a section in a stats report), the **span name** labels the specific
@@ -1121,12 +1261,14 @@ with typed `layer`/`outcome` fields (`CacheLayer`/`CacheOutcome` closed
 enums). A `singleflight` cache hit means a concurrent caller was coalesced
 onto an in-flight fetch — an RPC *saved*.
 
-**RPC spans are emitted at the transport boundary**, not at call sites:
-`RpcTimingLayer` (`src/evm/transport.rs`, installed outermost in the alloy
-client stack, before the retry layer) times every request the client sends —
-retries and backoff included — so a new RPC call site cannot be forgotten. A
-batch is one wire request and gets one span, labelled with its shared method
-(chainfold only issues homogeneous batches).
+**RPC spans are emitted at the transport boundary**, not at call sites — so
+a new RPC call site cannot be forgotten. Per family: `RpcTimingLayer`
+(`src/evm/transport.rs`, installed outermost in the alloy client stack,
+before the retry layer) and `TracingTransport` (`src/bitcoin/transport.rs`,
+the decorator around the reqwest-backed `jsonrpc` transport). A batch is one
+wire request and gets one span, labelled with its shared method (chainfold
+only issues homogeneous batches) and a `reqs` count of the JSON-RPC calls it
+carries.
 
 **Summing rule.** Spans may nest: a connection opens lazily inside the first
 request that needs one, so its connect span (`ConnectTimingLayer` — a
@@ -1173,28 +1315,43 @@ flowchart TB
     root["chainfold"]
     root --> config["config"]
     root --> chains["chains"]
-    root --> evm["evm (EvmArgs: --chain/--chain-id, --rpc-url,<br/>--from/--to/--from-block/--num-blocks, --db, --stats)"]
+    root --> evm["evm (EvmArgs: --chain/--chain-id, --rpc-url, --db,<br/>window flags, --reverse/--follow)"]
+    root --> bitcoin["bitcoin (BitcoinArgs: --rpc-url,<br/>--rpc-cookie-file / --rpc-user+--rpc-pass, --db,<br/>window flags, --reverse/--follow)"]
+    root --> cachecmd["cache --db"]
     config --> cshow["show — print resolved config"]
     config --> ccheck["check — validate + test RPC"]
     chains --> clist["list — resolvable chain names (chainlist.org),<br/>testnets hidden unless --testnets / --alchemy-supported"]
+    evm --> eblocks["blocks list [--full]"]
     evm --> erc20["erc20 --address… --owner…"]
     evm --> events["events --address --event/--event-sig/--topic0<br/>[--decode] [--full]"]
+    bitcoin --> bblocks["blocks list [--full]"]
+    cachecmd --> csize["size — per-table counts + footprint"]
+    cachecmd --> cpurge["purge [--history/--erc20/--signatures]"]
     erc20 --> transfers["transfers"]
     erc20 --> balances["balances (running balance column)"]
 ```
 
-**Chain resolution precedence:** `--chain-id` > `--chain` > env
+The window/limit flags (`--from`/`--to`/`--from-block`/`--num-blocks`/
+`--limit`) are one shared `WindowArgs`, flattened into both families'
+subtrees with identical semantics.
+
+**Chain resolution precedence (evm):** `--chain-id` > `--chain` > env
 `CHAINFOLD_CHAIN` > config `[evm] default_chain` > built-in `ethereum`. Names
 resolve against cached chainlist.org data via a `ChainResolver`
 (lowest-chain-id-wins on shortName/chainSlug collisions, deterministic). RPC
 selection: explicit `--rpc-url` > Alchemy (with API key) > chainlist public
 RPC.
 
+**Bitcoin endpoint resolution:** `--rpc-url` > config `[bitcoin] rpc_url`
+(env-interpolated from `BITCOIND_RPC_URL`) > `http://127.0.0.1:8332`. Auth
+funnels once to `BtcAuth`: flag user/pass > flag cookie > config user/pass >
+config cookie > `~/.bitcoin/.cookie` when present > none.
+
 **Histories-first** is the through-line: a `balances` read is a *history of
-balances*, an `events` read a slice of *event history*, and "value at tip" is
-just `hist.at(tip)`. Every read maps onto the library `HistStore`, inheriting
-caching / resume / follow for free. Growth path: a `blocks` command, then
-`call` / `storage` / `code` accessors.
+balances*, an `events` read a slice of *event history*, a `blocks list` a
+slice of *block history*, and "value at tip" is just `hist.at(tip)`. Every
+read maps onto the library `HistStore`, inheriting caching / resume / follow
+for free. Growth path: `call` / `storage` / `code` accessors.
 
 ---
 
@@ -1231,13 +1388,15 @@ remaining deliberately-generic boundary is `Position::marshal`'s
 
 | Suite | What it covers | Gate |
 |---|---|---|
-| Lib unit | Source-agnostic surface via `MockPos`; EVM units | always |
+| Lib unit | Source-agnostic surface via `MockPos`; the range-index engine via the synthetic `MockSpec` testkit (featureless); per-family units | always |
 | `tests/hist_store.rs` | `Hist` / `HistStore` shape | always |
 | `tests/combinators.rs` | map/filter/since composition | always |
 | `tests/interleave.rs` | cross-family interleave: app enum + `map_positions`, restart resume (the wallet recipe) | always |
 | `tests/matcher.rs` | matcher incl. SQLite persistence across restart | always |
 | `tests/mock_provider_smoke.rs` | alloy `Asserter` wrapper | `evm` |
 | `tests/anvil_smoke.rs` | local anvil harness (fork case `#[ignore]`) | `evm` |
+| `tests/blocks_history.rs` | local-anvil blocks source: cold/warm walk, poll follow | `#[ignore]` |
+| `tests/bitcoin_blocks_history.rs` | regtest-bitcoind blocks source: cold walk → node killed → offline warm walk; poll follow | `bitcoin`, `#[ignore]` |
 | `tests/cache_layering.rs` | fork-mainnet warm-cache speedup | `#[ignore]` |
 | `tests/live_follow.rs` | anvil live-event latency | `#[ignore]` |
 | `tests/owned_erc20.rs` | fork OwnedErc20 vs broad-filter baseline | `#[ignore]` |
@@ -1256,15 +1415,15 @@ Anti-regression: several tests assert RPC counts through the observability
 contract (e.g. a second walk of a cached range issues zero `eth_getLogs`).
 Coverage runs via `cargo-llvm-cov`, uploaded to Codecov (patch ≥ 80%).
 
-**Concurrency coverage.** `concurrent_searches_in_same_gap_fire_one_fetch`
-(`src/evm/range_index.rs` tests) pins the shared-BTree singleflight: 5
-concurrent walkers over one `Arc<RangeIndex<LogSpec>>` and the same cold gap
-→ 1 fetch, all 5 see the item. It's `#[tokio::test]` (current-thread), so it
-covers *concurrent* (interleaved), not *parallel* (multi-core), access. Known
-gaps (tracked as R6 in `TODO.md`): no `multi_thread`/loom test for true data
-races; no test for concurrent walkers over *disjoint/overlapping* ranges on
-one BTree; no reader-vs-writer test (a walk in flight while the ws wiring's
-`on_events` mutates the same BTree).
+**Concurrency coverage.** The R6 suite (`src/range_index/tests.rs`, now
+featureless over `MockSpec`) pins the shared-BTree soundness: singleflight
+under a real `multi_thread` runtime, disjoint gaps fetching independently,
+overlapping windows tiling the union with no double fetch, and two
+reader-vs-writer scenarios (a deterministic parked-fetch insert-ahead case
+and a stressed walk racing late inserts — no dup, no drop). The backbone
+invariant: `walk_step` holds the tree `Mutex` across no await, so readers
+and the live `insert_page` writer only interleave at await points. A loom
+model of the placeholder protocol remains open in `TODO.md`.
 
 ---
 
@@ -1282,10 +1441,16 @@ pieces:
 - **EVM blocks source** ✅ *shipped*. `BlockSpec: RangeSpec` reuses the same
   generic `RangeIndex`/`RangeIndexStore` machinery to back
   `chain.blocks(tier) -> HistStore<EvmBlock, BlockNumber>` — the
-  histories-first `blocks` CLI command (`evm blocks list`). Now that a second
-  `RangeSpec` exists, a source-agnostic `Source` trait over the per-source
-  wiring could be lifted (still deferred per decision #6 — two impls, no
-  client demanding it yet).
+  histories-first `blocks` CLI command (`evm blocks list`).
+- **Bitcoin block-history source** ✅ *shipped* — and with it the full
+  shared-engine extraction it was designed to force: `chain` (head clock /
+  anchor / wiring / height types), `cache` (CacheDb + cross-family
+  Coverage), `range_index`, and `observe` are crate-root modules; `EvmChain`
+  and `BitcoinChain` are thin concrete siblings ([§9B](#9b-the-bitcoin-source-layer)).
+  A `Source`/`Chain` trait over the per-family wiring stays deferred per
+  decision #6 — three `RangeSpec` impls, two chains, still no client
+  demanding `dyn` chains. Bitcoin follow-ups: ZMQ `hashblock` head push, a
+  `(height, tx_index)` tx-level source.
 - **Reducer** — the matcher's sibling (stateful monotonic fold over one
   stream, positioned by a vector of source positions). `Erc20Balance` rebuild
   gates on it.
@@ -1294,9 +1459,9 @@ pieces:
   uses a generic `--match-on` key extractor.
 - **`chainfoldd`** — the transparent caching JSON-RPC daemon (benefits from
   Phase 7's finality wiring).
-- **More source backends** — Solana / Bitcoin / CEX websockets all fit the
-  `HistStoreBackend` shape; each gets its own `Position` type, and cross-source
-  merge already supports it.
+- **More source backends** — Solana / CEX websockets fit the
+  `HistStoreBackend` shape (Bitcoin shipped as the pattern to copy); each
+  gets its own `Position` type, and cross-source merge already supports it.
 - **Reorg-aware `lca()` / `is_equiv()`** *(Phase 7 candidate)*. Centralize the
   consumer-side reorg recovery of [§13](#13-reorg--finality-model) into the API
   — `HistStore::lca(a, b)` to roll a stale anchor back to the canonical chain's

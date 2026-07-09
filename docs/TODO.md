@@ -33,6 +33,23 @@ lives in git history and in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   a mid-walk `items()`: no dup / no drop / no panic). Test suite split out to
   `src/evm/range_index/tests.rs`. Stretch goal **not** done: a `loom` model of
   the singleflight handshake (needs a sync analog of the async `Notify` path).
+- **Shared-engine extraction + Bitcoin block-history source** — the second
+  chain family, added deliberately to force the extraction: `observe`,
+  `chain` (height types · `HeadCell`/`HeadSeeder`/`HeadClock` session seam ·
+  `Finality` · `TimeLocator` · `follow_head`), `cache` (`CacheDb` + the
+  cross-family `Coverage` view, `ScanPartition`, opaque `CoverageHash`), and
+  `range_index` (+ the dense `HeightPos` key and a synthetic `MockSpec`
+  testkit that un-gated the generic tests) are crate-root shared modules.
+  `src/bitcoin/`: `BtcBlock`/`BtcBlockHash` (display-order hex) /
+  `CompactTarget`, a reqwest-backed `jsonrpc` 0.20 transport with the
+  `chainfold::rpc` span decorator, batched `getblockhash`→`getblockheader`
+  client, `cached_btc_blocks` + `ScanPartition::BtcBlocks`, `BtcBlockSpec`,
+  and the concrete `BitcoinChain` sibling (no `Chain` trait — decision #6).
+  `chainfold bitcoin blocks list` CLI (shared `WindowArgs`, `[bitcoin]`
+  config + `BtcAuth` funnel); regtest integration suite via `corepc-node`.
+  Along the way `estimate_block`/`time_pos` gained real refinement: the
+  nominal-cadence anchor is only the initial guess for a timestamp-driven
+  interpolation search (`TimeLocator`).
 - **Demand-started head tracking + bounded hists** — `EvmChain::new` is sync,
   infallible and RPC-free; the head clock (poll/ws, `EvmChainConfig::transport`
   — the `follow: Option<_>` "one-shot chain" mode is gone) starts exactly once
@@ -65,7 +82,8 @@ memory. That's the `loom` model, and it's the one genuinely open R6 piece.
   vs. peer register-wait) into a sync analog (`Mutex` + condvar/atomic flag) and
   `loom::model` that, proving the handshake race-free; the async code is then a
   thin wrapper over the proven core.
-- Behavioural coverage already in place (`src/evm/range_index/tests.rs`): the
+- Behavioural coverage already in place (`src/range_index/tests.rs`, now
+  featureless over the synthetic `MockSpec`): the
   `walk_step`-holds-no-lock-across-await invariant is exercised by the
   multi-thread same-gap, disjoint, overlapping, and reader-vs-writer tests.
 - The **codecov/patch red** on the live WS/poll wiring (`chain/wiring.rs`,
@@ -99,15 +117,17 @@ block N" coverage; the point becomes the cache/merge machinery, which is what
 these actually test. Keep one thin fork smoke test (behind an env gate) if real
 end-to-end coverage is still wanted.
 
-## Time anchor from the newest cached header — offline dated queries
+## Time anchor from the newest cached row — offline dated queries
 
 `--from`/`--to` queries resolve the wall-clock→block anchor by demanding the
-head and reading its header (`LazyAnchor` in `chain.rs`): one
-`eth_blockNumber` + one `eth_getBlockByNumber` per dated run, even fully
-cached. Extrapolation doesn't need the *current* head — any recent anchor
-works. Add a `LogCache` read for the newest `cached_block_headers` row and
-let `LazyAnchor` prefer it (fall back to the head demand on an empty cache):
-warm dated queries become offline like the `--from-block` path.
+head and reading its block time (`LazyAnchor` inside the shared
+`TimeLocator`): one tip poll + one block-time read per dated run, even fully
+cached. The *search* probes are already cache-first (the `TimeLocator`
+refinement), but the anchor itself still demands the head. Anchoring doesn't
+need the *current* head — any recent anchor works. Prefer the newest cached
+row (`cached_block_headers`/`cached_blocks` for EVM, `cached_btc_blocks` for
+Bitcoin) and fall back to the head demand on an empty cache: warm dated
+queries become fully offline like the `--from-block` path.
 
 ## Head-clock stop-on-idle — deliberately deferred
 
@@ -120,6 +140,28 @@ show the idle poll to matter.
 
 _Reserved for additional reactive-core points from the user._
 
+## Family-scoped reorg tombstones — before Phase 7 cleanup wiring
+
+`reorged_blocks` is shared by every family in the one cache file, and
+heights are only comparable within one family — `cleanup_reorged_before`
+(height-scoped, currently test-only) driven by one family's finality would
+also drop the other family's tombstones at numerically lower heights.
+Partition the table (or the delete) per family before Phase 7 wires
+finality-driven cleanup. Flagged on the method in `cache/coverage.rs`.
+
+## Bitcoin follow-ups
+
+- **ZMQ `hashblock` head push** — the poll-only `BtcHeadClock` gets a push
+  sibling (a second `HeadClock` session, exactly like the EVM ws path) for
+  sub-second head latency where the node exposes ZMQ.
+- **Tx-level source** — a `(height, tx_index)` position (the `EvmPosition`
+  analog per `blockchain_storage.md`) over `getblock` verbosity 2, when a
+  consumer needs Bitcoin transactions rather than block facts.
+- **Per-network scoping** — like the EVM history tables, `cached_btc_blocks`
+  carries no network column; one DB file per network is the (documented)
+  operating assumption. Revisit together with the EVM per-chain scoping if
+  a multi-network daemon materializes.
+
 ## CLI table/column printing — consolidate
 
 Tabular and width-aligned output is hand-rolled with ad-hoc `format!`/`println!`
@@ -129,7 +171,8 @@ width specifiers, scattered across several modules with no shared helper:
 - `stats.rs` — the `--stats` session summary (column-aligned RPC/cache rows).
 - `fmt.rs::format_amount` — `whole_width`/`frac_width` numeric padding.
 - `evm/erc20.rs`, `evm/events.rs` — per-row transfer/event renderers.
-- `evm/blocks.rs` — the `blocks list` table (`print_header`/`print_block`).
+- `evm/blocks.rs`, `bitcoin/blocks.rs` — the `blocks list` tables
+  (`print_header`/`print_block`).
 - `config.rs::show` — key/value listing.
 
 Each picks its own widths and alignment by hand, so columns don't line up

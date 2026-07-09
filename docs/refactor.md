@@ -38,10 +38,24 @@ layering. Built on three locked-in structural shifts:
   `HistStore`, `Signal`, `HistBackend`/`HistStoreBackend`), `src/merge/`,
   `src/combinators/` (`mapped`/`filtered`/`since`/`map_positions`),
   `src/matcher/`.
-- **EVM source** (concrete): `src/evm/` — `chain/` (`EvmChain`, head clock,
-  per-store wiring), `range_index/` (generic tree + `RangeIndexStore` +
-  `LogSpec`), `cache/`, `chain_provider.rs`, `erc20.rs`, `owned_erc20.rs`,
-  `types.rs`, `transport.rs`, `aligned_ranges.rs`, `signatures.rs`.
+- **Shared chain engine** (source-agnostic, always compiled — extracted when
+  the Bitcoin source landed): `src/chain/` (height types, `HeadCell`/
+  `HeadSeeder` + the per-family `HeadClock` session seam, `Finality`,
+  `TimeLocator`, `follow_head`), `src/range_index/` (generic tree +
+  `RangeIndexStore` + the `RangeSpec` seam + dense `HeightPos` + `MockSpec`
+  testkit), `src/cache/` (`CacheDb`, one unified schema, the cross-family
+  `Coverage` view with `ScanPartition`/`CoverageHash`), `src/observe.rs`.
+- **EVM source** (concrete): `src/evm/` — `chain/` (`EvmChain`,
+  `EvmHeadClock` ws/poll sessions, per-source stores), `log_spec.rs` +
+  `block_spec.rs` (+ `block_pos.rs`), `cache/` (EVM views over `CacheDb`),
+  `chain_provider.rs`, `erc20.rs`, `owned_erc20.rs`, `types.rs`,
+  `transport.rs`, `aligned_ranges.rs`, `signatures.rs`.
+- **Bitcoin source** (concrete): `src/bitcoin/` — `chain.rs`
+  (`BitcoinChain`, `getblockcount`-poll `HeadClock`), `spec.rs`
+  (`BtcBlockSpec` over `HeightPos`), `rpc.rs` + `transport.rs` (batched
+  bitcoind JSON-RPC on reqwest + the `chainfold::rpc` span decorator),
+  `cache.rs` (`BtcBlockCache`), `types.rs`. Block history only; both chains
+  stay concrete siblings (decision #6 — no `Chain` trait yet).
 - **Product CLI:** `src/bin/chainfold/` (behind the `cli` feature) — the real
   binary, carrying its own unit tests. Distinct from the per-feature **demo
   binaries** in `examples/` (`history_explorer`, `erc20_explorer`,
