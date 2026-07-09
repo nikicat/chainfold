@@ -1,16 +1,17 @@
 # Chainfold — Architecture
 
 > **This document** is the canonical architecture reference for chainfold —
-> the design, its structure, and the rationale behind both, with diagrams.
-> For the *roadmap and phase status* see [`refactor.md`](./refactor.md); for
-> the *product pitch and quickstart* see [`README.md`](../README.md); for the
-> original pre-refactor design brainstorm see
-> [`blockchain_storage.md`](./blockchain_storage.md).
+> the *as-built* design, its structure, and the rationale behind both, with
+> diagrams. For the *forward plan and backlog* see
+> [`ROADMAP.md`](./ROADMAP.md); for *coding conventions* see
+> [`STYLE.md`](./STYLE.md); for *dev setup* see
+> [`DEVELOPMENT.md`](./DEVELOPMENT.md); for the *product pitch and
+> quickstart* see [`README.md`](../README.md).
 >
-> **Status:** The **library** and **CLI** surfaces are live over the
-> `EvmChain` + generic `RangeIndexStore` core; the **daemon** (`chainfoldd`)
-> is planned. Phase 7 (memory pruning + `best`/`safe` head producers) is the
-> next eligible chunk.
+> **Status:** The **library** and **CLI** surfaces are live over the shared
+> chain engine, with two concrete source families (EVM logs + blocks;
+> Bitcoin blocks); the **daemon** (`chainfoldd`) is planned. Phase 7 (memory
+> pruning + `best`/`safe` head producers) is the next eligible chunk.
 
 ---
 
@@ -35,7 +36,7 @@
 16. [The CLI surface](#16-the-cli-surface)
 17. [Type discipline](#17-type-discipline)
 18. [Testing](#18-testing)
-19. [Roadmap & in-flight work](#19-roadmap--in-flight-work)
+19. [Locked-in design decisions](#19-locked-in-design-decisions)
 
 ---
 
@@ -58,6 +59,15 @@ Whatever the surface, you get:
 | **Live push** | New events reach the consumer in single-digit ms end-to-end; the internal hop (receipt → range index → wake) is sub-ms — SQLite is never on the live path. |
 | **Subscribe-from-the-past** | Iterate from an old anchor, fall through transparently into the live tip, never surface a network error. |
 | **Merge & correlate** | Combine events from different chains/filters into one chronological stream; correlate `src ⇄ dst` tails into `{matched, pending, orphans}`. |
+
+**Why it exists.** The two motivating workloads are *state reconstruction*
+(fold events into a balance/position — which over raw RPC means racing a gap
+between the state fetch and the subscription, with no way to subscribe from
+an arbitrary past block) and *history comparison* (a bridge daemon diffing
+two chains' event histories — which means hand-rolling anchors, reconnect
+gap-fill, and re-fetch suppression). Both hammer the same ranges repeatedly,
+so both die without aggressive caching. Chainfold packages the lifecycle —
+backfill, live tracking, gap recovery, resume — behind one reactive API.
 
 ---
 
@@ -724,6 +734,12 @@ ordered variant needs no `clamp_pos` override — and `load` is any source's
 > information (it is the same log), consumers all deduped anyway, and the
 > position-identity reading dissolves the extra anchor type, the trait, and
 > the boundary-refetch machinery outright.
+>
+> A constraint that shaped this: the fetch protocol is exclusive-start
+> (`iter` is `(start, end]`) and **cannot express include-at-start**.
+> Coalescing sidesteps it by dropping duplicates rather than re-delivering;
+> any future design that must re-deliver an item *at* a resume position
+> needs either a `pred`-like seam or per-source clock starts.
 
 ### Interleave (vector clock)
 
@@ -818,6 +834,19 @@ flowchart LR
     AM <--> AS[("AnchorStore<br/>SQLite kv / in-memory")]
 ```
 
+**`AnchoredMatcher::iter()` drives directly off both sources' `snapshots()`**
+via `tokio::select!`, carrying and folding the latest `Hist` of each — the
+Hist that triggered a recompute is the one folded. There is no background
+task and no intermediate channel (R4 removed both), so the watch-coalescing
+footgun of [§14](#14-ownership--lifetime) cannot apply here.
+
+**The anchor blob is self-describing:** `MatcherAnchors` marshals as two
+adjacent length-prefixed positions (`u32_le(len) ‖ bytes`, twice), each side
+(de)serialized via its own `Position` marshal — so two heterogeneous position
+types share one `AnchorStore` value without a wrapping serde derive.
+`SqliteAnchorStore` is a single `(key, value BLOB)` table in its **own** DB
+file, deliberately independent of the log cache.
+
 **Asymmetric anchor advance is by design.** An anchor pair `{src, dst}` means
 "items strictly *after* these positions are still eligible for matching" —
 *not* "everything up to here is processed." Advance only `src` past a matched
@@ -832,7 +861,7 @@ vanish once anchors advance past them. Persist matched pairs in your app
 > **Reducer** (the matcher's sibling — a stateful monotonic *fold* over one
 > stream, positioned by a vector of source positions) is specced but **not
 > built**. Both are intended to ship; they solve different problems (fold vs
-> correlation). See [Roadmap](#19-roadmap--in-flight-work).
+> correlation — decision #9). See [`ROADMAP.md`](./ROADMAP.md#deferred-features).
 
 ---
 
@@ -859,8 +888,7 @@ The concrete client for EVM log streams (`feature = "evm"`).
 **Why in/out ERC20 is a merge of two filters, not a post-filter:** each inner
 history fetches *its own* subset at the RPC level (`topic1=owner` and
 `topic2=owner`), so the node returns only the owner's transfers — not the
-whole Transfer stream filtered client-side. See design decision #11 in
-`MEMORY.md`.
+whole Transfer stream filtered client-side (decision #11).
 
 ---
 
@@ -1031,7 +1059,7 @@ Key modelling decisions baked into the schema:
   display convention leaks into shared storage. `reorged_blocks` is
   therefore cross-family; its height-scoped `cleanup_reorged_before` must be
   partitioned per family before Phase 7 wires finality-driven cleanup
-  (flagged in `TODO.md`).
+  (flagged in [`ROADMAP.md`](./ROADMAP.md#backlog)).
 - **The dense block tables** (`cached_blocks`, `cached_btc_blocks`) are
   height-keyed with INSERT-OR-REPLACE: a reorg refetch overwrites the stale
   fork row in place; until then the stale row is filtered at query time via
@@ -1216,7 +1244,12 @@ flowchart LR
     class CacheA,IdxA shared
 ```
 
-**The watch-coalescing footgun.** Any task driven by a `tokio::sync::watch`
+### Reactive footguns
+
+Three recurring failure modes of change-driven streams, each pinned by a
+regression test:
+
+**Watch-coalescing.** Any task driven by a `tokio::sync::watch`
 subscription must propagate **every** emission. The tempting bug: skip the
 subscription's first emission as "already represented by the channel's init
 value." **This loses updates** — `watch` coalesces, so an update arriving
@@ -1228,6 +1261,26 @@ the matcher's `changes()` aggregator (removed by R4) and merge's tip
 aggregators (removed by R3) — are both gone; today's merge `snapshots()`
 seeds one snapshot per child before `select_all`ing their streams, which is
 the same rule expressed structurally.
+
+**Emit on advance, never re-emit an unchanged tip.** The dual of the above:
+`snapshots()` is change-driven — the first emission is the current tip,
+every later emission waits for a real *advance* (`rx.changed().await`).
+A `snapshots()` that re-reads an unchanged tip busy-loops `watch_hist`: the
+consumer re-splits an **empty** window `(anchor, tip]`, gets nothing to
+yield, and loops again — a synchronous busy-loop inside one `poll` that
+starves the executor. On a quiet chain the head wiring then never runs, so
+the tip never advances: a permanent live-lock, not just wasted CPU
+(discovered by the blocks `--follow` test on a fresh anvil, where even
+`tokio::time::timeout` couldn't fire). Any new `HistStoreBackend::snapshots`
+impl must gate re-emission on a real advance. Pinned by
+`snapshots_wait_for_advance_not_busy_loop` (`range_index/store.rs`).
+
+**The position-zero wart.** `watch_hist(store, P::default())` on a blocks
+store *includes genesis*: `BlockNumber::ZERO` maps to the "before all
+blocks" sentinel (`BlockPos::Bottom` / `HeightPos` bottom), so `split(ZERO)`
+keeps block 0 in the tail. To follow strictly-after the tip on a fresh
+chain, anchor at a real (non-genesis) block. Mirrors logs'
+`EvmPosition::earliest()` `(0, 0)` convention.
 
 ---
 
@@ -1405,15 +1458,23 @@ remaining deliberately-generic boundary is `Position::marshal`'s
 coalescing, plain-position anchors — live in `src/merge/ordered.rs` unit
 tests.)
 
-```bash
-cargo test --features evm             # fast lib + source-agnostic suite (~1s)
-cargo test --all-features             # + CLI-bin unit tests
-cargo test --features evm -- --ignored   # anvil / fork tests (needs `anvil`, MAINNET_RPC_URL)
-```
+Commands, external-process requirements (`anvil`, regtest `bitcoind`,
+`MAINNET_RPC_URL`), and the coverage setup live in
+[`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
 Anti-regression: several tests assert RPC counts through the observability
 contract (e.g. a second walk of a cached range issues zero `eth_getLogs`).
 Coverage runs via `cargo-llvm-cov`, uploaded to Codecov (patch ≥ 80%).
+
+**Examples** (`examples/`, all `--features evm`) double as end-to-end
+validation surfaces against real RPC:
+
+| Example | Demonstrates |
+|---|---|
+| `history_explorer` | raw single-filter log walker; `--measure` prints cold/warm/hot tiers |
+| `erc20_explorer` | ERC20 transfers + running balance; `--owner` uses `OwnedErc20` |
+| `bridge_explorer` | multi-chain cross-source merge (merge by `event.timestamp`) |
+| `bridge_matcher` | cross-chain `Matcher` with anchor persistence in a separate SQLite file |
 
 **Concurrency coverage.** The R6 suite (`src/range_index/tests.rs`, now
 featureless over `MockSpec`) pins the shared-BTree soundness: singleflight
@@ -1423,56 +1484,58 @@ reader-vs-writer scenarios (a deterministic parked-fetch insert-ahead case
 and a stressed walk racing late inserts — no dup, no drop). The backbone
 invariant: `walk_step` holds the tree `Mutex` across no await, so readers
 and the live `insert_page` writer only interleave at await points. A loom
-model of the placeholder protocol remains open in `TODO.md`.
+model of the placeholder protocol remains open in
+[`ROADMAP.md`](./ROADMAP.md#backlog).
 
 ---
 
-## 19. Roadmap & in-flight work
+## 19. Locked-in design decisions
 
-Canonical plan lives in [`refactor.md`](./refactor.md). The biggest unbuilt
-pieces:
+The numbered decisions this document cites (`decision #N`). Each was agreed
+explicitly — do not reverse one silently; reopen it with the user first.
 
-- **Phase 7 — pruning + `best`/`safe` wiring** *(next eligible)*.
-  `RangeIndex::prune_older_than` (drop item payloads, keep tombstones),
-  `compact_in_memory(up_to_block)`, real `best`/`safe` producers wired into
-  `EvmChain`'s head clock, bounded RSS under indefinite follow.
-  `LogCache::compact_ranges` (durable side) already exists and is tested;
-  the in-memory eviction is what's missing.
-- **EVM blocks source** ✅ *shipped*. `BlockSpec: RangeSpec` reuses the same
-  generic `RangeIndex`/`RangeIndexStore` machinery to back
-  `chain.blocks(tier) -> HistStore<EvmBlock, BlockNumber>` — the
-  histories-first `blocks` CLI command (`evm blocks list`).
-- **Bitcoin block-history source** ✅ *shipped* — and with it the full
-  shared-engine extraction it was designed to force: `chain` (head clock /
-  anchor / wiring / height types), `cache` (CacheDb + cross-family
-  Coverage), `range_index`, and `observe` are crate-root modules; `EvmChain`
-  and `BitcoinChain` are thin concrete siblings ([§9B](#9b-the-bitcoin-source-layer)).
-  A `Source`/`Chain` trait over the per-family wiring stays deferred per
-  decision #6 — three `RangeSpec` impls, two chains, still no client
-  demanding `dyn` chains. Bitcoin follow-ups: ZMQ `hashblock` head push, a
-  `(height, tx_index)` tx-level source.
-- **Reducer** — the matcher's sibling (stateful monotonic fold over one
-  stream, positioned by a vector of source positions). `Erc20Balance` rebuild
-  gates on it.
-- **Real bridge decoder** for `bridge_matcher` — ABI-aware `MatchFn` impls
-  (LayerZero ULN, OP `CrossDomainMessenger`, Arbitrum `Inbox`, …); the CLI
-  uses a generic `--match-on` key extractor.
-- **`chainfoldd`** — the transparent caching JSON-RPC daemon (benefits from
-  Phase 7's finality wiring).
-- **More source backends** — Solana / CEX websockets fit the
-  `HistStoreBackend` shape (Bitcoin shipped as the pattern to copy); each
-  gets its own `Position` type, and cross-source merge already supports it.
-- **Reorg-aware `lca()` / `is_equiv()`** *(Phase 7 candidate)*. Centralize the
-  consumer-side reorg recovery of [§13](#13-reorg--finality-model) into the API
-  — `HistStore::lca(a, b)` to roll a stale anchor back to the canonical chain's
-  latest common ancestor, instead of hand-rolled `EvmEvent.block_hash`
-  comparison.
+1. **Events are first-class**, not children of blocks. The block DAG is a
+   source concern, not a storage concern.
+2. **Custom table per reducer** — no opaque blob store. Each reducer owns
+   its SQL schema.
+3. **Core abstractions are `Position` / `Hist` / `HistStore` / `Signal`**
+   ([§5](#5-core-abstractions)); items expose `.pos` via `Positioned`;
+   navigation is `hist.split(p)`. No `Cursor`/`History` facade. `Signal`
+   currently has no public producer (the head is the snapshot's `end()`);
+   it returns with Phase 7's per-tier producers.
+4. **Three finality tiers** — `Finality { Latest, Best, Safe }` is a
+   chain-wide fact on the chain entity, not a per-store accessor. Bounded
+   `*_hist(range)` windows deliberately take **no** tier (no tip, no clock —
+   a dead parameter was rejected).
+5. **Subscribe path is demand-started; no one-shot mode.** Chain
+   construction is sync, infallible, RPC-free; the one head clock starts on
+   first tip demand and runs until the chain + stores drop. No bare-head
+   API. Live events bypass SQLite via the in-memory index.
+6. **Concrete impls first, traits later** — don't abstract until 1–2 impls
+   *and a client* exist. `EvmChain`/`BitcoinChain` are concrete siblings;
+   there is no `Chain` trait.
+7. **Reorg = append-only logs + `reorged_blocks` tombstones**, never
+   truncate-and-re-append. Reorged logs are filtered at query time.
+8. **Scanned ranges: no eager merge** — only ranges below the finalized tip
+   are compacted, so a tip reorg can never invalidate a huge merged range.
+9. **Reducer and Matcher both ship.** Fold (running balance) and
+   correlation (`{matched, pending, orphans}`) are different problems — do
+   not collapse them into one abstraction.
+10. **Reducer position = a vector of N source positions**, one per input —
+    deterministic, resumable, cross-chain. (The matcher uses the `{src, dst}`
+    anchor pair instead.)
+11. **Narrow filters over post-filtering.** `OwnedErc20` = an ordered merge
+    of two RPC-level filters (`topic1=owner` out, `topic2=owner` in), not a
+    client-side filter over all transfers; log delivery generally stays
+    per-filter (`eth_subscribe(logs)` can't express OR-topics).
+12. **Cache layering** ([§10](#10-storage-model)/[§12](#12-caching-mechanics)):
+    one shared `CacheDb` schema; cross-family `Coverage` view; per-family
+    payload views; in-memory `RangeIndex` above SQLite; SQLite never on the
+    live path.
+13. **Two merge variants, split by position space**
+    ([§7](#7-merge--ordered-and-interleaved)): ordered (one space, coalescing,
+    plain-`P` anchors) vs interleave (disjoint spaces, `MergedPos` vector
+    clock); cross-family unification via app enum + `map_positions` — no
+    `dyn` erasure.
 
-### Examples (all require `--features evm`)
-
-| Example | Demonstrates |
-|---|---|
-| `history_explorer` | raw single-filter log walker; `--measure` prints cold/warm/hot tiers |
-| `erc20_explorer` | ERC20 transfers + running balance; `--owner` uses `OwnedErc20` |
-| `bridge_explorer` | multi-chain cross-source merge (merge by `event.timestamp`) |
-| `bridge_matcher` | cross-chain `Matcher` with anchor persistence in a separate SQLite file |
+The forward plan lives in [`ROADMAP.md`](./ROADMAP.md).
