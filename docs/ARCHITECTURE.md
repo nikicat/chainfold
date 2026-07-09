@@ -490,8 +490,8 @@ Two layers. A range-based source authors a **`RangeSpec`** (what to store,
 resolve, persist) plus concrete wiring driving two entry points; everything
 reactive — the `HistStoreBackend`, its index, gap-fill, snapshots, position
 deserialization — is **generic, written once** as `RangeIndexStore<S>`. This
-mirrors the reference [`history.ts`](../../reference/src/history.ts)'s
-`HistStoreImpl` over its `RangeTree` + `HistoryCallbacks`.
+mirrors the production-validated reference implementation the design was
+translated from (a store impl over a range tree + narrow source callbacks).
 
 ### Generic reactive layer — written once
 
@@ -761,9 +761,9 @@ just yielded advances its entry; the others stay at whatever they last
 yielded. Saving the last `MergedPos` and resuming via `split(saved).1` is
 the exact per-source continuation, and it survives sources being
 added/removed across restarts — a missing key means that source's `Default`
-(pinned by `merged_pos_handles_added_source`). the reference implementation agrees with this
-shape: its `MergedPos` implements no comparison at all (serialize-only), and
-its forwarder merges EVM + Hyperliquid + Lighter feeds in production this
+(pinned by `merged_pos_handles_added_source`). The reference implementation
+agrees with this shape: its merged position implements no comparison at all
+(serialize-only), and it merges EVM + CEX/perp-DEX feeds in production this
 way.
 
 **The `Ord` subtlety:** `MergedPos<P>`'s total `Ord` (required by the

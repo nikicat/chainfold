@@ -22,10 +22,6 @@
 - **A demo binary is the validation surface.** If you can't drive the change
   end-to-end via an `examples/` binary (or the real CLI) against real RPC,
   it's not done.
-- **Reference reading** — `../reference/` holds production-tested TypeScript
-  versions of most patterns; translate, don't reinvent. Most relevant for the
-  remaining work: `src/history.ts` (pruning), `src/store.ts` (`storeFromGen` —
-  the Reducer spec), `src/matcher.ts`.
 
 ---
 
@@ -117,8 +113,8 @@ chain's latest common ancestor.
 cumulative volume), positioned by a **vector of N source positions** (one per
 input — deterministic, resumable, cross-chain; decision #10). The sibling of
 `Matcher` — both ship, they solve different problems (fold vs correlation;
-decision #9). The `Erc20Balance` rebuild gates on it. Spec:
-`../reference/src/store.ts` (`storeFromGen`) + `ARCHITECTURE.md` §8.
+decision #9). The `Erc20Balance` rebuild gates on it. See `ARCHITECTURE.md`
+§8 for the matcher shape it pairs with.
 
 ### Bridge decoder
 
