@@ -58,6 +58,7 @@ impl<S: RangeSpec> Range<S> {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // consumed by the feature-gated range_index tests
     pub(super) fn is_empty(&self) -> bool {
         self.item.is_none()
     }

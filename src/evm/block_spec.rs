@@ -3,8 +3,8 @@
 //! [`EvmChain::blocks`](crate::evm::EvmChain::blocks).
 //!
 //! Unlike logs, blocks are **dense**: every height in a scanned range is an
-//! item, pinned at `end_of_block(n)`, so a page produces one tree entry per
-//! block and no empty tails. The tree stores the whole [`EvmBlock`]
+//! item, pinned at `end_of_block(n)` in the shared [`HeightPos`] key space,
+//! so a page produces one tree entry per block and no empty tails. The tree stores the whole [`EvmBlock`]
 //! (all-`Copy`) — [`resolve`](RangeSpec::resolve) is a pure copy, with no
 //! per-row `SQLite` read (no `LogRef`-style indirection).
 //!
@@ -12,13 +12,12 @@
 //! rows live in `cached_blocks`, written only by this spec's
 //! [`persist`](RangeSpec::persist).
 
-use super::block_pos::BlockPos;
 use crate::arch::{HistoryError, Positioned};
 use crate::cache::ScanPartition;
 use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::cache::LogCache;
 use crate::evm::types::{BlockHash, EvmBlock};
-use crate::range_index::{IndexPos, LoadedSpan, RangeSpec};
+use crate::range_index::{HeightPos, IndexPos, LoadedSpan, RangeSpec};
 use crate::shared::Shared;
 
 /// [`RangeSpec`] for the chain's block history over a [`LogCache`].
@@ -47,14 +46,14 @@ pub struct BlockPage {
 }
 
 impl RangeSpec for BlockSpec {
-    type Pos = BlockPos;
+    type Pos = HeightPos;
     type Item = EvmBlock;
     type Event = EvmBlock;
     type PubPos = BlockNumber;
     type Page = BlockPage;
 
-    fn item_pos(item: &EvmBlock) -> BlockPos {
-        BlockPos::end_of_block(item.number)
+    fn item_pos(item: &EvmBlock) -> HeightPos {
+        HeightPos::end_of_block(item.number)
     }
 
     fn page_items(page: &BlockPage) -> Vec<EvmBlock> {
@@ -118,14 +117,14 @@ impl RangeSpec for BlockSpec {
         BlockNumber::from_value(value)
     }
 
-    fn index_pos(p: &BlockNumber) -> BlockPos {
+    fn index_pos(p: &BlockNumber) -> HeightPos {
         // `ZERO` is the lower-bound sentinel (the `Position` impl's
         // documented wart, mirroring logs' `earliest()`): mapping it to
         // `Bottom` keeps genesis reachable from a default-start `Hist`.
         if *p == BlockNumber::ZERO {
-            BlockPos::Bottom
+            HeightPos::Bottom
         } else {
-            BlockPos::end_of_block(*p)
+            HeightPos::end_of_block(*p)
         }
     }
 
@@ -202,8 +201,8 @@ mod tests {
     async fn walk(idx: &std::sync::Arc<RangeIndex<BlockSpec>>, from: u64, to: u64) -> Vec<u64> {
         idx.clone()
             .items(
-                BlockPos::end_of_block(bn(from)),
-                BlockPos::end_of_block(bn(to)),
+                HeightPos::end_of_block(bn(from)),
+                HeightPos::end_of_block(bn(to)),
             )
             .map(|r| r.expect("resolve").pos.get())
             .collect()
@@ -264,7 +263,7 @@ mod tests {
             .clone()
             .items(
                 <BlockSpec as RangeSpec>::index_pos(&bn(99)),
-                BlockPos::end_of_block(bn(104)),
+                HeightPos::end_of_block(bn(104)),
             )
             .map(|r| r.expect("resolve").pos.get())
             .collect::<Vec<_>>()
@@ -286,11 +285,11 @@ mod tests {
     fn index_pos_maps_zero_to_bottom_keeping_genesis_reachable() {
         assert_eq!(
             <BlockSpec as RangeSpec>::index_pos(&BlockNumber::ZERO),
-            BlockPos::Bottom
+            HeightPos::Bottom
         );
         // Genesis's own item position is strictly above Bottom, so a
         // default-start Hist (start = ZERO → Bottom) includes block 0.
-        assert!(BlockSpec::item_pos(&mk_block(0)) > BlockPos::Bottom);
+        assert!(BlockSpec::item_pos(&mk_block(0)) > HeightPos::Bottom);
         assert_eq!(
             <BlockSpec as RangeSpec>::index_pos(&bn(7)),
             BlockSpec::item_pos(&mk_block(7))
@@ -339,7 +338,7 @@ mod tests {
 
         let got = idx
             .clone()
-            .items(BlockPos::bottom(), BlockPos::end_of_block(bn(3)))
+            .items(HeightPos::bottom(), HeightPos::end_of_block(bn(3)))
             .map(|r| r.expect("resolve").pos.get())
             .collect::<Vec<_>>()
             .await;

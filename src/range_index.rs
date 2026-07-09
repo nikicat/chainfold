@@ -32,16 +32,20 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use crate::arch::{HistoryError, Positioned};
 
 mod gap_fill;
+mod height_pos;
 mod range_tree;
 mod spec;
 mod store;
 
+pub use height_pos::HeightPos;
 pub use spec::{Fetcher, IndexPos, LoadedSpan, RangeSpec};
 pub use store::{RangeIndexStore, TimePos, TipSeed};
 
 /// Test-only fetcher that panics on any gap fill — re-exported for the
-/// concrete specs' warm-walk tests, which live with their sources.
+/// concrete specs' warm-walk tests, which live with their (feature-gated)
+/// sources; a featureless test build has no user, hence the allow.
 #[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use gap_fill::never_fetch;
 
 use crate::chain::{BlockRange, ChunkSize};
@@ -129,21 +133,27 @@ impl<S: RangeSpec> RangeIndex<S> {
         true
     }
 
-    /// Whether a drain task is currently attached. Test helper.
+    /// Whether a drain task is currently attached. Test helper (used by the
+    /// feature-gated spec tests, hence the allow).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn has_drain(&self) -> bool {
         self.drain_tx.lock().unwrap().is_some()
     }
 
-    /// Number of ranges currently in the tree. Test helper.
+    /// Number of ranges currently in the tree. Test helper (used by the
+    /// feature-gated spec tests, hence the allow).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.tree.lock().unwrap().len()
     }
 
     /// Whether the block window `[range.from, range.to]` has been
-    /// materialized. Test helper.
+    /// materialized. Test helper (used by the feature-gated spec tests,
+    /// hence the allow).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn window_loaded(&self, range: BlockRange) -> bool {
         self.loaded_windows
             .lock()
