@@ -20,8 +20,8 @@ use alloy::sol_types::{SolCall, SolEvent};
 use crate::arch::HistoryError;
 
 use super::cache::Erc20Cache;
-use super::observe::{CacheLayer, CacheOutcome, cache_event};
 use super::types::{ChainId, EvmEvent, Topic};
+use crate::observe::{CacheLayer, CacheOutcome, cache_event};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);

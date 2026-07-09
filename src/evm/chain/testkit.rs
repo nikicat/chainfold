@@ -21,12 +21,12 @@ use super::{EvmChain, EvmChainConfig};
 use crate::arch::Timestamp;
 use crate::evm::cache::{LogCache, ScanPartition, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::observe::RPC_TARGET;
 use crate::evm::transport::RpcTimingLayer;
 use crate::evm::types::{
     BlockHash, BlockNumber, BlockRange, ChainId, ChunkSize, EvmBlock, FilterHash, Gas, GasPrice,
     LogIdx, Topic, TxCount,
 };
+use crate::observe::RPC_TARGET;
 use crate::shared::Shared;
 
 pub(super) const ADDR: Address = Address::repeat_byte(0x42);

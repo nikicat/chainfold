@@ -8,9 +8,10 @@ use alloy::transports::http::Http;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, ChunkSize, ConnectTimingLayer, EvmChain, EvmChainConfig,
-    RpcTimingLayer, rpc_retry_layer,
+    CacheDb, ChainId, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, RpcTimingLayer,
+    rpc_retry_layer,
 };
+use chainfold::observe::ConnectTimingLayer;
 
 use crate::chains::{ChainHandle, ChainResolver, ChainSelector, select_chain};
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};

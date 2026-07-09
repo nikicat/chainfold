@@ -38,11 +38,10 @@
 //! | Setup phase | `chainfold::setup` | span name — the phase (`db_open`, `chainlist_load`, …) |
 //! | Cache hit/miss (event) | `chainfold::cache` | `layer` + `outcome` fields |
 //!
-//! RPC spans are emitted by
-//! [`RpcTimingLayer`](crate::evm::transport::RpcTimingLayer) — a tower layer
-//! installed in the alloy client stack (see
-//! [`transport`](crate::evm::transport)) — for **every** request the client
-//! sends, so a new RPC call site cannot be forgotten.
+//! RPC spans are emitted by each source family's transport-level timing
+//! layer (e.g. `RpcTimingLayer` in `evm::transport`, a tower layer installed
+//! in the alloy client stack) for **every** request the client sends, so a
+//! new RPC call site cannot be forgotten.
 //!
 //! Spans carry duration (open → close). Cache hit/miss are instantaneous
 //! *events* counted by their typed `layer`/`outcome` fields ([`CacheLayer`],
@@ -70,9 +69,9 @@ use tracing::instrument::Instrumented;
 use tracing::{Instrument, Level, Span};
 
 /// Target for per-RPC-call spans. Kept in sync by hand with the literal in
-/// [`RpcTiming::call`](crate::evm::transport::RpcTiming) — `tracing`'s
-/// `target:` slot only accepts a string literal, so the const exists for the
-/// *subscriber* side to match against.
+/// each family's transport timing layer (`RpcTiming::call` in
+/// `evm::transport`) — `tracing`'s `target:` slot only accepts a string
+/// literal, so the const exists for the *subscriber* side to match against.
 pub const RPC_TARGET: &str = "chainfold::rpc";
 /// Target for connection-establishment spans (see [`connect_span`]).
 pub const CONNECT_TARGET: &str = "chainfold::connect";

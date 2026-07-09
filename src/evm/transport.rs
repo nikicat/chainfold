@@ -50,9 +50,9 @@ pub fn rpc_retry_layer() -> RetryBackoffLayer<OrRetryPolicyFn> {
 }
 
 /// Tower layer that times every JSON-RPC request under a
-/// [`RPC_TARGET`](crate::evm::observe::RPC_TARGET) span carrying the wire
+/// [`RPC_TARGET`](crate::observe::RPC_TARGET) span carrying the wire
 /// method name in its `method` field (see the contract in
-/// [`observe`](crate::evm::observe)).
+/// [`observe`](crate::observe)).
 ///
 /// Timing at the transport boundary means every request the client sends is
 /// measured: a new RPC call site cannot be forgotten.
@@ -81,7 +81,7 @@ impl<S> tower_layer::Layer<S> for RpcTimingLayer {
 /// Pinned to alloy's transport signature (alloy's `Transport` trait demands
 /// the boxed `TransportFut` future, so the instrumented future is re-boxed
 /// rather than staying generic like
-/// [`ConnectTiming`](crate::evm::observe::ConnectTiming)'s).
+/// [`ConnectTiming`](crate::observe::ConnectTiming)'s).
 #[derive(Debug, Clone)]
 pub struct RpcTiming<S> {
     inner: S,
@@ -132,7 +132,7 @@ mod tests {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::registry::LookupSpan;
 
-    use crate::evm::observe::RPC_TARGET;
+    use crate::observe::RPC_TARGET;
 
     /// One rpc span the layer emitted: its target and `method`/`reqs` fields.
     #[derive(Debug, PartialEq, Eq)]

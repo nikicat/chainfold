@@ -19,7 +19,6 @@ mod cache;
 mod chain;
 mod chain_provider;
 pub mod erc20;
-pub mod observe;
 mod owned_erc20;
 mod range_index;
 mod transport;
@@ -45,10 +44,6 @@ pub use chain_provider::ChainProvider;
 pub use erc20::{
     Erc20Metadata, TRANSFER_TOPIC, TransferData, apply_transfer, decode_transfer,
     fetch_erc20_metadata,
-};
-pub use observe::{
-    CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, ConnectTimingLayer, RPC_TARGET,
-    SETUP_TARGET, SQLITE_TARGET, cache_event, connect_span,
 };
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use range_index::{

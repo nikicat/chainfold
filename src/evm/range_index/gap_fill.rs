@@ -18,8 +18,8 @@ use super::range_tree::{Range, install_gap_placeholder};
 use super::spec::Fetcher;
 use super::spec::{IndexPos, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
-use crate::evm::observe::{CacheLayer, CacheOutcome, cache_event};
 use crate::evm::types::BlockRange;
+use crate::observe::{CacheLayer, CacheOutcome, cache_event};
 
 /// The public positioned value [`RangeIndex::items`] yields for a spec `S`.
 type Yielded<S> = Positioned<<S as RangeSpec>::Event, <S as RangeSpec>::PubPos>;

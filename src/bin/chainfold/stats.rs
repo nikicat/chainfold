@@ -1,7 +1,7 @@
 //! `--stats` session summary.
 //!
 //! A [`tracing_subscriber::Layer`] that aggregates the observability contract
-//! the library emits (`chainfold::evm::observe`) into an end-of-run report.
+//! the library emits (`chainfold::observe`) into an end-of-run report.
 //! These are the same spans a server daemon would export to OTLP; here we
 //! just tally them so a human (or a test) can confirm the cache is doing its
 //! job and see where wall-time went.
@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chainfold::evm::{
+use chainfold::observe::{
     CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, SETUP_TARGET, SQLITE_TARGET,
 };
 use tracing::field::{Field, Visit};
@@ -356,7 +356,7 @@ fn fmt_dur(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chainfold::evm::{cache_event, connect_span};
+    use chainfold::observe::{cache_event, connect_span};
     use tracing::Level;
     use tracing::subscriber::with_default;
     use tracing_subscriber::prelude::*;
