@@ -92,6 +92,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 dotenvy = "0.15"
+# Regtest bitcoind harness for the bitcoin integration tests (the anvil
+# analog). No `download` feature — the binary comes from $BITCOIND_EXE or
+# PATH; the version feature only types the bundled convenience client.
+corepc-node = { version = "0.12.0", default-features = false, features = [
+  "28_2",
+] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
+  "json",
+] }
 
 [[bin]]
 name = "chainfold"
@@ -130,6 +140,10 @@ name = "matcher"
 [[test]]
 name = "owned_erc20"
 required-features = ["evm"]
+
+[[test]]
+name = "bitcoin_blocks_history"
+required-features = ["bitcoin"]
 
 [[example]]
 name = "history_explorer"

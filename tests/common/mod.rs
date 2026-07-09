@@ -5,5 +5,6 @@
 #![allow(dead_code)]
 
 pub mod anvil;
+pub mod bitcoind;
 pub mod fixtures;
 pub mod mock_provider;
