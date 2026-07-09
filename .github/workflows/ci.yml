@@ -11,31 +11,38 @@ env:
 
 # Every rolling input is pinned so CI only moves when a pin is bumped:
 # the Rust toolchain in rust-toolchain.toml (shared with local dev), the
-# container image and the actions by hash here.
+# actions by hash, and the gate tools by version here.
 
 jobs:
   ci:
     name: fmt + taplo + clippy + build + test
     runs-on: ubuntu-latest
-    container:
-      # archlinux:latest, digest-pinned 2026-07-09. The digest freezes the
-      # base image only — `pacman -Syu` below still tracks the rolling Arch
-      # repos for the lint/format tools (rust itself comes from rustup and
-      # is pinned via RUST_TOOLCHAIN).
-      image: archlinux@sha256:681569955d1d17313ef7134acc8b5cd8adcda2fc24709bed472d95e1cf3d71a1
     steps:
-      - name: Install system dependencies
-        run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel git pkgconf pacman rustup taplo-cli \
-            actionlint yamllint shellcheck just
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Install Rust toolchain
         # Reads rust-toolchain.toml (channel + components) — must run after
         # checkout, and before rust-cache probes `rustc -vV`.
         run: rustup toolchain install
+
+      - name: Install gate tools
+        # shellcheck isn't a gate step itself — actionlint shells out to it
+        # for `run:` blocks.
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb  # v2.83.0
+        with:
+          tool: taplo@0.10.0,just@1.55.1,shellcheck@0.11.0
+
+      - name: Install actionlint + yamllint
+        # actionlint isn't in install-action's manifest set; pull the
+        # release tarball and verify its published checksum. yamllint via
+        # pipx (preinstalled on the runner; PEP 668 blocks bare pip).
+        run: |
+          curl -sSfLo actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c
+          sudo tar xzf actionlint.tar.gz -C /usr/local/bin actionlint
+          rm actionlint.tar.gz
+          pipx install yamllint==1.38.0
 
       - name: Cache cargo registry and target
         # rust-cache prunes before saving (drops workspace-own artifacts,
@@ -81,21 +88,19 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    # Runs in parallel to the main `ci` job. Uses stock GitHub runner
-    # rather than the Arch container so cargo-llvm-cov's binary install
-    # action works without extra plumbing.
+    # Runs in parallel to the main `ci` job.
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Install Rust toolchain
-        # The runner ships rustup; this reads rust-toolchain.toml (channel +
-        # components, incl. llvm-tools-preview for cargo-llvm-cov).
+        # Reads rust-toolchain.toml (channel + components, incl.
+        # llvm-tools-preview for cargo-llvm-cov).
         run: rustup toolchain install
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb  # v2.83.0
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.8.7
 
       - name: Cache cargo registry and target
         # Keyed per job automatically, so this stays separate from the

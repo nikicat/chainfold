@@ -56,15 +56,15 @@ CI (`.github/workflows/ci.yml`) runs the same, plus a parallel coverage job.
 `rust-toolchain.toml` (channel + components) — rustup resolves local builds
 and both CI jobs through it, so local and CI stay in lockstep by
 construction; bumping it is a one-line edit (rustup auto-installs the new
-version on the next `cargo` invocation). In `ci.yml`, the Arch container
-image (digest) and every action (commit SHA, `# vX.Y.Z` comment alongside)
-are pinned so CI only moves when a pin is bumped — a new stable's clippy
-lints land when *you* bump, not on whoever pushes next. To bump those:
-re-resolve the image digest (`docker manifest inspect archlinux:latest` or
-the registry API) and take new action SHAs from each repo's tags. The one
-still-rolling input is `pacman -Syu` inside the container
-(taplo/actionlint/yamllint/just); pin the mirror to an
-`archive.archlinux.org` date snapshot if that ever bites.
+version on the next `cargo` invocation). Both CI jobs run on stock
+`ubuntu-latest` runners; in `ci.yml`, every action is pinned by commit SHA
+(`# vX.Y.Z` comment alongside) and every gate tool by version
+(taplo/just/shellcheck/cargo-llvm-cov via `taiki-e/install-action`,
+actionlint by checksummed release tarball, yamllint via pipx), so CI only
+moves when a pin is bumped — a new stable's clippy lints land when *you*
+bump, not on whoever pushes next. To bump: take new action SHAs and tool
+versions from each repo's tags (and the actionlint tarball's published
+sha256).
 
 **Pushing workflow changes:** a `gh`-authenticated push touching
 `.github/workflows/*` needs the `workflow` OAuth scope — the default `repo`
