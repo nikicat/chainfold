@@ -8,23 +8,32 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Rolling inputs are pinned so CI only moves when this file is edited:
+  # the Rust toolchain here, the container image and actions by hash below.
+  # New stables ship new clippy lints (with -D warnings, breakage lands on
+  # whoever pushes next) — bump this deliberately instead.
+  RUST_TOOLCHAIN: 1.97.0
 
 jobs:
   ci:
     name: fmt + taplo + clippy + build + test
     runs-on: ubuntu-latest
     container:
-      image: archlinux:latest
+      # archlinux:latest, digest-pinned 2026-07-09. The digest freezes the
+      # base image only — `pacman -Syu` below still tracks the rolling Arch
+      # repos for the lint/format tools (rust itself comes from rustup and
+      # is pinned via RUST_TOOLCHAIN).
+      image: archlinux@sha256:681569955d1d17313ef7134acc8b5cd8adcda2fc24709bed472d95e1cf3d71a1
     steps:
       - name: Install system dependencies
         run: |
           pacman -Syu --noconfirm --needed \
             base-devel git pkgconf pacman rustup taplo-cli \
             actionlint yamllint shellcheck just
-          rustup default stable
+          rustup default "$RUST_TOOLCHAIN"
           rustup component add rustfmt clippy
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Cache cargo registry and target
         # rust-cache prunes before saving (drops workspace-own artifacts,
@@ -74,15 +83,21 @@ jobs:
     # rather than the Arch container so cargo-llvm-cov's binary install
     # action works without extra plumbing.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned to a master commit; the toolchain is selected via the
+        # input (the usual @stable ref would both float the action and
+        # float the toolchain).
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88  # master 2026-07
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb  # v2.83.0
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cache cargo registry and target
         # Keyed per job automatically, so this stays separate from the
@@ -102,7 +117,7 @@ jobs:
             --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v6.0.2
         with:
           files: lcov.info
           fail_ci_if_error: false
