@@ -242,7 +242,6 @@ lib.rs                     pub mod {arch, cache, chain, combinators, matcher, me
 │  ├─ erc20.rs             Transfer decode · metadata · balance apply
 │  ├─ owned_erc20.rs       two-filter in/out ordered merge
 │  ├─ chain_provider.rs    ChainProvider<P> — chain-scoped RPC seam
-│  ├─ aligned_ranges.rs    aligned_block_ranges
 │  └─ transport.rs         alloy client-stack layers — RpcTimingLayer · rpc_retry_layer
 ├─ bitcoin/                ← cfg(feature = "bitcoin")
 │  ├─ types.rs             BtcBlock · BtcBlockHash (display-order hex) · CompactTarget
@@ -880,7 +879,7 @@ The concrete client for EVM log streams (`feature = "evm"`).
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
 | **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Arc<LogCache>`**. Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
-| **`aligned_block_ranges`** | Snaps RPC ranges to `batch_size` boundaries so concurrent consumers hit the same cache entries. |
+| **`ChunkSize::align` / `ChunkSize::chunk_end`** | The single owner of chunk-alignment arithmetic (`chain/height.rs`). `align` widens load windows outward; `chunk_end` caps each gap fetch at its chunk boundary (`walk_step`), so concurrent consumers hit the same cache entries and no RPC request spans a chunk. |
 
 **Position bridging:** `EvmPosition(0, 0)` ↔ `BlockPos::Bottom`; otherwise
 `BlockPos::At { block, log_index }` maps 1:1.
@@ -1163,9 +1162,12 @@ flowchart TB
 2. **Singleflight.** The first reader into a cold gap installs a placeholder
    and fires the RPC; concurrent readers await the placeholder's `Notify`.
    (Test: 5 walkers → 1 `eth_getLogs`.)
-3. **Alignment.** `aligned_block_ranges` snaps RPC ranges to `batch_size`
-   boundaries (default 1000 blocks) so consumers asking slightly different
-   ranges collide on the same cache entries.
+3. **Alignment.** The gap-fill walk caps each fetch at a `chunk_size`-aligned
+   boundary (`ChunkSize::chunk_end`, default 1000 blocks) so consumers asking
+   slightly different ranges collide on the same cache entries — and no
+   single request exceeds the chunk size (provider range caps). The gap
+   *start* is never rounded down: blocks before the cursor are already
+   covered, and refetching them would break at-most-once.
 4. **SQLite off the live path.** A WS-delivered log goes
    `wiring → RangeIndex → consumer` synchronously; the durable write is
    drained in the background. Warm reads and live events never wait on disk.

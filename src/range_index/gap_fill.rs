@@ -213,6 +213,10 @@ impl<S: RangeSpec> RangeIndex<S> {
     /// cached range, an in-flight fetch to wait on, or a gap to fill. On
     /// [`WalkStep::FillGap`] it installs a placeholder + notify as a side
     /// effect. Callers loop, advancing `cursor` until they reach `to`.
+    ///
+    /// Gaps are capped at [`Self::chunk_size`]-aligned boundaries via
+    /// [`Self::cap_gap`], so one fetcher call never spans a chunk boundary;
+    /// the loop advances into the remainder chunk by chunk.
     fn walk_step(&self, cursor: S::Pos, to: S::Pos) -> WalkStep<S> {
         if cursor >= to {
             return WalkStep::Done;
@@ -224,17 +228,18 @@ impl<S: RangeSpec> RangeIndex<S> {
             .map(|(_, r)| (r.start, r.end, r.fetch.clone(), r.item));
         let Some((start, end, fetch_opt, item_opt)) = next else {
             // No range past cursor — trailing gap (cursor, to].
-            let notify = install_gap_placeholder(&mut tree, cursor, to);
+            let gap_end = self.cap_gap(cursor, to);
+            let notify = install_gap_placeholder(&mut tree, cursor, gap_end);
             return WalkStep::FillGap {
                 start_pos: cursor,
-                end_pos: to,
+                end_pos: gap_end,
                 notify,
             };
         };
         if start > cursor {
             // Gap before the next range (cached or in-flight) — fill it. If
             // we beat an in-flight neighbour here, we own the gap placeholder.
-            let gap_end = start.min(to);
+            let gap_end = self.cap_gap(cursor, start.min(to));
             let notify = install_gap_placeholder(&mut tree, cursor, gap_end);
             return WalkStep::FillGap {
                 start_pos: cursor,
@@ -250,6 +255,23 @@ impl<S: RangeSpec> RangeIndex<S> {
         WalkStep::Cached {
             end,
             item: item_opt,
+        }
+    }
+
+    /// Cap the gap `(cursor, gap_end]` at the end of its first
+    /// [`Self::chunk_size`]-aligned chunk, in block space. The start is
+    /// never rounded down — everything before `cursor` is already covered,
+    /// and refetching it would break the fetched-at-most-once guarantee.
+    /// After a partial leading chunk, every subsequent fetch lands exactly
+    /// on aligned boundaries, so peers at the same chunk size share cache
+    /// entries.
+    fn cap_gap(&self, cursor: S::Pos, gap_end: S::Pos) -> S::Pos {
+        let bounds = S::Pos::fetch_bounds(cursor, gap_end);
+        let chunk_end = self.chunk_size.chunk_end(bounds.from);
+        if chunk_end < bounds.to {
+            S::Pos::end_of_block(chunk_end)
+        } else {
+            gap_end
         }
     }
 }

@@ -14,7 +14,6 @@
 //!
 //! Requires the `evm` feature flag.
 
-mod aligned_ranges;
 mod block_pos;
 mod block_spec;
 mod cache;
@@ -26,7 +25,6 @@ mod owned_erc20;
 mod transport;
 mod types;
 
-pub use aligned_ranges::{AlignedRange, Alignment, aligned_block_ranges};
 pub use types::{
     Amount, Asset, BlockHash, ChainId, Erc20, Erc20Balance, Erc20Burn, Erc20Mint, Erc20Transfer,
     EvmBlock, EvmEvent, EvmPosition, Gas, GasPrice, LogIdx, Topic, TxHash,

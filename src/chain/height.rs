@@ -205,6 +205,28 @@ impl ChunkSize {
     pub const fn get(self) -> u64 {
         self.0.get()
     }
+
+    /// The last block of the chunk containing `block` — where a gap fetch
+    /// starting inside that chunk is capped, so no single request spans a
+    /// chunk boundary.
+    pub const fn chunk_end(self, block: BlockNumber) -> BlockNumber {
+        let chunk = self.get();
+        BlockNumber::new((block.get() / chunk + 1) * chunk - 1)
+    }
+
+    /// Align `[range.from, range.to]` outward to chunk boundaries, so peer
+    /// processes scanning the same source at the same chunk size hit
+    /// identical boundaries.
+    ///
+    /// The alignment arithmetic drops to `u64` here and nowhere else —
+    /// [`BlockNumber`] doesn't do division.
+    pub const fn align(self, range: BlockRange) -> BlockRange {
+        let chunk = self.get();
+        BlockRange::new(
+            BlockNumber::new((range.from.get() / chunk) * chunk),
+            self.chunk_end(range.to),
+        )
+    }
 }
 
 impl std::fmt::Display for ChunkSize {
@@ -286,5 +308,38 @@ impl std::fmt::Display for TxCount {
         // Forward to the inner Display so formatter flags (width, alignment)
         // survive — see the note on `BlockNumber`'s Display.
         std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn align_rounds_outward() {
+        let chunk = ChunkSize::new(1000);
+        assert_eq!(
+            chunk.align(BlockRange::from_u64(100, 200)),
+            BlockRange::from_u64(0, 999)
+        );
+        assert_eq!(
+            chunk.align(BlockRange::from_u64(1500, 2500)),
+            BlockRange::from_u64(1000, 2999)
+        );
+        assert_eq!(
+            chunk.align(BlockRange::from_u64(0, 0)),
+            BlockRange::from_u64(0, 999)
+        );
+    }
+
+    #[test]
+    fn chunk_end_is_last_block_of_containing_chunk() {
+        let chunk = ChunkSize::new(10);
+        assert_eq!(chunk.chunk_end(BlockNumber::new(0)), BlockNumber::new(9));
+        assert_eq!(chunk.chunk_end(BlockNumber::new(9)), BlockNumber::new(9));
+        assert_eq!(chunk.chunk_end(BlockNumber::new(10)), BlockNumber::new(19));
+        // An already-aligned boundary is its own chunk end.
+        let one = ChunkSize::new(1);
+        assert_eq!(one.chunk_end(BlockNumber::new(7)), BlockNumber::new(7));
     }
 }

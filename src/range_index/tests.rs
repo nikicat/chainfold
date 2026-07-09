@@ -20,7 +20,6 @@ use tokio::task::yield_now;
 use tokio::time::sleep;
 
 use super::gap_fill::never_fetch;
-use super::range_tree::align_window;
 use super::testkit::{MockItem, MockPage, MockPos, MockPubPos, MockSpec, MockStore};
 use super::*;
 use crate::chain::BlockNumber;
@@ -181,23 +180,6 @@ fn is_loaded_lazy_first_access_only() {
         idx.len(),
         count_after_first_load,
         "second ensure_window_loaded must be a no-op"
-    );
-}
-
-#[test]
-fn align_window_rounds_outward() {
-    let chunk = ChunkSize::new(1000);
-    assert_eq!(
-        align_window(BlockRange::from_u64(100, 200), chunk),
-        BlockRange::from_u64(0, 999)
-    );
-    assert_eq!(
-        align_window(BlockRange::from_u64(1500, 2500), chunk),
-        BlockRange::from_u64(1000, 2999)
-    );
-    assert_eq!(
-        align_window(BlockRange::from_u64(0, 0), chunk),
-        BlockRange::from_u64(0, 999)
     );
 }
 
@@ -387,6 +369,76 @@ async fn insert_page_without_drain_does_not_touch_store() {
     assert!(
         store.scanned_ranges().is_empty(),
         "no drain attached — scanned ranges remain empty"
+    );
+}
+
+// -- chunked gap fill --
+
+/// A cold walk over a multi-chunk gap fetches one aligned chunk at a time —
+/// never a request spanning a chunk boundary. Guards the RPC range cap that
+/// providers enforce (and the peers-share-cache-entries alignment property).
+#[tokio::test]
+async fn gap_fill_fetches_in_aligned_chunks() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fetched = Arc::new(Mutex::new(Vec::new()));
+    let fetcher = recording_fetcher(
+        calls.share(),
+        fetched.share(),
+        vec![bn(985)],
+        Duration::ZERO,
+    );
+    let idx = Arc::new(RangeIndex::with_chunk_size(
+        MockSpec::new(mk_store()),
+        fetcher,
+        ChunkSize::new(10),
+    ));
+
+    // 21 blocks [980, 1000] at chunk 10 → three fetches, tail clamped.
+    let blocks = collect_blocks(idx.share().items(
+        MockPos::before_block(bn(980)),
+        MockPos::end_of_block(bn(1000)),
+    ))
+    .await;
+
+    assert_eq!(blocks, vec![bn(985)]);
+    assert_eq!(
+        *fetched.lock().unwrap(),
+        vec![
+            BlockRange::from_u64(980, 989),
+            BlockRange::from_u64(990, 999),
+            BlockRange::from_u64(1000, 1000),
+        ]
+    );
+}
+
+/// A gap starting mid-chunk fetches a partial leading chunk from the cursor
+/// — never rounded down over already-covered blocks — then lands on aligned
+/// boundaries for the rest.
+#[tokio::test]
+async fn gap_fill_mid_chunk_start_is_not_rounded_down() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fetched = Arc::new(Mutex::new(Vec::new()));
+    let fetcher = recording_fetcher(calls.share(), fetched.share(), vec![], Duration::ZERO);
+    let idx = Arc::new(RangeIndex::with_chunk_size(
+        MockSpec::new(mk_store()),
+        fetcher,
+        ChunkSize::new(10),
+    ));
+
+    let blocks = collect_blocks(idx.share().items(
+        MockPos::before_block(bn(985)),
+        MockPos::end_of_block(bn(1005)),
+    ))
+    .await;
+
+    assert!(blocks.is_empty());
+    assert_eq!(
+        *fetched.lock().unwrap(),
+        vec![
+            BlockRange::from_u64(985, 989),
+            BlockRange::from_u64(990, 999),
+            BlockRange::from_u64(1000, 1005),
+        ]
     );
 }
 

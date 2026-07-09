@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use super::RangeIndex;
 use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::HistoryError;
-use crate::chain::{BlockRange, ChunkSize};
+use crate::chain::BlockRange;
 use crate::share::Share;
 
 // ============================================================
@@ -217,7 +217,7 @@ impl<S: RangeSpec> RangeIndex<S> {
     /// processes observing the same source at the same chunk granularity
     /// see the same tree shape.
     pub fn ensure_window_loaded(&self, range: BlockRange) -> Result<(), HistoryError> {
-        let window = align_window(range, self.chunk_size);
+        let window = self.chunk_size.align(range);
 
         {
             let loaded = self.loaded_windows.lock().unwrap();
@@ -281,19 +281,6 @@ pub(super) fn install_gap_placeholder<S: RangeSpec>(
         },
     );
     notify
-}
-
-/// Align `[range.from, range.to]` outward to a multiple of `chunk` so peer
-/// processes scanning the same source at the same chunk size hit identical
-/// scanned-range boundaries.
-///
-/// The alignment math drops to `u64` at this seam ([`ChunkSize`] and
-/// [`BlockNumber`](crate::evm::types::BlockNumber) don't do division).
-pub(super) fn align_window(range: BlockRange, chunk: ChunkSize) -> BlockRange {
-    let (from, to, chunk) = (range.from.get(), range.to.get(), chunk.get());
-    let aligned_from = (from / chunk) * chunk;
-    let aligned_to = (to / chunk + 1) * chunk - 1;
-    BlockRange::from_u64(aligned_from, aligned_to)
 }
 
 fn assert_increasing<S: RangeSpec>(items: &[S::Item]) {
