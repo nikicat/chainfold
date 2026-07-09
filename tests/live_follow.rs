@@ -25,10 +25,11 @@ use tokio::time::{sleep, timeout};
 
 use chainfold::Shared;
 use chainfold::evm::{
-    BlockNumber, ChainProvider, EvmChain, EvmChainConfig, Finality, LogCache, LogFilter,
-    ScanPartition, SubscribeTransport, Topic, compute_filter_hash,
+    ChainProvider, EvmChain, EvmChainConfig, Finality, LogCache, LogFilter, ScanPartition,
+    SubscribeTransport, Topic, compute_filter_hash,
 };
 
+use chainfold::chain::BlockNumber;
 use common::anvil::{local, skip_no_anvil};
 
 // Filter that matches no contract — live-follow mechanics are exercised

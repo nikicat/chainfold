@@ -1,8 +1,7 @@
 //! Construction options for [`EvmChain`](super::EvmChain).
 
+use crate::chain::ChunkSize;
 use std::time::Duration;
-
-use crate::evm::types::ChunkSize;
 
 /// Default chunk size for `eth_getLogs` gap fills.
 pub const DEFAULT_CHUNK_SIZE: ChunkSize = ChunkSize::new(1000);

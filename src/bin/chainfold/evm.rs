@@ -8,8 +8,7 @@ use alloy::transports::http::Http;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::evm::{
-    CacheDb, ChainId, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, RpcTimingLayer,
-    rpc_retry_layer,
+    CacheDb, ChainId, ChainProvider, EvmChain, EvmChainConfig, RpcTimingLayer, rpc_retry_layer,
 };
 use chainfold::observe::ConnectTimingLayer;
 
@@ -17,6 +16,7 @@ use crate::chains::{ChainHandle, ChainResolver, ChainSelector, select_chain};
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
 use crate::config::{ChainIdCheck, Config, ConfigError, RpcSource};
 use crate::util::{resolved_db_path, setup_span};
+use chainfold::chain::ChunkSize;
 
 /// Env var overriding the configured/built-in default chain, consulted when
 /// neither `--chain` nor `--chain-id` is passed.

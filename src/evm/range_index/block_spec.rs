@@ -15,8 +15,9 @@
 use super::block_pos::BlockPos;
 use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
+use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::cache::{LogCache, ScanPartition};
-use crate::evm::types::{BlockHash, BlockNumber, BlockRange, EvmBlock};
+use crate::evm::types::{BlockHash, EvmBlock};
 use crate::shared::Shared;
 
 /// [`RangeSpec`] for the chain's block history over a [`LogCache`].
@@ -146,7 +147,8 @@ mod tests {
     use super::super::{Fetcher, RangeIndex};
     use super::*;
     use crate::arch::{Position, Timestamp};
-    use crate::evm::types::{ChunkSize, Gas, GasPrice, TxCount};
+    use crate::chain::{ChunkSize, TxCount};
+    use crate::evm::types::{Gas, GasPrice};
     use alloy::primitives::{Address, B256, U256};
 
     const fn bn(n: u64) -> BlockNumber {

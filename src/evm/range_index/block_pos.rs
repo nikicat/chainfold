@@ -10,7 +10,8 @@
 
 use alloy::rpc::types::Log;
 
-use crate::evm::types::{BlockHash, BlockNumber, BlockRange, LogIdx};
+use crate::chain::{BlockNumber, BlockRange};
+use crate::evm::types::{BlockHash, LogIdx};
 
 // ============================================================
 // BlockPos — position type for the tree

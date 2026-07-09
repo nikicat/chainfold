@@ -29,7 +29,6 @@ use std::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::arch::{HistoryError, Positioned};
-use crate::evm::types::{BlockRange, ChunkSize};
 
 mod block_pos;
 mod block_spec;
@@ -45,6 +44,7 @@ pub use log_spec::LogSpec;
 pub use spec::{Fetcher, IndexPos, LoadedSpan, RangeSpec};
 pub use store::{RangeIndexStore, TimePos, TipSeed};
 
+use crate::chain::{BlockRange, ChunkSize};
 use range_tree::Range;
 
 // ============================================================

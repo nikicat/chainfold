@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use alloy::primitives::{Address, U256};
 use chainfold::arch::{Positioned, Timestamp};
+use chainfold::chain::BlockNumber;
 use chainfold::evm::{
-    BlockHash, BlockNumber, Erc20Metadata, EvmEvent, EvmPosition, Gas, GasPrice, TxHash,
-    decode_transfer,
+    BlockHash, Erc20Metadata, EvmEvent, EvmPosition, Gas, GasPrice, TxHash, decode_transfer,
 };
 
 pub fn explorer_base_url(chain_id: u64) -> &'static str {

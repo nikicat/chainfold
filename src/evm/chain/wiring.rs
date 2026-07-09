@@ -12,8 +12,8 @@ use std::sync::Weak;
 use tokio::sync::watch;
 
 use super::HeadEvent;
+use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::range_index::{RangeIndexStore, RangeSpec};
-use crate::evm::types::{BlockNumber, BlockRange};
 
 /// Follow the head channel: eagerly gap-fill `(last_tip, head]` through
 /// the store's own fetcher (singleflight, chunked, persisted inline), then

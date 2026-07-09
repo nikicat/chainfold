@@ -18,8 +18,9 @@ use tokio::time::sleep;
 use super::config::SubscribeTransport;
 use super::{HeadCell, INITIAL_BACKOFF, MAX_BACKOFF};
 use crate::arch::{HistoryError, Timestamp};
+use crate::chain::BlockNumber;
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::types::{BlockHash, BlockNumber};
+use crate::evm::types::BlockHash;
 
 pub(super) async fn run<P>(
     provider: ChainProvider<P>,

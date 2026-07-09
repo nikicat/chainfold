@@ -31,10 +31,11 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::{HistStore, Timestamp, watch_hist};
+use chainfold::chain::ChunkSize;
 use chainfold::evm::{
-    CacheDb, ChainProvider, ChunkSize, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent,
-    EvmPosition, OwnedErc20, TransferDirection, TxHash, apply_transfer, decode_transfer,
-    fetch_erc20_metadata, rpc_retry_layer, versioned_path,
+    CacheDb, ChainProvider, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent, EvmPosition,
+    OwnedErc20, TransferDirection, TxHash, apply_transfer, decode_transfer, fetch_erc20_metadata,
+    rpc_retry_layer, versioned_path,
 };
 use chainfold::merge::MergedItem;
 use chrono::NaiveDate;

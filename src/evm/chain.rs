@@ -47,10 +47,11 @@ use tokio::sync::{OnceCell, watch};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::arch::{HistoryError, Timestamp};
+use crate::chain::{BlockNumber, ChunkSize};
 use crate::evm::cache::LogCache;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::range_index::TipSeed;
-use crate::evm::types::{BlockNumber, ChainId, ChunkSize};
+use crate::evm::types::ChainId;
 use crate::shared::Shared;
 
 mod blocks;

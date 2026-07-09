@@ -19,11 +19,13 @@ use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::HistStore;
 use chainfold::evm::{
-    BlockNumber, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition,
-    Finality, LogCache, LogFilter, TRANSFER_TOPIC,
+    ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache, LogFilter,
+    TRANSFER_TOPIC,
 };
 use futures_util::StreamExt;
 use tempfile::TempDir;
+
+use chainfold::chain::{BlockNumber, ChunkSize};
 
 use common::{
     anvil::{fork_mainnet, skip_no_anvil},

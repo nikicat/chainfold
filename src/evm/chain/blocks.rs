@@ -19,13 +19,12 @@ use tokio_util::task::AbortOnDropHandle;
 
 use super::{EvmChain, Finality, LazyAnchor, estimate_block_from_time, wiring};
 use crate::arch::{Hist, HistStore, HistoryError, Timestamp};
+use crate::chain::{BlockCount, BlockNumber, BlockRange, TxCount};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::range_index::{
     BlockPage, BlockSpec, Fetcher, RangeIndex, RangeIndexStore, TimePos, TipSeed,
 };
-use crate::evm::types::{
-    BlockCount, BlockHash, BlockNumber, BlockRange, EvmBlock, Gas, GasPrice, TxCount,
-};
+use crate::evm::types::{BlockHash, EvmBlock, Gas, GasPrice};
 
 // ============================================================
 // EvmChain — blocks source

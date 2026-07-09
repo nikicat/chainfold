@@ -8,7 +8,7 @@ use std::path::Path;
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
 use chainfold::arch::{Hist, Positioned, watch_hist};
-use chainfold::evm::{BlockNumber, BlockRange, EvmBlock, EvmChain, Finality};
+use chainfold::evm::{EvmBlock, EvmChain, Finality};
 use futures_util::{StreamExt, TryStreamExt};
 
 use crate::cli::{BlocksArgs, BlocksCommand, BlocksListArgs, Direction, EvmArgs, FollowMode};
@@ -17,6 +17,7 @@ use crate::fmt::{
     linked_block_hash,
 };
 use crate::util::{WindowSel, block_cut, estimate_date_range, inclusive_range, window_sel};
+use chainfold::chain::{BlockNumber, BlockRange};
 
 /// Which columns to render — driven by the `--full` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

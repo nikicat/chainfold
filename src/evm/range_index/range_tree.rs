@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use super::RangeIndex;
 use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::HistoryError;
-use crate::evm::types::{BlockRange, ChunkSize};
+use crate::chain::{BlockRange, ChunkSize};
 
 // ============================================================
 // Range — one entry in the tree

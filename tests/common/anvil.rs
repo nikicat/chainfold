@@ -15,7 +15,7 @@ use std::process::Command;
 use std::sync::Once;
 
 use alloy_node_bindings::{Anvil, AnvilInstance};
-use chainfold::evm::BlockNumber;
+use chainfold::chain::BlockNumber;
 
 /// Load a gitignored `.env` from the repo root on first call. Contributors
 /// keep their `MAINNET_RPC_URL` (Alchemy etc.) there instead of editing

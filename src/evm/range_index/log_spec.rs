@@ -11,10 +11,9 @@ use alloy::rpc::types::Log;
 use super::block_pos::{BlockPos, LogPage, LogRef, log_ref_from};
 use super::spec::{LoadedSpan, RangeSpec};
 use crate::arch::{HistoryError, Positioned, Timestamp};
+use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::cache::{LogCache, ScanPartition};
-use crate::evm::types::{
-    BlockHash, BlockNumber, BlockRange, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic, TxHash,
-};
+use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, FilterHash, LogIdx, Topic, TxHash};
 use crate::shared::Shared;
 
 /// [`RangeSpec`] for a single EVM log filter over a [`LogCache`].

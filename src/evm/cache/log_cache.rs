@@ -17,7 +17,8 @@ use rusqlite::types::{ToSql, ToSqlOutput};
 
 use super::{CacheError, SharedConn, col_address, col_b256, col_b256_opt};
 use crate::arch::Timestamp;
-use crate::evm::types::{BlockHash, BlockNumber, BlockRange, EvmBlock, FilterHash, LogIdx, Topic};
+use crate::chain::{BlockNumber, BlockRange};
+use crate::evm::types::{BlockHash, EvmBlock, FilterHash, LogIdx, Topic};
 
 // ============================================================
 // Helpers
@@ -601,6 +602,7 @@ pub(super) fn make_test_log(block: BlockNumber, log_idx: LogIdx, block_hash: Blo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::TxCount;
 
     const FH: FilterHash = FilterHash::new([0xAA; 32]);
     const SP: ScanPartition = ScanPartition::Filter(FH);
@@ -844,7 +846,7 @@ mod tests {
     // -- blocks (cached_blocks) --
 
     use crate::arch::Timestamp;
-    use crate::evm::types::{BlockNumber, Gas, GasPrice, TxCount};
+    use crate::evm::types::{Gas, GasPrice};
 
     fn make_test_block(
         number: BlockNumber,

@@ -18,7 +18,7 @@ use super::range_tree::{Range, install_gap_placeholder};
 use super::spec::Fetcher;
 use super::spec::{IndexPos, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
-use crate::evm::types::BlockRange;
+use crate::chain::BlockRange;
 use crate::observe::{CacheLayer, CacheOutcome, cache_event};
 
 /// The public positioned value [`RangeIndex::items`] yields for a spec `S`.

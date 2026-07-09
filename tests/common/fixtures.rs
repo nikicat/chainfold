@@ -3,7 +3,7 @@
 //! Picked once so changes here can be reviewed alongside test failures.
 
 use alloy::primitives::{Address, B256, address, b256};
-use chainfold::evm::{BlockCount, BlockNumber};
+use chainfold::chain::{BlockCount, BlockNumber};
 
 /// USDC token contract on Ethereum mainnet. Stable since 2018.
 pub const USDC: Address = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");

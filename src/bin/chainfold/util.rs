@@ -4,12 +4,11 @@ use alloy::network::Ethereum;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use chainfold::arch::Timestamp;
-use chainfold::evm::{
-    BlockCount, BlockNumber, BlockRange, EvmChain, EvmPosition, LogIdx, versioned_path,
-};
+use chainfold::evm::{EvmChain, EvmPosition, LogIdx, versioned_path};
 use chrono::NaiveDate;
 
 use crate::cli::EvmArgs;
+use chainfold::chain::{BlockCount, BlockNumber, BlockRange};
 
 /// Setup-phase span (target `chainfold::setup`): the name is the phase's row
 /// label in the `--stats` summary. A macro, not a fn — `tracing` span names

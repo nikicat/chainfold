@@ -34,9 +34,10 @@ use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
 use chainfold::Shared;
 use chainfold::arch::Timestamp;
+use chainfold::chain::ChunkSize;
 use chainfold::evm::{
-    CacheDb, ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality,
-    LogFilter, SubscribeTransport, TRANSFER_TOPIC, Topic, rpc_retry_layer, versioned_path,
+    CacheDb, ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogFilter,
+    SubscribeTransport, TRANSFER_TOPIC, Topic, rpc_retry_layer, versioned_path,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,

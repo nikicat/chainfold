@@ -39,12 +39,13 @@ use super::{
     estimate_block_from_time, wiring,
 };
 use crate::arch::{Hist, HistStore, HistoryError, Timestamp};
+use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::cache::compute_filter_hash;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::range_index::{
     Fetcher, LogPage, LogSpec, RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed,
 };
-use crate::evm::types::{BlockHash, BlockNumber, BlockRange, EvmEvent, EvmPosition, LogIdx, Topic};
+use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx, Topic};
 
 // ============================================================
 // LogFilter

@@ -21,8 +21,9 @@ use super::gap_fill::never_fetch;
 use super::range_tree::align_window;
 use super::*;
 use crate::arch::Timestamp;
+use crate::chain::BlockNumber;
 use crate::evm::cache::{LogCache, ScanPartition};
-use crate::evm::types::{BlockHash, BlockNumber, EvmEvent, EvmPosition, FilterHash, LogIdx};
+use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, FilterHash, LogIdx};
 use crate::shared::Shared;
 
 const FH: FilterHash = FilterHash::new([0xAA; 32]);

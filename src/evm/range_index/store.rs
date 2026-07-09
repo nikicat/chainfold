@@ -276,8 +276,8 @@ mod tests {
     use super::super::gap_fill::never_fetch;
     use super::super::{BlockSpec, RangeIndex};
     use super::*;
+    use crate::chain::BlockNumber;
     use crate::evm::cache::LogCache;
-    use crate::evm::types::BlockNumber;
     use crate::shared::Shared;
 
     /// Fixed-position estimator for tests that never exercise `time_pos`.

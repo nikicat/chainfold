@@ -28,7 +28,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::arch::{HistoryError, Position, Positioned};
-use crate::evm::types::{BlockNumber, BlockRange};
+use crate::chain::{BlockNumber, BlockRange};
 
 /// The tree-key position type.
 ///

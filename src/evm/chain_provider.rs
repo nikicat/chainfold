@@ -41,8 +41,9 @@ use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::{Filter, Log};
 
 use crate::arch::{HistoryError, Timestamp};
+use crate::chain::BlockNumber;
 use crate::evm::cache::{BlockHeader, LogCache};
-use crate::evm::types::{BlockHash, BlockNumber, ChainId};
+use crate::evm::types::{BlockHash, ChainId};
 use crate::observe::{CacheLayer, CacheOutcome, cache_event};
 use crate::shared::Shared;
 

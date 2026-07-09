@@ -329,7 +329,8 @@ pub fn cached_balance_floor(
 mod tests {
     use super::*;
     use crate::arch::Timestamp;
-    use crate::evm::types::{BlockHash, BlockNumber, LogIdx, TxHash};
+    use crate::chain::BlockNumber;
+    use crate::evm::types::{BlockHash, LogIdx, TxHash};
     use alloy::primitives::B256;
     use std::sync::Arc;
 

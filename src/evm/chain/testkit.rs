@@ -19,13 +19,11 @@ use tracing_subscriber::registry::LookupSpan;
 
 use super::{EvmChain, EvmChainConfig};
 use crate::arch::Timestamp;
+use crate::chain::{BlockNumber, BlockRange, ChunkSize, TxCount};
 use crate::evm::cache::{LogCache, ScanPartition, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::transport::RpcTimingLayer;
-use crate::evm::types::{
-    BlockHash, BlockNumber, BlockRange, ChainId, ChunkSize, EvmBlock, FilterHash, Gas, GasPrice,
-    LogIdx, Topic, TxCount,
-};
+use crate::evm::types::{BlockHash, ChainId, EvmBlock, FilterHash, Gas, GasPrice, LogIdx, Topic};
 use crate::observe::RPC_TARGET;
 use crate::shared::Shared;
 

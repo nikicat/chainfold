@@ -26,9 +26,8 @@ use rusqlite::Connection;
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
 use crate::arch::Timestamp;
-use crate::evm::types::{
-    BlockHash, BlockNumber, ChainId, FilterHash, Gas, GasPrice, LogIdx, TxCount, TxHash,
-};
+use crate::chain::{BlockNumber, TxCount};
+use crate::evm::types::{BlockHash, ChainId, FilterHash, Gas, GasPrice, LogIdx, TxHash};
 
 mod erc20_cache;
 mod event_signature_cache;
@@ -581,6 +580,7 @@ pub(crate) fn configure_connection(conn: &Connection) -> Result<(), rusqlite::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::BlockRange;
     use crate::evm::ChainId;
     use alloy::primitives::Address;
 
@@ -626,7 +626,7 @@ mod tests {
 
     // -- table_counts / purge / vacuum --
 
-    use crate::evm::types::{BlockRange, EvmBlock, Topic};
+    use crate::evm::types::{EvmBlock, Topic};
     use alloy::primitives::U256;
 
     /// Seed one row into every table, through the public cache APIs only.

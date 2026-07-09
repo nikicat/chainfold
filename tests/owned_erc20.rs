@@ -18,12 +18,14 @@ use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
 use chainfold::Shared;
 use chainfold::evm::{
-    ChainProvider, ChunkSize, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache,
-    LogFilter, OwnedErc20, SubscribeTransport, TRANSFER_TOPIC, Topic,
+    ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, Finality, LogCache, LogFilter,
+    OwnedErc20, SubscribeTransport, TRANSFER_TOPIC, Topic,
 };
 use chainfold::merge::MergedItem;
 use futures_util::StreamExt;
 use tempfile::TempDir;
+
+use chainfold::chain::ChunkSize;
 
 use common::{
     anvil::{fork_mainnet, skip_no_anvil},
