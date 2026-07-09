@@ -173,3 +173,144 @@ fn log_to_evm_event(log: &Log) -> EvmEvent {
         data: log.data().data.to_vec(),
     }
 }
+
+// ============================================================
+// Tests — LogSpec resolution semantics (the EVM-specific parts of the
+// generic walk tests, which now run over the synthetic MockSpec).
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData};
+    use futures_util::StreamExt;
+
+    use super::*;
+    use crate::range_index::{IndexPos, RangeIndex, never_fetch};
+
+    const FH: FilterHash = FilterHash::new([0xAA; 32]);
+    const HASH_A: BlockHash = BlockHash::repeat_byte(0xBB);
+    const HASH_B: BlockHash = BlockHash::repeat_byte(0xBC);
+    /// Base for fixture block timestamps (`TS_BASE + block`).
+    const TS_BASE: Timestamp = Timestamp::new(1_700_000_000);
+
+    fn bn(n: u64) -> BlockNumber {
+        BlockNumber::from(n)
+    }
+
+    fn mk_log(block: BlockNumber, idx: LogIdx, block_hash: BlockHash) -> Log {
+        let topic0 = B256::from([0xDD; 32]);
+        let data = Bytes::from(vec![0x01]);
+        let log_data = LogData::new_unchecked(vec![topic0], data);
+        Log {
+            inner: LogInner {
+                address: Address::from([0x42u8; 20]),
+                data: log_data,
+            },
+            block_hash: Some(block_hash.b256()),
+            block_number: Some(block.get()),
+            block_timestamp: None,
+            transaction_hash: Some(B256::from([0xEE; 32])),
+            transaction_index: Some(0),
+            log_index: Some(u64::from(idx.get())),
+            removed: false,
+        }
+    }
+
+    fn mk_cache() -> Shared<LogCache> {
+        Shared::new(LogCache::open_in_memory().unwrap())
+    }
+
+    /// A walk resolves each `LogRef` through the cache: timestamps come from
+    /// the (must-be-cached) block headers — the headers-present invariant —
+    /// and positions map to `(block, log_index)`.
+    #[tokio::test]
+    async fn resolve_fills_timestamp_from_cached_header() {
+        let store = mk_cache();
+        let logs = vec![
+            mk_log(bn(150), LogIdx::ZERO, HASH_A),
+            mk_log(bn(180), LogIdx::new(2), HASH_B),
+        ];
+        store.insert_logs(&FH, &logs).unwrap();
+        // Fixture logs carry no block_timestamp, so resolution exercises
+        // the headers-present path: both block headers must be cached.
+        store
+            .insert_block_header(bn(150), &HASH_A, &BlockHash::ZERO, TS_BASE + 150)
+            .unwrap();
+        store
+            .insert_block_header(bn(180), &HASH_B, &HASH_A, TS_BASE + 180)
+            .unwrap();
+        let idx = Arc::new(RangeIndex::new(
+            LogSpec::new(store, FH),
+            never_fetch::<LogSpec>(),
+        ));
+        idx.insert_page(&LogPage {
+            from_block: bn(100),
+            to_block: bn(200),
+            items: logs,
+            end_block_hash: HASH_B,
+        });
+        let mut stream = idx.clone().items(
+            BlockPos::before_block(bn(100)),
+            BlockPos::end_of_block(bn(200)),
+        );
+        let a = stream.next().await.unwrap().unwrap();
+        assert_eq!(a.item.block_number, bn(150));
+        assert_eq!(a.item.timestamp, TS_BASE + 150);
+        assert_eq!(a.pos, EvmPosition::new(150, 0));
+        let b = stream.next().await.unwrap().unwrap();
+        assert_eq!(b.item.block_number, bn(180));
+        assert_eq!(b.item.timestamp, TS_BASE + 180);
+        assert_eq!(b.pos, EvmPosition::new(180, 2));
+        assert!(stream.next().await.is_none());
+    }
+
+    /// A provider-supplied per-log `block_timestamp` short-circuits the
+    /// header read — no header needs to be cached.
+    #[tokio::test]
+    async fn resolve_prefers_per_log_timestamp() {
+        let store = mk_cache();
+        let mut log = mk_log(bn(150), LogIdx::ZERO, HASH_A);
+        log.block_timestamp = Some((TS_BASE + 150).get());
+        store.insert_logs(&FH, std::slice::from_ref(&log)).unwrap();
+        let idx = Arc::new(RangeIndex::new(
+            LogSpec::new(store, FH),
+            never_fetch::<LogSpec>(),
+        ));
+        idx.insert_page(&LogPage {
+            from_block: bn(100),
+            to_block: bn(200),
+            items: vec![log],
+            end_block_hash: HASH_A,
+        });
+        let got = idx
+            .clone()
+            .items(
+                BlockPos::before_block(bn(100)),
+                BlockPos::end_of_block(bn(200)),
+            )
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        // No header was cached — the per-log timestamp served resolution.
+        assert_eq!(got.item.timestamp, TS_BASE + 150);
+    }
+
+    /// Pending logs (no block hash) are un-cacheable and dropped from pages.
+    #[test]
+    fn page_items_drop_pending_logs() {
+        let mut pending = mk_log(bn(150), LogIdx::ZERO, HASH_A);
+        pending.block_hash = None;
+        let page = LogPage {
+            from_block: bn(100),
+            to_block: bn(200),
+            items: vec![pending, mk_log(bn(160), LogIdx::ZERO, HASH_B)],
+            end_block_hash: HASH_B,
+        };
+        let items = LogSpec::page_items(&page);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].block_number, bn(160));
+    }
+}

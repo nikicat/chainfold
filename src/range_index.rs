@@ -43,7 +43,8 @@ pub use store::{RangeIndexStore, TimePos, TipSeed};
 
 /// Test-only fetcher that panics on any gap fill — re-exported for the
 /// concrete specs' warm-walk tests, which live with their (feature-gated)
-/// sources; a featureless test build has no user, hence the allow.
+/// sources; the in-module tests import it via `gap_fill` directly, so a
+/// featureless test build has no user of the re-export, hence the allow.
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use gap_fill::never_fetch;
@@ -133,27 +134,21 @@ impl<S: RangeSpec> RangeIndex<S> {
         true
     }
 
-    /// Whether a drain task is currently attached. Test helper (used by the
-    /// feature-gated spec tests, hence the allow).
+    /// Whether a drain task is currently attached. Test helper.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn has_drain(&self) -> bool {
         self.drain_tx.lock().unwrap().is_some()
     }
 
-    /// Number of ranges currently in the tree. Test helper (used by the
-    /// feature-gated spec tests, hence the allow).
+    /// Number of ranges currently in the tree. Test helper.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.tree.lock().unwrap().len()
     }
 
     /// Whether the block window `[range.from, range.to]` has been
-    /// materialized. Test helper (used by the feature-gated spec tests,
-    /// hence the allow).
+    /// materialized. Test helper.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn window_loaded(&self, range: BlockRange) -> bool {
         self.loaded_windows
             .lock()
@@ -163,8 +158,7 @@ impl<S: RangeSpec> RangeIndex<S> {
     }
 }
 
-// The tests exercise the tree through the concrete EVM specs (LogSpec /
-// BlockSpec) — synthetic-spec fixtures are a TODO — so they need the evm
-// feature.
-#[cfg(all(test, feature = "evm"))]
+#[cfg(test)]
+mod testkit;
+#[cfg(test)]
 mod tests;

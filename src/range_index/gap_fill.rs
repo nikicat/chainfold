@@ -28,7 +28,6 @@ type Yielded<S> = Positioned<<S as RangeSpec>::Event, <S as RangeSpec>::PubPos>;
 /// never trigger a fetch — if the fetcher is invoked the test fails
 /// with a clear message.
 #[cfg(test)]
-#[allow(dead_code)] // consumed by the feature-gated spec tests
 pub(crate) fn never_fetch<S: RangeSpec>() -> Fetcher<S::Page> {
     Arc::new(|_, _| {
         Box::pin(async {

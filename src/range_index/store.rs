@@ -266,9 +266,7 @@ impl<S: RangeSpec> HistStoreBackend<S::Event, S::PubPos> for RangeIndexStore<S> 
 // Tests
 // ============================================================
 
-// Exercises the store through the concrete EVM BlockSpec — see the note on
-// `range_index::tests` about synthetic-spec fixtures.
-#[cfg(all(test, feature = "evm"))]
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -277,34 +275,35 @@ mod tests {
 
     use super::super::RangeIndex;
     use super::super::gap_fill::never_fetch;
+    use super::super::testkit::{MockPubPos, MockSpec, MockStore};
     use super::*;
     use crate::chain::BlockNumber;
-    use crate::evm::{BlockSpec, LogCache};
-    use crate::shared::Shared;
 
     /// Fixed-position estimator for tests that never exercise `time_pos`.
     struct ZeroTimePos;
 
     #[async_trait::async_trait]
-    impl TimePos<BlockNumber> for ZeroTimePos {
-        async fn time_pos(&self, _time: Timestamp) -> Result<BlockNumber, HistoryError> {
-            Ok(BlockNumber::ZERO)
+    impl TimePos<MockPubPos> for ZeroTimePos {
+        async fn time_pos(&self, _time: Timestamp) -> Result<MockPubPos, HistoryError> {
+            Ok(MockPubPos::default())
         }
     }
 
-    fn block_store_with_seed(
-        tip_seed: Option<Arc<dyn TipSeed>>,
-    ) -> Arc<RangeIndexStore<BlockSpec>> {
-        let cache = Shared::new(LogCache::open_in_memory().unwrap());
+    /// End-of-block tip at height `n` — what a head bump delivers.
+    fn tip(n: u64) -> MockPubPos {
+        MockPubPos::new(BlockNumber::new(n), u32::MAX)
+    }
+
+    fn mock_store_with_seed(tip_seed: Option<Arc<dyn TipSeed>>) -> Arc<RangeIndexStore<MockSpec>> {
         let index = Arc::new(RangeIndex::new(
-            BlockSpec::new(cache),
-            never_fetch::<BlockSpec>(),
+            MockSpec::new(Arc::new(MockStore::default())),
+            never_fetch::<MockSpec>(),
         ));
         RangeIndexStore::new(index, Arc::new(ZeroTimePos), tip_seed)
     }
 
-    fn block_store() -> Arc<RangeIndexStore<BlockSpec>> {
-        block_store_with_seed(None)
+    fn mock_store() -> Arc<RangeIndexStore<MockSpec>> {
+        mock_store_with_seed(None)
     }
 
     /// Regression: `snapshots()` must emit only when the tip *advances*, never
@@ -315,13 +314,13 @@ mod tests {
     /// permanent live-lock on any quiet chain.
     #[tokio::test]
     async fn snapshots_wait_for_advance_not_busy_loop() {
-        let store = block_store();
-        store.on_bump(BlockNumber::new(5));
+        let store = mock_store();
+        store.on_bump(tip(5));
         let mut snaps = store.snapshots();
 
         // First emission is the current tip, immediately.
         let first = snaps.next().await.expect("first snapshot");
-        assert_eq!(*first.end(), BlockNumber::new(5));
+        assert_eq!(*first.end(), tip(5));
 
         // The tip is static — the second emission must NOT arrive. With the
         // busy-loop bug `snaps.next()` returns Ready at once and the timeout
@@ -333,15 +332,15 @@ mod tests {
         );
 
         // An advance delivers exactly once, promptly.
-        store.on_bump(BlockNumber::new(6));
+        store.on_bump(tip(6));
         let third = timeout(Duration::from_millis(100), snaps.next())
             .await
             .expect("advance delivered within budget")
             .expect("snapshot after advance");
-        assert_eq!(*third.end(), BlockNumber::new(6));
+        assert_eq!(*third.end(), tip(6));
 
         // A non-advancing bump (≤ current tip) is not an emission either.
-        store.on_bump(BlockNumber::new(6));
+        store.on_bump(tip(6));
         let stale = timeout(Duration::from_millis(100), snaps.next()).await;
         assert!(stale.is_err(), "a non-advancing bump must not emit");
     }
@@ -350,7 +349,7 @@ mod tests {
     /// for the chain's demand-started clock + wiring.
     #[derive(Default)]
     struct BumpOnRequest {
-        target: OnceLock<Weak<RangeIndexStore<BlockSpec>>>,
+        target: OnceLock<Weak<RangeIndexStore<MockSpec>>>,
         requests: std::sync::atomic::AtomicUsize,
     }
 
@@ -359,7 +358,7 @@ mod tests {
             self.requests
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(store) = self.target.get().and_then(Weak::upgrade) {
-                store.on_bump(BlockNumber::new(7));
+                store.on_bump(tip(7));
             }
         }
     }
@@ -369,13 +368,13 @@ mod tests {
     #[tokio::test]
     async fn awaiting_consumer_raises_tip_demand() {
         let seed = Arc::new(BumpOnRequest::default());
-        let store = block_store_with_seed(Some(seed.clone() as Arc<dyn TipSeed>));
+        let store = mock_store_with_seed(Some(seed.clone() as Arc<dyn TipSeed>));
         let _ = seed.target.set(Arc::downgrade(&store));
 
         let hist = timeout(Duration::from_millis(100), store.next())
             .await
             .expect("demand-seeded tip resolves next()");
-        assert_eq!(*hist.end(), BlockNumber::new(7));
+        assert_eq!(*hist.end(), tip(7));
         assert!(
             seed.requests.load(std::sync::atomic::Ordering::Relaxed) >= 1,
             "the waiting consumer must raise the demand signal"

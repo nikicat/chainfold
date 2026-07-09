@@ -1,7 +1,11 @@
-//! Cross-cutting tests over `RangeIndex<LogSpec>`: `BlockPos` ordering, page
-//! insertion + the four late-item cases, lazy per-window load, the `items()`
-//! walk, singleflight, async drain, and the R6 shared-index concurrency
-//! coverage (parallel walkers, disjoint/overlapping gaps, reader vs. writer).
+//! Cross-cutting tests over `RangeIndex<MockSpec>`: page insertion + the four
+//! late-item cases, lazy per-window load, the `items()` walk, singleflight,
+//! async drain, and the R6 shared-index concurrency coverage (parallel
+//! walkers, disjoint/overlapping gaps, reader vs. writer).
+//!
+//! Runs featureless over the synthetic [`MockSpec`] (see [`testkit`]) —
+//! source-specific resolution semantics live with the concrete specs
+//! (`evm::log_spec` / `evm::block_spec` tests).
 //!
 //! Ported from the pre-R3 `log_index` suite; the old cached-only navigation
 //! tests (`first_at_or_after` / `last_at_or_before`) were dropped with
@@ -11,28 +15,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U256};
-use alloy::rpc::types::Log;
 use futures_util::StreamExt;
 use tokio::task::yield_now;
 use tokio::time::sleep;
 
 use super::gap_fill::never_fetch;
 use super::range_tree::align_window;
+use super::testkit::{MockItem, MockPage, MockPos, MockPubPos, MockSpec, MockStore};
 use super::*;
-use crate::arch::Timestamp;
-use crate::cache::{FilterHash, ScanPartition};
 use crate::chain::BlockNumber;
-use crate::evm::{
-    BlockHash, BlockPos, EvmEvent, EvmPosition, LogCache, LogIdx, LogPage, LogRef, LogSpec,
-};
-use crate::shared::Shared;
-
-const FH: FilterHash = FilterHash::new([0xAA; 32]);
-const HASH_A: BlockHash = BlockHash::repeat_byte(0xBB);
-const HASH_B: BlockHash = BlockHash::repeat_byte(0xBC);
-/// Base for fixture block timestamps (`TS_BASE + block`).
-const TS_BASE: Timestamp = Timestamp::new(1_700_000_000);
 
 /// Shorthand [`BlockNumber`] constructor — these tests are wall-to-wall
 /// block coordinates.
@@ -40,73 +31,30 @@ fn bn(n: u64) -> BlockNumber {
     BlockNumber::from(n)
 }
 
-fn mk_log(block: BlockNumber, idx: LogIdx, block_hash: BlockHash) -> Log {
-    let topic0 = B256::from([0xDD; 32]);
-    let data = Bytes::from(vec![0x01]);
-    let log_data = LogData::new_unchecked(vec![topic0], data);
-    Log {
-        inner: LogInner {
-            address: Address::from([0x42u8; 20]),
-            data: log_data,
-        },
-        block_hash: Some(block_hash.b256()),
-        block_number: Some(block.get()),
-        block_timestamp: None,
-        transaction_hash: Some(B256::from([0xEE; 32])),
-        transaction_index: Some(0),
-        log_index: Some(u64::from(idx.get())),
-        removed: false,
+/// An item at `(block, 0)` — most fixtures need one item per block.
+fn item(block: u64) -> MockItem {
+    MockItem::new(bn(block), 0)
+}
+
+/// A page over `[from, to]` carrying `items`.
+fn page(from: u64, to: u64, items: Vec<MockItem>) -> MockPage {
+    MockPage {
+        from_block: bn(from),
+        to_block: bn(to),
+        items,
     }
 }
 
-/// Like [`mk_log`] but carrying its own `block_timestamp`, so
-/// [`LogSpec::resolve`] never needs a cached block header (the
-/// headers-present invariant, satisfied per-log).
-fn mk_log_ts(block: BlockNumber, idx: LogIdx, block_hash: BlockHash) -> Log {
-    let mut log = mk_log(block, idx, block_hash);
-    log.block_timestamp = Some((TS_BASE + block.get()).get());
-    log
+fn mk_store() -> Arc<MockStore> {
+    Arc::new(MockStore::default())
 }
 
-/// A block hash unique to `block`. `LogSpec::resolve` keys the cache lookup on
-/// `(block_hash, log_index)`, so the concurrency tests — which hold several
-/// distinct blocks at once — must give each block its own hash or they'd all
-/// resolve to the same cached log.
-fn hash_for(block: BlockNumber) -> BlockHash {
-    BlockHash::new(B256::from(U256::from(block.get())))
+fn mk_index_over(store: Arc<MockStore>) -> RangeIndex<MockSpec> {
+    RangeIndex::new(MockSpec::new(store), never_fetch::<MockSpec>())
 }
 
-/// A timestamped log at `(block, log_index)` with a block-unique hash.
-fn mk_log_uh(block: BlockNumber, log_index: LogIdx) -> Log {
-    mk_log_ts(block, log_index, hash_for(block))
-}
-
-fn mk_cache() -> Shared<LogCache> {
-    Shared::new(LogCache::open_in_memory().unwrap())
-}
-
-fn mk_index_over(store: Shared<LogCache>) -> RangeIndex<LogSpec> {
-    RangeIndex::new(LogSpec::new(store, FH), never_fetch::<LogSpec>())
-}
-
-fn mk_index() -> RangeIndex<LogSpec> {
-    mk_index_over(mk_cache())
-}
-
-// -- BlockPos ordering --
-
-#[test]
-fn block_pos_bottom_below_everything() {
-    assert!(BlockPos::Bottom < BlockPos::at(bn(0), LogIdx::ZERO));
-    assert!(BlockPos::Bottom < BlockPos::end_of_block(bn(0)));
-    assert!(BlockPos::before_block(bn(0)) == BlockPos::Bottom);
-    assert!(
-        BlockPos::before_block(bn(1))
-            == BlockPos::At {
-                block: bn(0),
-                log_index: LogIdx::MAX,
-            }
-    );
+fn mk_index() -> RangeIndex<MockSpec> {
+    mk_index_over(mk_store())
 }
 
 // -- insert_page basic shapes --
@@ -114,17 +62,8 @@ fn block_pos_bottom_below_everything() {
 #[test]
 fn insert_range_in_gap_creates_three_entries() {
     let idx = mk_index();
-    // First page: blocks [100, 200] with two logs at (150, 0) and (180, 0).
-    let page = LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![
-            mk_log(bn(150), LogIdx::ZERO, HASH_A),
-            mk_log(bn(180), LogIdx::ZERO, HASH_B),
-        ],
-        end_block_hash: HASH_B,
-    };
-    idx.insert_page(&page);
+    // First page: blocks [100, 200] with two items at (150, 0) and (180, 0).
+    idx.insert_page(&page(100, 200, vec![item(150), item(180)]));
     // Expect: filled@150, filled@180, empty tail @ end_of_block(200) = 3 entries.
     assert_eq!(idx.len(), 3);
 }
@@ -132,20 +71,10 @@ fn insert_range_in_gap_creates_three_entries() {
 #[test]
 fn insert_range_at_existing_end_extends_not_duplicates() {
     let idx = mk_index();
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![mk_log(bn(150), LogIdx::ZERO, HASH_A)],
-        end_block_hash: HASH_A,
-    });
+    idx.insert_page(&page(100, 200, vec![item(150)]));
     let before = idx.len();
-    // Second page covering [201, 300] with one log at (250, 0).
-    idx.insert_page(&LogPage {
-        from_block: bn(201),
-        to_block: bn(300),
-        items: vec![mk_log(bn(250), LogIdx::ZERO, HASH_B)],
-        end_block_hash: HASH_B,
-    });
+    // Second page covering [201, 300] with one item at (250, 0).
+    idx.insert_page(&page(201, 300, vec![item(250)]));
     // Expect new filled@250 + new empty-tail past 250 = 2 more entries.
     assert_eq!(idx.len(), before + 2);
 }
@@ -155,31 +84,18 @@ fn insert_range_at_existing_end_extends_not_duplicates() {
 #[test]
 fn late_item_inside_existing_range_splits_it() {
     let idx = mk_index();
-    // Set up: page with single log at (200, 0) covering [100, 300].
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(300),
-        items: vec![mk_log(bn(200), LogIdx::ZERO, HASH_A)],
-        end_block_hash: HASH_A,
-    });
+    // Set up: page with single item at (200, 0) covering [100, 300].
+    idx.insert_page(&page(100, 300, vec![item(200)]));
     let before_len = idx.len();
     // Now a late item arrives at (250, 0) — inside the tail empty
     // range (200, 300]. Should split into filled@250 + empty(250, 300].
     let mut tree = idx.tree.lock().unwrap();
-    RangeIndex::<LogSpec>::insert_late_item(
-        &mut tree,
-        LogRef {
-            block_number: bn(250),
-            log_index: LogIdx::ZERO,
-            block_hash: HASH_B,
-        },
-        BlockPos::at(bn(200), LogIdx::ZERO),
-    );
+    RangeIndex::<MockSpec>::insert_late_item(&mut tree, item(250), MockPos::at(bn(200), 0));
     // before_len had: filled@(200, 0), empty(end_of_block(300)). After split:
     // filled@(200, 0), filled@(250, 0), empty(end_of_block(300)) — net +1.
     assert_eq!(tree.len(), before_len + 1);
-    assert!(tree.contains_key(&BlockPos::at(bn(250), LogIdx::ZERO)));
-    assert!(tree.contains_key(&BlockPos::end_of_block(bn(300))));
+    assert!(tree.contains_key(&MockPos::at(bn(250), 0)));
+    assert!(tree.contains_key(&MockPos::end_of_block(bn(300))));
 }
 
 #[test]
@@ -187,28 +103,19 @@ fn late_item_at_empty_range_end_upgrades_to_filled() {
     let idx = mk_index();
     // Page with no items so tree gets a single empty range ending at
     // end_of_block(200).
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![],
-        end_block_hash: HASH_A,
-    });
+    idx.insert_page(&page(100, 200, vec![]));
     assert_eq!(idx.len(), 1);
-    let target_pos = BlockPos::end_of_block(bn(200));
+    let target_pos = MockPos::end_of_block(bn(200));
     {
         let tree = idx.tree.lock().unwrap();
         assert!(tree.get(&target_pos).unwrap().is_empty());
     }
     let mut tree = idx.tree.lock().unwrap();
     // Late item lands exactly at the empty range's end position.
-    RangeIndex::<LogSpec>::insert_late_item(
+    RangeIndex::<MockSpec>::insert_late_item(
         &mut tree,
-        LogRef {
-            block_number: bn(200),
-            log_index: LogIdx::MAX,
-            block_hash: HASH_B,
-        },
-        BlockPos::at(bn(150), LogIdx::ZERO),
+        MockItem::new(bn(200), u32::MAX),
+        MockPos::at(bn(150), 0),
     );
     // Count unchanged; the empty was upgraded in-place.
     assert_eq!(tree.len(), 1);
@@ -219,76 +126,41 @@ fn late_item_at_empty_range_end_upgrades_to_filled() {
 #[test]
 fn late_item_duplicate_is_ignored() {
     let idx = mk_index();
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![mk_log(bn(150), LogIdx::ZERO, HASH_A)],
-        end_block_hash: HASH_A,
-    });
+    idx.insert_page(&page(100, 200, vec![item(150)]));
     let before_len = idx.len();
     let mut tree = idx.tree.lock().unwrap();
-    // Same (block, log_index) as existing filled range end.
-    RangeIndex::<LogSpec>::insert_late_item(
-        &mut tree,
-        LogRef {
-            block_number: bn(150),
-            log_index: LogIdx::ZERO,
-            block_hash: HASH_B, // different hash — still ignored
-        },
-        BlockPos::at(bn(100), LogIdx::ZERO),
-    );
+    // Same (block, idx) as the existing filled range end.
+    RangeIndex::<MockSpec>::insert_late_item(&mut tree, item(150), MockPos::at(bn(100), 0));
     assert_eq!(tree.len(), before_len);
 }
 
 #[test]
 fn late_item_in_gap_inserts_filled_range() {
     let idx = mk_index();
-    // First page [100, 200] with one log — gives filled@(150, 0)
+    // First page [100, 200] with one item — gives filled@(150, 0)
     // and empty-tail at end_of_block(200).
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![mk_log(bn(150), LogIdx::ZERO, HASH_A)],
-        end_block_hash: HASH_A,
-    });
+    idx.insert_page(&page(100, 200, vec![item(150)]));
     // Insert a late item at (90, 0) — in a true gap before everything.
     let before_len = idx.len();
     let mut tree = idx.tree.lock().unwrap();
-    RangeIndex::<LogSpec>::insert_late_item(
-        &mut tree,
-        LogRef {
-            block_number: bn(90),
-            log_index: LogIdx::ZERO,
-            block_hash: HASH_B,
-        },
-        BlockPos::before_block(bn(90)),
-    );
+    RangeIndex::<MockSpec>::insert_late_item(&mut tree, item(90), MockPos::before_block(bn(90)));
     assert_eq!(tree.len(), before_len + 1);
-    assert!(tree.contains_key(&BlockPos::at(bn(90), LogIdx::ZERO)));
+    assert!(tree.contains_key(&MockPos::at(bn(90), 0)));
 }
 
 // -- lazy per-window load --
 
 #[test]
 fn is_loaded_lazy_first_access_only() {
-    let store = mk_cache();
+    let store = mk_store();
     // Pre-populate the store as if a previous process had scanned [100, 200]
-    // with one log at (150, 0).
-    store
-        .insert_logs(&FH, &[mk_log(bn(150), LogIdx::ZERO, HASH_A)])
-        .unwrap();
-    store
-        .coverage()
-        .record_scanned_range(
-            &ScanPartition::Filter(FH),
-            BlockRange::from_u64(100, 200),
-            HASH_A.into(),
-        )
-        .unwrap();
+    // with one item at (150, 0).
+    store.insert_items(&[item(150)]);
+    store.record_scanned(BlockRange::from_u64(100, 200));
 
     let idx = RangeIndex::with_chunk_size(
-        LogSpec::new(store, FH),
-        never_fetch::<LogSpec>(),
+        MockSpec::new(store),
+        never_fetch::<MockSpec>(),
         ChunkSize::new(1000),
     );
     assert_eq!(idx.len(), 0, "tree starts empty");
@@ -332,137 +204,107 @@ fn align_window_rounds_outward() {
 
 #[test]
 fn prune_keeps_empty_range_tombstone() {
-    // Forward-compat smoke: an empty range survives a "drop the LogRef"
+    // Forward-compat smoke: an empty range survives a "drop the item"
     // operation (which any future pruning would apply). Today we model
-    // this with insert_page over a no-log scan.
+    // this with insert_page over a no-item scan.
     let idx = mk_index();
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![],
-        end_block_hash: HASH_A,
-    });
+    idx.insert_page(&page(100, 200, vec![]));
     // The empty range IS the tombstone — gap detection downstream
     // depends on its presence.
     assert_eq!(idx.len(), 1);
     let tree = idx.tree.lock().unwrap();
-    let r = tree.get(&BlockPos::end_of_block(bn(200))).unwrap();
+    let r = tree.get(&MockPos::end_of_block(bn(200))).unwrap();
     assert!(r.is_empty(), "empty range survives as a tombstone");
-    assert_eq!(r.start, BlockPos::before_block(bn(100)));
-    assert_eq!(r.end, BlockPos::end_of_block(bn(200)));
+    assert_eq!(r.start, MockPos::before_block(bn(100)));
+    assert_eq!(r.end, MockPos::end_of_block(bn(200)));
 }
 
 // -- items() with fetcher --
 
 #[tokio::test]
 async fn items_walks_filled_ranges_yields_in_order() {
-    let store = mk_cache();
-    let logs = vec![
-        mk_log(bn(150), LogIdx::ZERO, HASH_A),
-        mk_log(bn(180), LogIdx::new(2), HASH_B),
-    ];
-    store.insert_logs(&FH, &logs).unwrap();
-    // Fixture logs carry no block_timestamp, so resolution exercises
-    // the headers-present path: both block headers must be cached.
-    store
-        .insert_block_header(bn(150), &HASH_A, &BlockHash::ZERO, TS_BASE + 150)
-        .unwrap();
-    store
-        .insert_block_header(bn(180), &HASH_B, &HASH_A, TS_BASE + 180)
-        .unwrap();
-    let idx = Arc::new(mk_index_over(store));
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: logs,
-        end_block_hash: HASH_B,
-    });
+    let idx = Arc::new(mk_index());
+    idx.insert_page(&page(100, 200, vec![item(150), MockItem::new(bn(180), 2)]));
     let mut stream = idx.clone().items(
-        BlockPos::before_block(bn(100)),
-        BlockPos::end_of_block(bn(200)),
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(200)),
     );
     let a = stream.next().await.unwrap().unwrap();
-    assert_eq!(a.item.block_number, bn(150));
-    assert_eq!(a.item.timestamp, TS_BASE + 150);
-    assert_eq!(a.pos, EvmPosition::new(150, 0));
+    assert_eq!(a.item, item(150));
+    assert_eq!(a.pos, MockPubPos::new(bn(150), 0));
     let b = stream.next().await.unwrap().unwrap();
-    assert_eq!(b.item.block_number, bn(180));
-    assert_eq!(b.item.timestamp, TS_BASE + 180);
-    assert_eq!(b.pos, EvmPosition::new(180, 2));
+    assert_eq!(b.item, MockItem::new(bn(180), 2));
+    assert_eq!(b.pos, MockPubPos::new(bn(180), 2));
     assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
 async fn items_into_uncached_gap_calls_store_and_caches() {
-    let store = mk_cache();
+    let store = mk_store();
     let calls = Arc::new(AtomicUsize::new(0));
-    let fetcher: Fetcher<LogPage> = {
+    let fetcher: Fetcher<MockPage> = {
         let calls = calls.clone();
         Arc::new(move |from, to| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
-                Ok(LogPage {
+                Ok(MockPage {
                     from_block: from,
                     to_block: to,
-                    items: vec![mk_log_ts(bn(150), LogIdx::ZERO, HASH_A)],
-                    end_block_hash: HASH_A,
+                    items: vec![item(150)],
                 })
             })
         })
     };
-    let idx = Arc::new(RangeIndex::new(LogSpec::new(store.share(), FH), fetcher));
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(store.clone()), fetcher));
 
     // First walk fetches.
     let mut stream = idx.clone().items(
-        BlockPos::before_block(bn(100)),
-        BlockPos::end_of_block(bn(200)),
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(200)),
     );
     let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.item.block_number, bn(150));
+    assert_eq!(first.item.block, bn(150));
     drop(stream);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // Second walk over the same range should NOT refetch — the gap has
     // been backfilled both in the in-memory tree and in the store.
     let mut stream2 = idx.clone().items(
-        BlockPos::before_block(bn(100)),
-        BlockPos::end_of_block(bn(200)),
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(200)),
     );
     let first2 = stream2.next().await.unwrap().unwrap();
-    assert_eq!(first2.item.block_number, bn(150));
+    assert_eq!(first2.item.block, bn(150));
     assert_eq!(calls.load(Ordering::SeqCst), 1, "no refetch on warm tree");
 
-    // And the persisted scanned_ranges row is there.
-    let ranges = store
-        .coverage()
-        .get_scanned_ranges(&ScanPartition::Filter(FH))
-        .unwrap();
-    assert!(!ranges.is_empty(), "scanned range was persisted");
+    // And the persisted coverage row is there.
+    assert!(
+        !store.scanned_ranges().is_empty(),
+        "scanned range was persisted"
+    );
 }
 
 // -- singleflight --
 
 #[tokio::test]
 async fn concurrent_searches_in_same_gap_fire_one_fetch() {
-    let store = mk_cache();
     let calls = Arc::new(AtomicUsize::new(0));
-    let fetcher: Fetcher<LogPage> = {
+    let fetcher: Fetcher<MockPage> = {
         let calls = calls.clone();
         Arc::new(move |from, to| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 // Give peers time to enter the wait state.
                 sleep(Duration::from_millis(50)).await;
-                Ok(LogPage {
+                Ok(MockPage {
                     from_block: from,
                     to_block: to,
-                    items: vec![mk_log_ts(bn(150), LogIdx::ZERO, HASH_A)],
-                    end_block_hash: HASH_A,
+                    items: vec![item(150)],
                 })
             })
         })
     };
-    let idx = Arc::new(RangeIndex::new(LogSpec::new(store, FH), fetcher));
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
     // Spawn 5 concurrent walkers over the same uncached gap.
     let mut handles = Vec::new();
@@ -470,10 +312,10 @@ async fn concurrent_searches_in_same_gap_fire_one_fetch() {
         let idx = idx.clone();
         handles.push(tokio::spawn(async move {
             let mut s = idx.items(
-                BlockPos::before_block(bn(100)),
-                BlockPos::end_of_block(bn(200)),
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(200)),
             );
-            s.next().await.map(|r| r.map(|p| p.item.block_number))
+            s.next().await.map(|r| r.map(|p| p.item.block))
         }));
     }
     for h in handles {
@@ -492,49 +334,35 @@ async fn concurrent_searches_in_same_gap_fire_one_fetch() {
 
 #[tokio::test]
 async fn insert_page_drains_to_store_asynchronously() {
-    let store = mk_cache();
-    let idx = mk_index_over(store.share());
+    let store = mk_store();
+    let idx = mk_index_over(store.clone());
     assert!(idx.attach_drain(), "first attach succeeds");
     assert!(!idx.attach_drain(), "second attach is a no-op");
 
-    let page = LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![
-            mk_log(bn(150), LogIdx::ZERO, HASH_A),
-            mk_log(bn(180), LogIdx::new(2), HASH_B),
-        ],
-        end_block_hash: HASH_B,
-    };
+    let pg = page(100, 200, vec![item(150), MockItem::new(bn(180), 2)]);
 
     // The synchronous tree update must complete before the drain runs.
     // Right after insert_page returns, the tree has the entries but the
     // store has not been written yet (drain task hasn't been polled).
-    idx.insert_page(&page);
+    idx.insert_page(&pg);
     assert_eq!(idx.len(), 3, "tree updated synchronously");
 
     // Yield so the drain task can run.
     for _ in 0..10 {
         yield_now().await;
         sleep(Duration::from_millis(5)).await;
-        let logs = store
-            .get_logs_in_range(&FH, BlockRange::from_u64(100, 200))
-            .unwrap();
-        if logs.len() == 2 {
+        if store.items_in(BlockRange::from_u64(100, 200)).len() == 2 {
             break;
         }
     }
 
-    let logs = store
-        .get_logs_in_range(&FH, BlockRange::from_u64(100, 200))
-        .unwrap();
-    assert_eq!(logs.len(), 2, "drain wrote both logs to the store");
-    let ranges = store
-        .coverage()
-        .get_scanned_ranges(&ScanPartition::Filter(FH))
-        .unwrap();
     assert_eq!(
-        ranges,
+        store.items_in(BlockRange::from_u64(100, 200)).len(),
+        2,
+        "drain wrote both items to the store"
+    );
+    assert_eq!(
+        store.scanned_ranges(),
         vec![BlockRange::from_u64(100, 200)],
         "drain recorded the scanned range"
     );
@@ -542,33 +370,21 @@ async fn insert_page_drains_to_store_asynchronously() {
 
 #[tokio::test]
 async fn insert_page_without_drain_does_not_touch_store() {
-    let store = mk_cache();
-    let idx = mk_index_over(store.share());
+    let store = mk_store();
+    let idx = mk_index_over(store.clone());
     assert!(!idx.has_drain());
 
-    idx.insert_page(&LogPage {
-        from_block: bn(100),
-        to_block: bn(200),
-        items: vec![mk_log(bn(150), LogIdx::ZERO, HASH_A)],
-        end_block_hash: HASH_A,
-    });
+    idx.insert_page(&page(100, 200, vec![item(150)]));
 
     // Give any background work a chance to run.
     sleep(Duration::from_millis(20)).await;
     assert_eq!(
-        store
-            .get_logs_in_range(&FH, BlockRange::from_u64(100, 200))
-            .unwrap()
-            .len(),
+        store.items_in(BlockRange::from_u64(100, 200)).len(),
         0,
         "no drain attached — store remains empty"
     );
     assert!(
-        store
-            .coverage()
-            .get_scanned_ranges(&ScanPartition::Filter(FH))
-            .unwrap()
-            .is_empty(),
+        store.scanned_ranges().is_empty(),
         "no drain attached — scanned ranges remain empty"
     );
 }
@@ -587,16 +403,14 @@ async fn insert_page_without_drain_does_not_touch_store() {
 
 /// A fetcher for the concurrency tests: counts calls, records each requested
 /// [`BlockRange`], sleeps `delay` (so peers reach the singleflight wait state
-/// before the first fetch resolves), and returns a block-unique log for every
-/// fixture block that falls in the range. Returned logs carry their own
-/// `block_timestamp`, so resolution never needs a cached header — and
-/// `finalize_gap_fill` persists them, so `resolve` finds them afterward.
+/// before the first fetch resolves), and returns an item for every fixture
+/// block that falls in the range.
 fn recording_fetcher(
     calls: Arc<AtomicUsize>,
     fetched: Arc<Mutex<Vec<BlockRange>>>,
     blocks: Vec<BlockNumber>,
     delay: Duration,
-) -> Fetcher<LogPage> {
+) -> Fetcher<MockPage> {
     Arc::new(move |from: BlockNumber, to: BlockNumber| {
         calls.fetch_add(1, Ordering::SeqCst);
         fetched.lock().unwrap().push(BlockRange::new(from, to));
@@ -608,13 +422,12 @@ fn recording_fetcher(
             let items = blocks
                 .iter()
                 .filter(|b| **b >= from && **b <= to)
-                .map(|b| mk_log_uh(*b, LogIdx::ZERO))
+                .map(|b| MockItem::new(*b, 0))
                 .collect();
-            Ok(LogPage {
+            Ok(MockPage {
                 from_block: from,
                 to_block: to,
                 items,
-                end_block_hash: hash_for(to),
             })
         })
     })
@@ -623,12 +436,11 @@ fn recording_fetcher(
 /// Drain an `items()` stream to the block numbers it yields.
 async fn collect_blocks<St>(mut stream: St) -> Vec<BlockNumber>
 where
-    St: futures_core::Stream<Item = Result<Positioned<EvmEvent, EvmPosition>, HistoryError>>
-        + Unpin,
+    St: futures_core::Stream<Item = Result<Positioned<MockItem, MockPubPos>, HistoryError>> + Unpin,
 {
     let mut out = Vec::new();
     while let Some(r) = stream.next().await {
-        out.push(r.unwrap().item.block_number);
+        out.push(r.unwrap().item.block);
     }
     out
 }
@@ -668,17 +480,17 @@ async fn concurrent_searches_same_gap_one_fetch_multi_thread() {
         vec![bn(150)],
         Duration::from_millis(50),
     );
-    let idx = Arc::new(RangeIndex::new(LogSpec::new(mk_cache(), FH), fetcher));
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
     let mut handles = Vec::new();
     for _ in 0..8 {
         let idx = idx.clone();
         handles.push(tokio::spawn(async move {
             let mut s = idx.items(
-                BlockPos::before_block(bn(100)),
-                BlockPos::end_of_block(bn(200)),
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(200)),
             );
-            s.next().await.unwrap().unwrap().item.block_number
+            s.next().await.unwrap().unwrap().item.block
         }));
     }
     for h in handles {
@@ -704,26 +516,26 @@ async fn disjoint_gaps_fetch_independently() {
         vec![bn(150), bn(350)],
         Duration::from_millis(30),
     );
-    let idx = Arc::new(RangeIndex::new(LogSpec::new(mk_cache(), FH), fetcher));
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
     let a = {
         let idx = idx.clone();
         tokio::spawn(async move {
             let mut s = idx.items(
-                BlockPos::before_block(bn(100)),
-                BlockPos::end_of_block(bn(200)),
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(200)),
             );
-            s.next().await.unwrap().unwrap().item.block_number
+            s.next().await.unwrap().unwrap().item.block
         })
     };
     let b = {
         let idx = idx.clone();
         tokio::spawn(async move {
             let mut s = idx.items(
-                BlockPos::before_block(bn(300)),
-                BlockPos::end_of_block(bn(400)),
+                MockPos::before_block(bn(300)),
+                MockPos::end_of_block(bn(400)),
             );
-            s.next().await.unwrap().unwrap().item.block_number
+            s.next().await.unwrap().unwrap().item.block
         })
     };
     assert_eq!(a.await.unwrap(), bn(150));
@@ -759,15 +571,15 @@ async fn overlapping_gaps_never_double_fetch() {
         vec![bn(150), bn(250), bn(350)],
         Duration::from_millis(40),
     );
-    let idx = Arc::new(RangeIndex::new(LogSpec::new(mk_cache(), FH), fetcher));
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
     // Windows overlap on blocks (200, 300].
     let a = {
         let idx = idx.clone();
         tokio::spawn(async move {
             collect_blocks(idx.items(
-                BlockPos::before_block(bn(100)),
-                BlockPos::end_of_block(bn(300)),
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(300)),
             ))
             .await
         })
@@ -776,8 +588,8 @@ async fn overlapping_gaps_never_double_fetch() {
         let idx = idx.clone();
         tokio::spawn(async move {
             collect_blocks(idx.items(
-                BlockPos::before_block(bn(200)),
-                BlockPos::end_of_block(bn(400)),
+                MockPos::before_block(bn(200)),
+                MockPos::end_of_block(bn(400)),
             ))
             .await
         })
@@ -802,7 +614,7 @@ async fn insert_page_ahead_of_walk_cursor_is_yielded_once() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let calls = Arc::new(AtomicUsize::new(0));
-    let fetcher: Fetcher<LogPage> = {
+    let fetcher: Fetcher<MockPage> = {
         let entered = entered.clone();
         let release = release.clone();
         let calls = calls.clone();
@@ -818,49 +630,30 @@ async fn insert_page_ahead_of_walk_cursor_is_yielded_once() {
                     release.notified().await;
                 }
                 let items = if from <= bn(150) && to >= bn(150) {
-                    vec![mk_log_uh(bn(150), LogIdx::ZERO)]
+                    vec![item(150)]
                 } else {
                     vec![]
                 };
-                Ok(LogPage {
+                Ok(MockPage {
                     from_block: from,
                     to_block: to,
                     items,
-                    end_block_hash: hash_for(to),
                 })
             })
         })
     };
-    // The island (200) and the mid-walk insert (300) reach the tree via
-    // `insert_page` only — no drain, no fetch — so their logs never hit the
-    // cache that `resolve` reads. Seed them up front.
-    let store = mk_cache();
-    store
-        .insert_logs(
-            &FH,
-            &[
-                mk_log_uh(bn(200), LogIdx::ZERO),
-                mk_log_uh(bn(300), LogIdx::ZERO),
-            ],
-        )
-        .unwrap();
-    let idx = Arc::new(RangeIndex::new(LogSpec::new(store, FH), fetcher));
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
     // A cached island at block 200 splits the walk into
     // gap[100,199] | cached@200 | gap. The walker parks in the first gap.
-    idx.insert_page(&LogPage {
-        from_block: bn(200),
-        to_block: bn(200),
-        items: vec![mk_log_uh(bn(200), LogIdx::ZERO)],
-        end_block_hash: hash_for(bn(200)),
-    });
+    idx.insert_page(&page(200, 200, vec![item(200)]));
 
     let walker = {
         let idx = idx.clone();
         tokio::spawn(async move {
             collect_blocks(idx.items(
-                BlockPos::before_block(bn(100)),
-                BlockPos::end_of_block(bn(400)),
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(400)),
             ))
             .await
         })
@@ -872,12 +665,7 @@ async fn insert_page_ahead_of_walk_cursor_is_yielded_once() {
     // Insert block 300 — strictly past the island, ahead of the cursor, with
     // no in-flight placeholder over it. Happens-before the release, so the
     // walker cannot have advanced past 200 yet.
-    idx.insert_page(&LogPage {
-        from_block: bn(300),
-        to_block: bn(300),
-        items: vec![mk_log_uh(bn(300), LogIdx::ZERO)],
-        end_block_hash: hash_for(bn(300)),
-    });
+    idx.insert_page(&page(300, 300, vec![item(300)]));
     release.notify_one();
 
     let blocks = walker.await.unwrap();
@@ -899,32 +687,18 @@ async fn insert_page_ahead_of_walk_cursor_is_yielded_once() {
 async fn walk_races_late_inserts_no_dup_no_drop() {
     use std::collections::BTreeSet;
 
-    let store = mk_cache();
-    let idx = Arc::new(mk_index_over(store.share())); // never_fetch — any gap fails loudly.
+    let idx = Arc::new(mk_index()); // never_fetch — any gap fails loudly.
 
-    // A gap-free window [1, 300]: seeded logs every 10 blocks, plus late items
+    // A gap-free window [1, 300]: seeded items every 10 blocks, plus late items
     // strictly inside the window that split existing ranges when they arrive.
     let seeded_blocks: Vec<BlockNumber> = (1..=30).map(|k| bn(k * 10)).collect();
     let late_blocks: Vec<BlockNumber> = vec![bn(55), bn(155), bn(255)];
 
-    // `resolve` reads logs from the cache; `insert_page` only touches the tree,
-    // so pre-seed every log (seeded + late) into the cache up front.
-    let all_logs: Vec<Log> = seeded_blocks
-        .iter()
-        .chain(&late_blocks)
-        .map(|b| mk_log_uh(*b, LogIdx::ZERO))
-        .collect();
-    store.insert_logs(&FH, &all_logs).unwrap();
-
-    idx.insert_page(&LogPage {
-        from_block: bn(1),
-        to_block: bn(300),
-        items: seeded_blocks
-            .iter()
-            .map(|b| mk_log_uh(*b, LogIdx::ZERO))
-            .collect(),
-        end_block_hash: hash_for(bn(300)),
-    });
+    idx.insert_page(&page(
+        1,
+        300,
+        seeded_blocks.iter().map(|b| MockItem::new(*b, 0)).collect(),
+    ));
 
     // Writer: each late item may or may not be observed depending on where the
     // cursor is — but must never corrupt the walk.
@@ -933,11 +707,10 @@ async fn walk_races_late_inserts_no_dup_no_drop() {
         let late_blocks = late_blocks.clone();
         tokio::spawn(async move {
             for b in late_blocks {
-                idx.insert_page(&LogPage {
+                idx.insert_page(&MockPage {
                     from_block: b,
                     to_block: b,
-                    items: vec![mk_log_uh(b, LogIdx::ZERO)],
-                    end_block_hash: hash_for(b),
+                    items: vec![MockItem::new(b, 0)],
                 });
                 yield_now().await;
             }
@@ -945,13 +718,12 @@ async fn walk_races_late_inserts_no_dup_no_drop() {
     };
 
     // Reader: walk with a yield between items to widen the interleave.
-    let mut stream = idx.clone().items(
-        BlockPos::before_block(bn(1)),
-        BlockPos::end_of_block(bn(300)),
-    );
+    let mut stream = idx
+        .clone()
+        .items(MockPos::before_block(bn(1)), MockPos::end_of_block(bn(300)));
     let mut got: Vec<BlockNumber> = Vec::new();
     while let Some(item) = stream.next().await {
-        got.push(item.unwrap().item.block_number);
+        got.push(item.unwrap().item.block);
         yield_now().await;
     }
     writer.await.unwrap();

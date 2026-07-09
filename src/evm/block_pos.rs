@@ -145,3 +145,26 @@ pub(super) fn log_ref_from(log: &Log) -> Option<LogRef> {
         block_hash,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bn(n: u64) -> BlockNumber {
+        BlockNumber::from(n)
+    }
+
+    #[test]
+    fn block_pos_bottom_below_everything() {
+        assert!(BlockPos::Bottom < BlockPos::at(bn(0), LogIdx::ZERO));
+        assert!(BlockPos::Bottom < BlockPos::end_of_block(bn(0)));
+        assert!(BlockPos::before_block(bn(0)) == BlockPos::Bottom);
+        assert!(
+            BlockPos::before_block(bn(1))
+                == BlockPos::At {
+                    block: bn(0),
+                    log_index: LogIdx::MAX,
+                }
+        );
+    }
+}
