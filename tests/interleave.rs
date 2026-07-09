@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chainfold::Share;
 use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Signal, Timestamp, watch_hist,
@@ -218,7 +219,7 @@ impl<P: Position + FromValue + 'static> Source<P> {
     }
 
     fn hist_store(self: &Arc<Self>) -> HistStore<CommonEvent, P> {
-        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<CommonEvent, P>>)
+        HistStore::new(self.share() as Arc<dyn HistStoreBackend<CommonEvent, P>>)
     }
 }
 
@@ -242,7 +243,7 @@ impl<P: Position + FromValue + 'static> HistStoreBackend<CommonEvent, P> for Sou
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
-                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), P::default(), tip)))
+                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.share(), P::default(), tip)))
         }))
     }
 

@@ -28,6 +28,7 @@ use rusqlite::Connection;
 
 use crate::arch::Timestamp;
 use crate::chain::{BlockNumber, TxCount};
+use crate::share::Share;
 
 mod coverage;
 
@@ -298,12 +299,12 @@ impl CacheDb {
     /// (feature-gated — a core-only build has no caller, hence the allow).
     #[allow(dead_code)]
     pub(crate) fn shared_conn(&self) -> SharedConn {
-        self.conn.clone()
+        self.conn.share()
     }
 
     /// Cross-family scan-coverage view (scanned ranges + reorg tombstones).
     pub fn coverage(&self) -> Coverage {
-        Coverage::from_conn(self.conn.clone())
+        Coverage::from_conn(self.conn.share())
     }
 
     /// Row count + byte size for every table, in [`CacheTable::ALL`] order.

@@ -5,7 +5,8 @@
 
 pub mod blocks;
 
-use chainfold::Shared;
+use std::sync::Arc;
+
 use chainfold::bitcoin::{
     BitcoinChain, BitcoinChainConfig, BtcAuth, BtcRpcClient, ReqwestTransport, TracingTransport,
 };
@@ -62,7 +63,7 @@ pub async fn run(
     // tasks); head tracking starts lazily on the first demand for a tip.
     let chain = BitcoinChain::new(
         rpc,
-        Shared::new(cache.btc_blocks()),
+        Arc::new(cache.btc_blocks()),
         &BitcoinChainConfig {
             chunk_size: ChunkSize::new(args.chunk_size),
             ..BitcoinChainConfig::default()

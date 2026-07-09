@@ -11,12 +11,12 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::network::Ethereum;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::transports::http::reqwest::Url;
-use chainfold::Shared;
 use chainfold::arch::HistStore;
 use chainfold::evm::{
     ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, LogCache, LogFilter,
@@ -40,7 +40,7 @@ async fn build_store(
     EvmChain<impl Provider<Ethereum> + Clone + 'static + use<>>,
     HistStore<EvmEvent, EvmPosition>,
 ) {
-    let cache = Shared::new(LogCache::open(db_path).expect("open cache"));
+    let cache = Arc::new(LogCache::open(db_path).expect("open cache"));
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");

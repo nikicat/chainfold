@@ -12,11 +12,11 @@
 mod common;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
-use chainfold::Shared;
 use chainfold::evm::{
     ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, LogCache, LogFilter,
     OwnedErc20, SubscribeTransport, TRANSFER_TOPIC, Topic,
@@ -51,7 +51,7 @@ async fn owned_erc20_matches_broad_filter_then_client_side() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20.v3.db");
     let endpoint = anvil.endpoint_url();
-    let cache = Shared::new(LogCache::open(db_path).expect("open cache"));
+    let cache = Arc::new(LogCache::open(db_path).expect("open cache"));
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");
@@ -170,7 +170,7 @@ async fn owned_erc20_empty_for_inactive_address() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("owned_erc20_empty.v3.db");
     let endpoint = anvil.endpoint_url();
-    let cache = Shared::new(LogCache::open(db_path).expect("open cache"));
+    let cache = Arc::new(LogCache::open(db_path).expect("open cache"));
     let provider = ChainProvider::discover(ProviderBuilder::new().connect_http(endpoint), cache)
         .await
         .expect("discover chain id");

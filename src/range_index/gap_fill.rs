@@ -20,6 +20,7 @@ use super::spec::{IndexPos, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
 use crate::chain::BlockRange;
 use crate::observe::{CacheLayer, CacheOutcome, cache_event};
+use crate::share::Share;
 
 /// The public positioned value [`RangeIndex::items`] yields for a spec `S`.
 type Yielded<S> = Positioned<<S as RangeSpec>::Event, <S as RangeSpec>::PubPos>;
@@ -144,7 +145,7 @@ impl<S: RangeSpec> RangeIndex<S> {
             if state.done || state.cursor >= state.to {
                 return None;
             }
-            match state.index.clone().next_yield(state.cursor, state.to).await {
+            match state.index.share().next_yield(state.cursor, state.to).await {
                 Ok(Some((full, advanced))) => {
                     state.cursor = advanced;
                     Some((Ok(full), state))

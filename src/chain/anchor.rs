@@ -16,6 +16,7 @@ use crate::arch::{HistoryError, Timestamp};
 use crate::chain::BlockNumber;
 use crate::chain::head::HeadSeeder;
 use crate::range_index::TipSeed;
+use crate::share::Share;
 
 /// Anchor for wall-clock → block estimation: a recent `(block, timestamp)`
 /// observation. Anchored at a recent head rather than genesis because some
@@ -132,7 +133,7 @@ impl TimeLocator {
         block_time: Duration,
     ) -> Self {
         Self {
-            anchor: LazyAnchor::new(seeder, source.clone(), cell),
+            anchor: LazyAnchor::new(seeder, source.share(), cell),
             source,
             block_time,
         }
@@ -265,7 +266,7 @@ mod tests {
         ));
         let loc = TimeLocator::new(
             seeder,
-            source.clone() as Arc<dyn BlockTimeSource>,
+            source.share() as Arc<dyn BlockTimeSource>,
             Arc::new(OnceCell::new()),
             block_time,
         );

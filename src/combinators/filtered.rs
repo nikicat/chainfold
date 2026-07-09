@@ -16,6 +16,7 @@ use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Timestamp,
 };
+use crate::share::Share;
 
 type Predicate<Item> = Arc<dyn Fn(&Item) -> bool + Send + Sync>;
 
@@ -60,16 +61,16 @@ where
     P: Position,
 {
     fn snapshots(&self) -> HistStream<FilteredItem<Item>, P> {
-        let pred = self.pred.clone();
+        let pred = self.pred.share();
         Box::pin(
             self.upstream
                 .snapshots()
-                .map(move |hist| wrap_hist(&hist, pred.clone())),
+                .map(move |hist| wrap_hist(&hist, pred.share())),
         )
     }
 
     async fn next(&self) -> Hist<FilteredItem<Item>, P> {
-        wrap_hist(&self.upstream.next().await, self.pred.clone())
+        wrap_hist(&self.upstream.next().await, self.pred.share())
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {
@@ -96,10 +97,10 @@ where
     P: Position,
 {
     fn iter(&self, start: P, end: P) -> ItemStream<FilteredItem<Item>, P> {
-        let pred = self.pred.clone();
+        let pred = self.pred.share();
         let mut skipped: Vec<Item> = Vec::new();
         Box::pin(self.upstream.iter(start, end).filter_map(move |result| {
-            let pred = pred.clone();
+            let pred = pred.share();
             // Move `skipped` into the per-iteration closure via a re-borrow:
             // we can't directly capture by `&mut` in a `FnMut`-returning
             // combinator, so accumulate into a local that's drained on
@@ -135,7 +136,7 @@ where
     P: Position,
 {
     let backend = Arc::new(FilteredHistBackend {
-        upstream: upstream.backend().clone(),
+        upstream: upstream.backend().share(),
         pred,
     });
     Hist::new(backend, upstream.start().clone(), upstream.end().clone())

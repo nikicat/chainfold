@@ -12,6 +12,7 @@
 //! Coverage lives in `scanned_ranges` under [`ScanPartition::BtcBlocks`];
 //! rows live in `cached_btc_blocks`, written only by this spec's
 //! [`persist`](RangeSpec::persist).
+use std::sync::Arc;
 
 use super::cache::BtcBlockCache;
 use super::types::{BtcBlock, BtcBlockHash};
@@ -19,16 +20,15 @@ use crate::arch::{HistoryError, Positioned};
 use crate::cache::ScanPartition;
 use crate::chain::{BlockNumber, BlockRange};
 use crate::range_index::{HeightPos, IndexPos, LoadedSpan, RangeSpec};
-use crate::shared::Shared;
 
 /// [`RangeSpec`] for the chain's block history over a [`BtcBlockCache`].
 #[derive(Clone)]
 pub struct BtcBlockSpec {
-    store: Shared<BtcBlockCache>,
+    store: Arc<BtcBlockCache>,
 }
 
 impl BtcBlockSpec {
-    pub fn new(store: Shared<BtcBlockCache>) -> Self {
+    pub fn new(store: Arc<BtcBlockCache>) -> Self {
         Self { store }
     }
 }
@@ -152,6 +152,7 @@ mod tests {
     use crate::bitcoin::types::CompactTarget;
     use crate::chain::{ChunkSize, TxCount};
     use crate::range_index::{Fetcher, RangeIndex, never_fetch};
+    use crate::share::Share;
 
     const fn bn(n: u64) -> BlockNumber {
         BlockNumber::new(n)
@@ -191,18 +192,18 @@ mod tests {
         }
     }
 
-    fn mk_cache() -> Shared<BtcBlockCache> {
-        Shared::new(BtcBlockCache::open_in_memory().unwrap())
+    fn mk_cache() -> Arc<BtcBlockCache> {
+        Arc::new(BtcBlockCache::open_in_memory().unwrap())
     }
 
-    fn mk_index_over(store: Shared<BtcBlockCache>) -> RangeIndex<BtcBlockSpec> {
+    fn mk_index_over(store: Arc<BtcBlockCache>) -> RangeIndex<BtcBlockSpec> {
         RangeIndex::new(BtcBlockSpec::new(store), never_fetch::<BtcBlockSpec>())
     }
 
     /// Collect the heights yielded by a `(end_of_block(from), end_of_block(to)]`
     /// walk — i.e. blocks `from+1 ..= to`.
     async fn walk(idx: &std::sync::Arc<RangeIndex<BtcBlockSpec>>, from: u64, to: u64) -> Vec<u64> {
-        idx.clone()
+        idx.share()
             .items(
                 HeightPos::end_of_block(bn(from)),
                 HeightPos::end_of_block(bn(to)),
@@ -247,7 +248,7 @@ mod tests {
         let store = mk_cache();
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: Fetcher<BtcBlockPage> = {
-            let calls = calls.clone();
+            let calls = calls.share();
             Arc::new(move |from: BlockNumber, to: BlockNumber| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move { Ok(mk_page(from.get(), to.get())) })
@@ -260,7 +261,7 @@ mod tests {
         ));
 
         let got = idx
-            .clone()
+            .share()
             .items(
                 <BtcBlockSpec as RangeSpec>::index_pos(&bn(99)),
                 HeightPos::end_of_block(bn(104)),
@@ -328,7 +329,7 @@ mod tests {
 
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: Fetcher<BtcBlockPage> = {
-            let calls = calls.clone();
+            let calls = calls.share();
             Arc::new(move |from: BlockNumber, to: BlockNumber| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move { Ok(mk_page(from.get(), to.get())) })
@@ -337,7 +338,7 @@ mod tests {
         let idx = Arc::new(RangeIndex::new(BtcBlockSpec::new(store), fetcher));
 
         let got = idx
-            .clone()
+            .share()
             .items(HeightPos::bottom(), HeightPos::end_of_block(bn(3)))
             .map(|r| r.expect("resolve").pos.get())
             .collect::<Vec<_>>()

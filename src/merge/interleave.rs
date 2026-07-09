@@ -13,6 +13,7 @@ use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Subscription, Timestamp,
 };
+use crate::share::Share;
 
 use super::kway::{MergeStream, take_first_error};
 use super::types::{MergedCmp, MergedItem, SourceKey, Sources, TaggedEnd};
@@ -157,8 +158,8 @@ where
     let earliest: Clock<P> = sources.keys().map(|k| (k.clone(), P::default())).collect();
     let backend: Arc<dyn HistBackend<MergedItem<T, P>, MergedPos<P>>> =
         Arc::new(InterleaveHistBackend {
-            sources: sources.clone(),
-            cmp: cmp.clone(),
+            sources: sources.share(),
+            cmp: cmp.share(),
         });
     Hist::new(
         backend,
@@ -273,8 +274,8 @@ where
     P: Position,
 {
     fn snapshots(&self) -> HistStream<MergedItem<T, P>, MergedPos<P>> {
-        let sources = self.sources.clone();
-        let cmp = self.cmp.clone();
+        let sources = self.sources.share();
+        let cmp = self.cmp.share();
         // Tag each child's end-stream with its source key so the k-way select
         // knows which clock entry to bump.
         let tagged: Vec<Subscription<TaggedEnd<P>>> = sources
@@ -351,8 +352,8 @@ where
     ) -> ItemStream<MergedItem<T, P>, MergedPos<P>> {
         Box::pin(unfold(
             InterleaveIterState::Init {
-                sources: self.sources.clone(),
-                cmp: self.cmp.clone(),
+                sources: self.sources.share(),
+                cmp: self.cmp.share(),
                 start,
                 end,
             },

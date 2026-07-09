@@ -170,6 +170,7 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Catch the specific issues feedback has flagged before.
 absolute_paths = "warn"          # forces `use` over `crate::a::b::c` chains
+clone_on_ref_ptr = "warn"        # refcount bumps are spelled `.share()` (src/shared.rs)
 needless_pass_by_value = "warn"
 redundant_clone = "warn"
 explicit_iter_loop = "warn"

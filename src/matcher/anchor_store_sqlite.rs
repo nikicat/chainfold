@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
 use crate::arch::HistoryError;
+use crate::share::Share;
 
 use super::AnchorStore;
 
@@ -43,7 +44,7 @@ impl SqliteAnchorStore {
 impl AnchorStore for SqliteAnchorStore {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, HistoryError> {
         let key = key.to_owned();
-        let conn = self.conn.clone();
+        let conn = self.conn.share();
         spawn_blocking(move || -> Result<Option<Vec<u8>>, HistoryError> {
             let conn = conn.lock().unwrap();
             let mut stmt = conn
@@ -62,7 +63,7 @@ impl AnchorStore for SqliteAnchorStore {
 
     async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), HistoryError> {
         let key = key.to_owned();
-        let conn = self.conn.clone();
+        let conn = self.conn.share();
         spawn_blocking(move || -> Result<(), HistoryError> {
             let conn = conn.lock().unwrap();
             conn.execute(

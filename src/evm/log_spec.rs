@@ -5,6 +5,7 @@
 //! the full [`EvmEvent`] from the cache **synchronously** — the block header
 //! it needs for the timestamp must already be cached (the fetcher and the live
 //! path pre-persist headers; see the headers-present invariant in the R3 plan).
+use std::sync::Arc;
 
 use alloy::rpc::types::Log;
 
@@ -15,17 +16,16 @@ use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::cache::LogCache;
 use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx, Topic, TxHash};
 use crate::range_index::{LoadedSpan, RangeSpec};
-use crate::shared::Shared;
 
 /// [`RangeSpec`] for a single EVM log filter over a [`LogCache`].
 #[derive(Clone)]
 pub struct LogSpec {
-    store: Shared<LogCache>,
+    store: Arc<LogCache>,
     filter_hash: FilterHash,
 }
 
 impl LogSpec {
-    pub fn new(store: Shared<LogCache>, filter_hash: FilterHash) -> Self {
+    pub fn new(store: Arc<LogCache>, filter_hash: FilterHash) -> Self {
         Self { store, filter_hash }
     }
 }
@@ -188,6 +188,7 @@ mod tests {
 
     use super::*;
     use crate::range_index::{IndexPos, RangeIndex, never_fetch};
+    use crate::share::Share;
 
     const FH: FilterHash = FilterHash::new([0xAA; 32]);
     const HASH_A: BlockHash = BlockHash::repeat_byte(0xBB);
@@ -218,8 +219,8 @@ mod tests {
         }
     }
 
-    fn mk_cache() -> Shared<LogCache> {
-        Shared::new(LogCache::open_in_memory().unwrap())
+    fn mk_cache() -> Arc<LogCache> {
+        Arc::new(LogCache::open_in_memory().unwrap())
     }
 
     /// A walk resolves each `LogRef` through the cache: timestamps come from
@@ -251,7 +252,7 @@ mod tests {
             items: logs,
             end_block_hash: HASH_B,
         });
-        let mut stream = idx.clone().items(
+        let mut stream = idx.share().items(
             BlockPos::before_block(bn(100)),
             BlockPos::end_of_block(bn(200)),
         );
@@ -285,7 +286,7 @@ mod tests {
             end_block_hash: HASH_A,
         });
         let got = idx
-            .clone()
+            .share()
             .items(
                 BlockPos::before_block(bn(100)),
                 BlockPos::end_of_block(bn(200)),

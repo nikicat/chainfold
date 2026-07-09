@@ -19,7 +19,6 @@ use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::Shared;
 use chainfold::arch::{HistStore, HistoryError, Positioned, Timestamp, watch_hist};
 use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::{ChunkSize, Finality};
@@ -30,6 +29,7 @@ use chainfold::evm::{
 use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache_db = CacheDb::open(&db_path)?;
     let provider = ChainProvider::discover(
         ProviderBuilder::new().connect_client(client),
-        Shared::new(cache_db.logs()),
+        Arc::new(cache_db.logs()),
     )
     .await?;
 
@@ -230,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client2 = ClientBuilder::default().layer(rpc_retry_layer()).http(url2);
         let provider2 = ChainProvider::discover(
             ProviderBuilder::new().connect_client(client2),
-            Shared::new(cache_db2.logs()),
+            Arc::new(cache_db2.logs()),
         )
         .await?;
         let chain2 = EvmChain::new(provider2, config);

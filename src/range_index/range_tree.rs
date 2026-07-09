@@ -13,6 +13,7 @@ use super::RangeIndex;
 use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::HistoryError;
 use crate::chain::{BlockRange, ChunkSize};
+use crate::share::Share;
 
 // ============================================================
 // Range — one entry in the tree
@@ -276,7 +277,7 @@ pub(super) fn install_gap_placeholder<S: RangeSpec>(
             start,
             end,
             item: None,
-            fetch: Some(notify.clone()),
+            fetch: Some(notify.share()),
         },
     );
     notify

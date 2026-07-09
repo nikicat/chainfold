@@ -24,6 +24,7 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::arch::HistoryError;
 use crate::chain::BlockNumber;
 use crate::range_index::TipSeed;
+use crate::share::Share;
 
 /// Reconnect backoff bounds shared by the head-clock runner and any
 /// family-side reconnecting wiring (e.g. the EVM ws log session).
@@ -144,7 +145,7 @@ impl TipSeed for HeadSeeder {
     fn request(&self) {
         self.task.get_or_init(|| {
             AbortOnDropHandle::new(tokio::spawn(run_clock(
-                self.clock.clone(),
+                self.clock.share(),
                 self.head.clone(),
             )))
         });

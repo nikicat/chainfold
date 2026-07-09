@@ -26,6 +26,7 @@ use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Timestamp,
 };
+use crate::share::Share;
 
 /// An embedding of position type `P` into a wider position type `Q`
 /// (typically one variant of an app-defined enum).
@@ -78,16 +79,16 @@ where
     Q: Position,
 {
     fn snapshots(&self) -> HistStream<T, Q> {
-        let mapper = self.mapper.clone();
+        let mapper = self.mapper.share();
         Box::pin(
             self.upstream
                 .snapshots()
-                .map(move |hist| wrap_hist(&hist, mapper.clone())),
+                .map(move |hist| wrap_hist(&hist, mapper.share())),
         )
     }
 
     async fn next(&self) -> Hist<T, Q> {
-        wrap_hist(&self.upstream.next().await, self.mapper.clone())
+        wrap_hist(&self.upstream.next().await, self.mapper.share())
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<Q, HistoryError> {
@@ -124,7 +125,7 @@ where
                 "map_positions: window bound is a foreign position variant",
             ))]));
         };
-        let mapper = self.mapper.clone();
+        let mapper = self.mapper.share();
         Box::pin(
             self.upstream
                 .iter(start_p, end_p)
@@ -164,7 +165,7 @@ where
     let start = mapper.wrap(upstream.start().clone());
     let end = mapper.wrap(upstream.end().clone());
     let backend = Arc::new(PosMappedHistBackend {
-        upstream: upstream.backend().clone(),
+        upstream: upstream.backend().share(),
         mapper,
     });
     Hist::new(backend, start, end)

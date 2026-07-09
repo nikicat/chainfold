@@ -13,6 +13,7 @@ use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Timestamp,
 };
+use crate::share::Share;
 
 /// Item emitted by a mapped history. Carries both the transformed value and
 /// the original upstream item, so callers that need access to either can
@@ -61,16 +62,16 @@ where
     P: Position,
 {
     fn snapshots(&self) -> HistStream<MappedItem<Src, Dst>, P> {
-        let f = self.f.clone();
+        let f = self.f.share();
         Box::pin(
             self.upstream
                 .snapshots()
-                .map(move |hist| wrap_hist(&hist, f.clone())),
+                .map(move |hist| wrap_hist(&hist, f.share())),
         )
     }
 
     async fn next(&self) -> Hist<MappedItem<Src, Dst>, P> {
-        wrap_hist(&self.upstream.next().await, self.f.clone())
+        wrap_hist(&self.upstream.next().await, self.f.share())
     }
 
     async fn time_pos(&self, time: Timestamp) -> Result<P, HistoryError> {
@@ -98,7 +99,7 @@ where
     P: Position,
 {
     fn iter(&self, start: P, end: P) -> ItemStream<MappedItem<Src, Dst>, P> {
-        let f = self.f.clone();
+        let f = self.f.share();
         Box::pin(self.upstream.iter(start, end).map(move |result| {
             result.map(|p| {
                 let mapped = f(&p.item);
@@ -124,7 +125,7 @@ where
     P: Position,
 {
     let backend = Arc::new(MappedHistBackend {
-        upstream: upstream.backend().clone(),
+        upstream: upstream.backend().share(),
         f,
     });
     Hist::new(backend, upstream.start().clone(), upstream.end().clone())

@@ -31,7 +31,7 @@ use crate::chain::{
 };
 use crate::observe::{CacheLayer, CacheOutcome, cache_event};
 use crate::range_index::{Fetcher, RangeIndex, RangeIndexStore, TimePos, TipSeed};
-use crate::shared::Shared;
+use crate::share::Share;
 
 /// Default gap-fill / alignment chunk size.
 pub const DEFAULT_BTC_CHUNK_SIZE: ChunkSize = ChunkSize::new(1000);
@@ -76,7 +76,7 @@ impl Default for BitcoinChainConfig {
 
 pub struct BitcoinChain {
     rpc: BtcRpcClient,
-    cache: Shared<BtcBlockCache>,
+    cache: Arc<BtcBlockCache>,
     chunk_size: ChunkSize,
     block_time: Duration,
 
@@ -95,11 +95,7 @@ impl BitcoinChain {
     /// Create the chain entity. Construction does nothing observable: no
     /// RPC, no tasks. Head tracking (the `getblockcount` poll) starts on
     /// the first demand for a tip.
-    pub fn new(
-        rpc: BtcRpcClient,
-        cache: Shared<BtcBlockCache>,
-        config: &BitcoinChainConfig,
-    ) -> Self {
+    pub fn new(rpc: BtcRpcClient, cache: Arc<BtcBlockCache>, config: &BitcoinChainConfig) -> Self {
         tracing::debug!(
             poll_interval = ?config.poll_interval,
             chunk_size = %config.chunk_size,
@@ -121,7 +117,7 @@ impl BitcoinChain {
     }
 
     /// The shared durable cache.
-    pub fn cache(&self) -> &Shared<BtcBlockCache> {
+    pub fn cache(&self) -> &Arc<BtcBlockCache> {
         &self.cache
     }
 
@@ -134,7 +130,7 @@ impl BitcoinChain {
     pub fn blocks(&self, tier: Finality) -> HistStore<BtcBlock, BlockNumber> {
         let _ = tier; // Latest-only until Phase 7 (same as the EVM side).
 
-        let store = self.block_store(Some(self.seeder.clone() as Arc<dyn TipSeed>));
+        let store = self.block_store(Some(self.seeder.share() as Arc<dyn TipSeed>));
 
         let wiring = tokio::spawn(follow_head::<BtcBlockSpec>(
             self.seeder.head().subscribe(),
@@ -191,12 +187,12 @@ impl BitcoinChain {
 
     fn locator(&self) -> TimeLocator {
         TimeLocator::new(
-            self.seeder.clone(),
+            self.seeder.share(),
             Arc::new(BtcBlockTimeSource {
                 rpc: self.rpc.clone(),
                 cache: self.cache.share(),
             }),
-            self.anchor.clone(),
+            self.anchor.share(),
             self.block_time,
         )
     }
@@ -261,7 +257,7 @@ impl TimePos<BlockNumber> for BtcBlockTimePos {
 /// header cache).
 struct BtcBlockTimeSource {
     rpc: BtcRpcClient,
-    cache: Shared<BtcBlockCache>,
+    cache: Arc<BtcBlockCache>,
 }
 
 #[async_trait::async_trait]
@@ -397,8 +393,8 @@ mod tests {
 
     /// A cache pre-populated with a dense `[0, HEAD]` block history plus
     /// its coverage claim — the walk-warm fixture.
-    fn warm_cache() -> Shared<BtcBlockCache> {
-        let cache = Shared::new(BtcBlockCache::open_in_memory().unwrap());
+    fn warm_cache() -> Arc<BtcBlockCache> {
+        let cache = Arc::new(BtcBlockCache::open_in_memory().unwrap());
         let blocks: Vec<BtcBlock> = (0..=HEAD.get()).map(test_block).collect();
         cache.insert_blocks(&blocks).unwrap();
         cache
@@ -414,7 +410,7 @@ mod tests {
 
     /// A chain whose transport panics on ANY wire call — construction and
     /// fully-cached paths must be completely offline.
-    fn offline_chain(cache: Shared<BtcBlockCache>) -> BitcoinChain {
+    fn offline_chain(cache: Arc<BtcBlockCache>) -> BitcoinChain {
         BitcoinChain::new(
             BtcRpcClient::new(ScriptedTransport::default()),
             cache,
@@ -424,7 +420,7 @@ mod tests {
 
     /// A chain whose script holds exactly one `getblockcount` reply — the
     /// clock's first poll consumes it; any further RPC fails loudly.
-    fn chain_with_head(cache: Shared<BtcBlockCache>) -> BitcoinChain {
+    fn chain_with_head(cache: Arc<BtcBlockCache>) -> BitcoinChain {
         let transport = ScriptedTransport::default();
         transport.push_ok(serde_json::json!(HEAD.get()));
         BitcoinChain::new(

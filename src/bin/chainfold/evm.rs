@@ -6,7 +6,8 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::Http;
 use alloy::transports::http::reqwest::Url;
-use chainfold::Shared;
+use std::sync::Arc;
+
 use chainfold::cache::CacheDb;
 use chainfold::evm::{
     ChainId, ChainProvider, EvmChain, EvmChainConfig, RpcTimingLayer, rpc_retry_layer,
@@ -147,7 +148,7 @@ pub async fn run(
     let provider = ChainProvider::new(
         ProviderBuilder::new().connect_client(client),
         chain_id,
-        Shared::new(cache.logs()),
+        Arc::new(cache.logs()),
     );
 
     match config.chain_id_check() {

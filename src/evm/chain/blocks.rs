@@ -24,6 +24,7 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmBlock, Gas, GasPrice};
 use crate::evm::{BlockPage, BlockSpec};
 use crate::range_index::{Fetcher, RangeIndex, RangeIndexStore, TimePos, TipSeed};
+use crate::share::Share;
 
 // ============================================================
 // EvmChain — blocks source
@@ -39,7 +40,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
     pub fn blocks(&self, tier: Finality) -> HistStore<EvmBlock, BlockNumber> {
         let _ = tier; // Latest-only until Phase 7.
 
-        let store = self.block_store(Some(self.seeder.clone() as Arc<dyn TipSeed>));
+        let store = self.block_store(Some(self.seeder.share() as Arc<dyn TipSeed>));
 
         let wiring = tokio::spawn(follow_head::<BlockSpec>(
             self.seeder.head().subscribe(),

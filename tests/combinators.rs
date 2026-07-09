@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use chainfold::Share;
 use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Signal, Timestamp, watch_hist,
@@ -82,7 +83,7 @@ impl MockSource {
     }
 
     fn hist_store(self: &Arc<Self>) -> HistStore<MockEvent, MockPos> {
-        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
+        HistStore::new(self.share() as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
     }
 }
 
@@ -110,7 +111,7 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
-                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
+                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.share(), MockPos(0), tip)))
         }))
     }
 
@@ -199,7 +200,7 @@ async fn filter_pos_after_round_trips_via_marshal() {
 async fn since_skips_mapper_on_pre_cut_items_full_pipeline() {
     let src = MockSource::new(evens(vec![1, 2, 3, 4, 5, 6]));
     let counter = Arc::new(AtomicUsize::new(0));
-    let counter_clone = counter.clone();
+    let counter_clone = counter.share();
     let mapped = map_hist_store(src.hist_store(), move |e: &MockEvent| {
         counter_clone.fetch_add(1, Ordering::SeqCst);
         e.0 * 2

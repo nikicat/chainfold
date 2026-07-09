@@ -24,6 +24,7 @@ use super::range_tree::align_window;
 use super::testkit::{MockItem, MockPage, MockPos, MockPubPos, MockSpec, MockStore};
 use super::*;
 use crate::chain::BlockNumber;
+use crate::share::Share;
 
 /// Shorthand [`BlockNumber`] constructor — these tests are wall-to-wall
 /// block coordinates.
@@ -225,7 +226,7 @@ fn prune_keeps_empty_range_tombstone() {
 async fn items_walks_filled_ranges_yields_in_order() {
     let idx = Arc::new(mk_index());
     idx.insert_page(&page(100, 200, vec![item(150), MockItem::new(bn(180), 2)]));
-    let mut stream = idx.clone().items(
+    let mut stream = idx.share().items(
         MockPos::before_block(bn(100)),
         MockPos::end_of_block(bn(200)),
     );
@@ -243,7 +244,7 @@ async fn items_into_uncached_gap_calls_store_and_caches() {
     let store = mk_store();
     let calls = Arc::new(AtomicUsize::new(0));
     let fetcher: Fetcher<MockPage> = {
-        let calls = calls.clone();
+        let calls = calls.share();
         Arc::new(move |from, to| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
@@ -255,10 +256,10 @@ async fn items_into_uncached_gap_calls_store_and_caches() {
             })
         })
     };
-    let idx = Arc::new(RangeIndex::new(MockSpec::new(store.clone()), fetcher));
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(store.share()), fetcher));
 
     // First walk fetches.
-    let mut stream = idx.clone().items(
+    let mut stream = idx.share().items(
         MockPos::before_block(bn(100)),
         MockPos::end_of_block(bn(200)),
     );
@@ -269,7 +270,7 @@ async fn items_into_uncached_gap_calls_store_and_caches() {
 
     // Second walk over the same range should NOT refetch — the gap has
     // been backfilled both in the in-memory tree and in the store.
-    let mut stream2 = idx.clone().items(
+    let mut stream2 = idx.share().items(
         MockPos::before_block(bn(100)),
         MockPos::end_of_block(bn(200)),
     );
@@ -290,7 +291,7 @@ async fn items_into_uncached_gap_calls_store_and_caches() {
 async fn concurrent_searches_in_same_gap_fire_one_fetch() {
     let calls = Arc::new(AtomicUsize::new(0));
     let fetcher: Fetcher<MockPage> = {
-        let calls = calls.clone();
+        let calls = calls.share();
         Arc::new(move |from, to| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
@@ -309,7 +310,7 @@ async fn concurrent_searches_in_same_gap_fire_one_fetch() {
     // Spawn 5 concurrent walkers over the same uncached gap.
     let mut handles = Vec::new();
     for _ in 0..5 {
-        let idx = idx.clone();
+        let idx = idx.share();
         handles.push(tokio::spawn(async move {
             let mut s = idx.items(
                 MockPos::before_block(bn(100)),
@@ -335,7 +336,7 @@ async fn concurrent_searches_in_same_gap_fire_one_fetch() {
 #[tokio::test]
 async fn insert_page_drains_to_store_asynchronously() {
     let store = mk_store();
-    let idx = mk_index_over(store.clone());
+    let idx = mk_index_over(store.share());
     assert!(idx.attach_drain(), "first attach succeeds");
     assert!(!idx.attach_drain(), "second attach is a no-op");
 
@@ -371,7 +372,7 @@ async fn insert_page_drains_to_store_asynchronously() {
 #[tokio::test]
 async fn insert_page_without_drain_does_not_touch_store() {
     let store = mk_store();
-    let idx = mk_index_over(store.clone());
+    let idx = mk_index_over(store.share());
     assert!(!idx.has_drain());
 
     idx.insert_page(&page(100, 200, vec![item(150)]));
@@ -475,7 +476,7 @@ async fn concurrent_searches_same_gap_one_fetch_multi_thread() {
     let calls = Arc::new(AtomicUsize::new(0));
     let fetched = Arc::new(Mutex::new(Vec::new()));
     let fetcher = recording_fetcher(
-        calls.clone(),
+        calls.share(),
         fetched,
         vec![bn(150)],
         Duration::from_millis(50),
@@ -484,7 +485,7 @@ async fn concurrent_searches_same_gap_one_fetch_multi_thread() {
 
     let mut handles = Vec::new();
     for _ in 0..8 {
-        let idx = idx.clone();
+        let idx = idx.share();
         handles.push(tokio::spawn(async move {
             let mut s = idx.items(
                 MockPos::before_block(bn(100)),
@@ -511,15 +512,15 @@ async fn disjoint_gaps_fetch_independently() {
     let calls = Arc::new(AtomicUsize::new(0));
     let fetched = Arc::new(Mutex::new(Vec::new()));
     let fetcher = recording_fetcher(
-        calls.clone(),
-        fetched.clone(),
+        calls.share(),
+        fetched.share(),
         vec![bn(150), bn(350)],
         Duration::from_millis(30),
     );
     let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
     let a = {
-        let idx = idx.clone();
+        let idx = idx.share();
         tokio::spawn(async move {
             let mut s = idx.items(
                 MockPos::before_block(bn(100)),
@@ -529,7 +530,7 @@ async fn disjoint_gaps_fetch_independently() {
         })
     };
     let b = {
-        let idx = idx.clone();
+        let idx = idx.share();
         tokio::spawn(async move {
             let mut s = idx.items(
                 MockPos::before_block(bn(300)),
@@ -566,8 +567,8 @@ async fn overlapping_gaps_never_double_fetch() {
     let calls = Arc::new(AtomicUsize::new(0));
     let fetched = Arc::new(Mutex::new(Vec::new()));
     let fetcher = recording_fetcher(
-        calls.clone(),
-        fetched.clone(),
+        calls.share(),
+        fetched.share(),
         vec![bn(150), bn(250), bn(350)],
         Duration::from_millis(40),
     );
@@ -575,7 +576,7 @@ async fn overlapping_gaps_never_double_fetch() {
 
     // Windows overlap on blocks (200, 300].
     let a = {
-        let idx = idx.clone();
+        let idx = idx.share();
         tokio::spawn(async move {
             collect_blocks(idx.items(
                 MockPos::before_block(bn(100)),
@@ -585,7 +586,7 @@ async fn overlapping_gaps_never_double_fetch() {
         })
     };
     let b = {
-        let idx = idx.clone();
+        let idx = idx.share();
         tokio::spawn(async move {
             collect_blocks(idx.items(
                 MockPos::before_block(bn(200)),
@@ -615,15 +616,15 @@ async fn insert_page_ahead_of_walk_cursor_is_yielded_once() {
     let release = Arc::new(Notify::new());
     let calls = Arc::new(AtomicUsize::new(0));
     let fetcher: Fetcher<MockPage> = {
-        let entered = entered.clone();
-        let release = release.clone();
-        let calls = calls.clone();
+        let entered = entered.share();
+        let release = release.share();
+        let calls = calls.share();
         Arc::new(move |from: BlockNumber, to: BlockNumber| {
             // Only the first fetch (the front gap) parks; later tail-gap
             // fetches proceed immediately and return nothing.
             let n = calls.fetch_add(1, Ordering::SeqCst);
-            let entered = entered.clone();
-            let release = release.clone();
+            let entered = entered.share();
+            let release = release.share();
             Box::pin(async move {
                 if n == 0 {
                     entered.notify_one();
@@ -649,7 +650,7 @@ async fn insert_page_ahead_of_walk_cursor_is_yielded_once() {
     idx.insert_page(&page(200, 200, vec![item(200)]));
 
     let walker = {
-        let idx = idx.clone();
+        let idx = idx.share();
         tokio::spawn(async move {
             collect_blocks(idx.items(
                 MockPos::before_block(bn(100)),
@@ -703,7 +704,7 @@ async fn walk_races_late_inserts_no_dup_no_drop() {
     // Writer: each late item may or may not be observed depending on where the
     // cursor is — but must never corrupt the walk.
     let writer = {
-        let idx = idx.clone();
+        let idx = idx.share();
         let late_blocks = late_blocks.clone();
         tokio::spawn(async move {
             for b in late_blocks {
@@ -719,7 +720,7 @@ async fn walk_races_late_inserts_no_dup_no_drop() {
 
     // Reader: walk with a yield between items to widen the interleave.
     let mut stream = idx
-        .clone()
+        .share()
         .items(MockPos::before_block(bn(1)), MockPos::end_of_block(bn(300)));
     let mut got: Vec<BlockNumber> = Vec::new();
     while let Some(item) = stream.next().await {

@@ -11,6 +11,7 @@
 //! Coverage lives in `scanned_ranges` under [`ScanPartition::Blocks`];
 //! rows live in `cached_blocks`, written only by this spec's
 //! [`persist`](RangeSpec::persist).
+use std::sync::Arc;
 
 use crate::arch::{HistoryError, Positioned};
 use crate::cache::ScanPartition;
@@ -18,16 +19,15 @@ use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::cache::LogCache;
 use crate::evm::types::{BlockHash, EvmBlock};
 use crate::range_index::{HeightPos, IndexPos, LoadedSpan, RangeSpec};
-use crate::shared::Shared;
 
 /// [`RangeSpec`] for the chain's block history over a [`LogCache`].
 #[derive(Clone)]
 pub struct BlockSpec {
-    store: Shared<LogCache>,
+    store: Arc<LogCache>,
 }
 
 impl BlockSpec {
-    pub fn new(store: Shared<LogCache>) -> Self {
+    pub fn new(store: Arc<LogCache>) -> Self {
         Self { store }
     }
 }
@@ -150,6 +150,7 @@ mod tests {
     use crate::chain::{ChunkSize, TxCount};
     use crate::evm::types::{Gas, GasPrice};
     use crate::range_index::{Fetcher, RangeIndex, never_fetch};
+    use crate::share::Share;
     use alloy::primitives::{Address, B256, U256};
 
     const fn bn(n: u64) -> BlockNumber {
@@ -188,18 +189,18 @@ mod tests {
         }
     }
 
-    fn mk_cache() -> Shared<LogCache> {
-        Shared::new(LogCache::open_in_memory().unwrap())
+    fn mk_cache() -> Arc<LogCache> {
+        Arc::new(LogCache::open_in_memory().unwrap())
     }
 
-    fn mk_index_over(store: Shared<LogCache>) -> RangeIndex<BlockSpec> {
+    fn mk_index_over(store: Arc<LogCache>) -> RangeIndex<BlockSpec> {
         RangeIndex::new(BlockSpec::new(store), never_fetch::<BlockSpec>())
     }
 
     /// Collect the numbers yielded by a `(end_of_block(from), end_of_block(to)]`
     /// walk — i.e. blocks `from+1 ..= to`.
     async fn walk(idx: &std::sync::Arc<RangeIndex<BlockSpec>>, from: u64, to: u64) -> Vec<u64> {
-        idx.clone()
+        idx.share()
             .items(
                 HeightPos::end_of_block(bn(from)),
                 HeightPos::end_of_block(bn(to)),
@@ -247,7 +248,7 @@ mod tests {
         let store = mk_cache();
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: Fetcher<BlockPage> = {
-            let calls = calls.clone();
+            let calls = calls.share();
             Arc::new(move |from: BlockNumber, to: BlockNumber| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move { Ok(mk_page(from.get(), to.get())) })
@@ -260,7 +261,7 @@ mod tests {
         ));
 
         let got = idx
-            .clone()
+            .share()
             .items(
                 <BlockSpec as RangeSpec>::index_pos(&bn(99)),
                 HeightPos::end_of_block(bn(104)),
@@ -328,7 +329,7 @@ mod tests {
 
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: Fetcher<BlockPage> = {
-            let calls = calls.clone();
+            let calls = calls.share();
             Arc::new(move |from: BlockNumber, to: BlockNumber| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move { Ok(mk_page(from.get(), to.get())) })
@@ -337,7 +338,7 @@ mod tests {
         let idx = Arc::new(RangeIndex::new(BlockSpec::new(store), fetcher));
 
         let got = idx
-            .clone()
+            .share()
             .items(HeightPos::bottom(), HeightPos::end_of_block(bn(3)))
             .map(|r| r.expect("resolve").pos.get())
             .collect::<Vec<_>>()

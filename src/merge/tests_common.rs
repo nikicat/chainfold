@@ -17,6 +17,7 @@ use crate::arch::{
     Positioned, Signal, Timestamp,
 };
 use crate::merge::{MergedItem, SourceKey};
+use crate::share::Share;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Default)]
 pub struct MockPos(pub u64);
@@ -83,7 +84,7 @@ impl MockSource {
     }
 
     pub fn hist_store(self: &Arc<Self>) -> HistStore<MockEvent, MockPos> {
-        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
+        HistStore::new(self.share() as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
     }
 }
 
@@ -107,7 +108,7 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
-                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
+                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.share(), MockPos(0), tip)))
         }))
     }
 

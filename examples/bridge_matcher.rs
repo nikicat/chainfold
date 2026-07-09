@@ -32,7 +32,6 @@ use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::Shared;
 use chainfold::arch::Timestamp;
 use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::{ChunkSize, Finality};
@@ -178,7 +177,7 @@ async fn open_chain(
     let cache_db = CacheDb::open(&db_path)?;
     let provider = ChainProvider::discover(
         ProviderBuilder::new().connect_client(client),
-        Shared::new(cache_db.logs()),
+        Arc::new(cache_db.logs()),
     )
     .await?;
     Ok(EvmChain::new(

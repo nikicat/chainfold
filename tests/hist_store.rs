@@ -9,6 +9,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use chainfold::Share;
 use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Signal, Timestamp, act_and_wait, watch_hist,
@@ -83,7 +84,7 @@ impl MockSource {
     }
 
     fn hist_store(self: &Arc<Self>) -> HistStore<MockEvent, MockPos> {
-        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
+        HistStore::new(self.share() as Arc<dyn HistStoreBackend<MockEvent, MockPos>>)
     }
 }
 
@@ -112,7 +113,7 @@ impl HistStoreBackend<MockEvent, MockPos> for MockSource {
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
-                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
+                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.share(), MockPos(0), tip)))
         }))
     }
 
@@ -214,7 +215,7 @@ async fn hist_split_round_trips_via_marshalled_anchor() {
 #[tokio::test]
 async fn hist_iter_stops_at_end() {
     let src = MockSource::new(vec![MockEvent("a".into()), MockEvent("b".into())]);
-    let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = src.clone();
+    let backend: Arc<dyn HistBackend<MockEvent, MockPos>> = src.share();
     let h = Hist::new(backend, MockPos(0), MockPos(1));
     let items = collect(h).await;
     assert_eq!(items.len(), 1);
@@ -265,7 +266,7 @@ async fn act_and_wait_snapshot_before_op_not_after() {
     // the event. Correct behavior: anchor is captured before op.
     let src = MockSource::new(vec![MockEvent("pre".into())]);
     let hs = src.hist_store();
-    let src_for_op = src.clone();
+    let src_for_op = src.share();
 
     let (item, _) = act_and_wait(
         &hs,

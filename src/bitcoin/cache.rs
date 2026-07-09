@@ -11,6 +11,7 @@ use std::path::Path;
 use super::types::{BtcBlock, BtcBlockHash, CompactTarget};
 use crate::cache::{CacheDb, CacheError, Coverage, SharedConn, sqlite_span};
 use crate::chain::{BlockNumber, BlockRange};
+use crate::share::Share;
 
 /// `BtcBlockHash` persists as its 32 raw bytes (RPC/display order) in a
 /// `BLOB` column; `CompactTarget` as its exact `u32` bits in an `INTEGER`
@@ -76,7 +77,7 @@ impl BtcBlockCache {
     /// The shared cross-family coverage view (scanned ranges + reorg
     /// tombstones) over this cache's connection.
     pub fn coverage(&self) -> Coverage {
-        Coverage::from_conn(self.conn.clone())
+        Coverage::from_conn(self.conn.share())
     }
 
     /// Insert full blocks, replacing by height — a reorg refetch overwrites

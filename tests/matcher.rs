@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chainfold::Share;
 use chainfold::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Signal, Timestamp,
@@ -98,7 +99,7 @@ impl MockSource {
     }
 
     fn hist_store(self: &Arc<Self>) -> HistStore<Ev, MockPos> {
-        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<Ev, MockPos>>)
+        HistStore::new(self.share() as Arc<dyn HistStoreBackend<Ev, MockPos>>)
     }
 }
 
@@ -126,7 +127,7 @@ impl HistStoreBackend<Ev, MockPos> for MockSource {
         Box::pin(poll_fn(move |cx| {
             Pin::new(&mut sub)
                 .poll_next(cx)
-                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
+                .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.share(), MockPos(0), tip)))
         }))
     }
 
@@ -309,7 +310,7 @@ async fn pure_recompute_does_not_mutate_store() {
         src.hist_store(),
         dst.hist_store(),
         bridge_match_fn(),
-        store.clone() as Arc<dyn AnchorStore>,
+        store.share() as Arc<dyn AnchorStore>,
         "matcher-test",
         Timestamp::new(0),
     );

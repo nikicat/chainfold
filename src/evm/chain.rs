@@ -55,7 +55,7 @@ use crate::chain::{
 use crate::evm::cache::LogCache;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::ChainId;
-use crate::shared::Shared;
+use crate::share::Share;
 
 mod blocks;
 mod config;
@@ -120,7 +120,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
     }
 
     /// The shared durable cache.
-    pub fn cache(&self) -> &Shared<LogCache> {
+    pub fn cache(&self) -> &Arc<LogCache> {
         self.provider.log_cache()
     }
 
@@ -141,11 +141,11 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
 
     fn locator(&self) -> TimeLocator {
         TimeLocator::new(
-            self.seeder.clone(),
+            self.seeder.share(),
             Arc::new(EvmBlockTimeSource {
                 provider: self.provider.clone(),
             }),
-            self.anchor.clone(),
+            self.anchor.share(),
             self.block_time,
         )
     }

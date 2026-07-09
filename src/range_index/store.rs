@@ -35,6 +35,7 @@ use super::spec::RangeSpec;
 use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Timestamp,
 };
+use crate::share::Share;
 
 /// Wall-clock → position estimation, injected by the source. Async because
 /// the estimator may need to resolve its anchor on first use (for EVM: a
@@ -104,7 +105,7 @@ impl<S: RangeSpec> RangeIndexStore<S> {
 
     /// Wrap this store as a public [`HistStore`].
     pub fn hist_store(self: &Arc<Self>) -> HistStore<S::Event, S::PubPos> {
-        HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<S::Event, S::PubPos>>)
+        HistStore::new(self.share() as Arc<dyn HistStoreBackend<S::Event, S::PubPos>>)
     }
 
     /// The underlying [`RangeIndex`]. Wiring + tests.
@@ -214,7 +215,7 @@ impl<S: RangeSpec> HistBackend<S::Event, S::PubPos> for RangeIndexStore<S> {
         }
 
         self.index
-            .clone()
+            .share()
             .items(S::index_pos(&start), S::index_pos(&end))
     }
 }
@@ -239,7 +240,7 @@ impl<S: RangeSpec> HistStoreBackend<S::Event, S::PubPos> for RangeIndexStore<S> 
                     None => store.seeded_end(&mut rx).await,
                     Some(prev) => store.next_end_after(&mut rx, prev).await,
                 };
-                let backend: Arc<dyn HistBackend<S::Event, S::PubPos>> = store.clone();
+                let backend: Arc<dyn HistBackend<S::Event, S::PubPos>> = store.share();
                 let hist = Hist::new(backend, S::PubPos::default(), tip.clone());
                 Some((hist, (store, rx, Some(tip))))
             },
@@ -368,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn awaiting_consumer_raises_tip_demand() {
         let seed = Arc::new(BumpOnRequest::default());
-        let store = mock_store_with_seed(Some(seed.clone() as Arc<dyn TipSeed>));
+        let store = mock_store_with_seed(Some(seed.share() as Arc<dyn TipSeed>));
         let _ = seed.target.set(Arc::downgrade(&store));
 
         let hist = timeout(Duration::from_millis(100), store.next())

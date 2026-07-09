@@ -18,9 +18,9 @@
 mod common;
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use chainfold::Shared;
 use chainfold::arch::{HistStore, watch_hist};
 use chainfold::bitcoin::{
     BitcoinChain, BitcoinChainConfig, BtcAuth, BtcBlock, BtcBlockCache, BtcBlockHash, BtcRpcClient,
@@ -35,7 +35,7 @@ use tokio::time::{sleep, timeout};
 use common::bitcoind::{local, skip_no_bitcoind};
 
 fn build_chain(db_path: &Path, node: &Node, poll_interval: Duration) -> BitcoinChain {
-    let cache = Shared::new(BtcBlockCache::open(db_path).expect("open cache"));
+    let cache = Arc::new(BtcBlockCache::open(db_path).expect("open cache"));
     let url: reqwest::Url = node.rpc_url().parse().expect("node url");
     let auth = BtcAuth::Cookie(node.params.cookie_file.clone());
     let transport = TracingTransport(
@@ -139,7 +139,7 @@ async fn cold_then_warm_walk() {
 /// A chain whose endpoint points at nothing (the node is gone) — used to
 /// prove the warm path never leaves the cache.
 fn build_chain_offline(db_path: &Path) -> BitcoinChain {
-    let cache = Shared::new(BtcBlockCache::open(db_path).expect("open cache"));
+    let cache = Arc::new(BtcBlockCache::open(db_path).expect("open cache"));
     let url: reqwest::Url = "http://127.0.0.1:1".parse().expect("url");
     let transport = TracingTransport(
         ReqwestTransport::new(reqwest::Client::new(), url, &BtcAuth::None).expect("no cookie io"),

@@ -16,6 +16,7 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, B256, U256};
@@ -23,7 +24,6 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
 
-use chainfold::Shared;
 use chainfold::cache::ScanPartition;
 use chainfold::evm::{
     ChainProvider, EvmChain, EvmChainConfig, LogCache, LogFilter, SubscribeTransport, Topic,
@@ -79,7 +79,7 @@ async fn live_event_latency_ws() {
         .await
         .expect("ws connect");
     let (_tmp, db_path) = temp_db();
-    let cache = Shared::new(LogCache::open(&db_path).expect("LogCache::open"));
+    let cache = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
     let provider = ChainProvider::discover(provider, cache)
         .await
         .expect("discover chain id");
@@ -156,7 +156,7 @@ async fn poll_drain_populates_scanned_ranges() {
     };
 
     let (_tmp, db_path) = temp_db();
-    let cache = Shared::new(LogCache::open(&db_path).expect("LogCache::open"));
+    let cache = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
     let provider = ChainProvider::discover(
         ProviderBuilder::new().connect_http(anvil.endpoint_url()),
         cache,
@@ -215,7 +215,7 @@ async fn resume_seeds_from_current_tip() {
     };
 
     let (_tmp, db_path) = temp_db();
-    let cache = Shared::new(LogCache::open(&db_path).expect("LogCache::open"));
+    let cache = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
     let provider = ChainProvider::discover(
         ProviderBuilder::new().connect_http(anvil.endpoint_url()),
         cache,

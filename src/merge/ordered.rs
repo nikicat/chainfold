@@ -11,6 +11,7 @@ use crate::arch::{
     Hist, HistBackend, HistStore, HistStoreBackend, HistStream, HistoryError, ItemStream, Position,
     Positioned, Subscription, Timestamp,
 };
+use crate::share::Share;
 
 use super::kway::{MergeStream, take_first_error};
 use super::types::{MergedItem, SourceKey, Sources, TaggedEnd};
@@ -55,7 +56,7 @@ where
     P: Position,
 {
     let backend: Arc<dyn HistBackend<MergedItem<T, P>, P>> = Arc::new(OrderedHistBackend {
-        sources: sources.clone(),
+        sources: sources.share(),
     });
     Hist::new(backend, P::default(), end)
 }
@@ -158,7 +159,7 @@ where
     P: Position,
 {
     fn snapshots(&self) -> HistStream<MergedItem<T, P>, P> {
-        let sources = self.sources.clone();
+        let sources = self.sources.share();
         let tagged: Vec<Subscription<TaggedEnd<P>>> = sources
             .iter()
             .map(|(k, s)| {
@@ -218,7 +219,7 @@ where
     fn iter(&self, start: P, end: P) -> ItemStream<MergedItem<T, P>, P> {
         Box::pin(unfold(
             OrderedIterState::Init {
-                sources: self.sources.clone(),
+                sources: self.sources.share(),
                 start,
                 end,
             },

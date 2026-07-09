@@ -20,6 +20,7 @@ use crate::arch::Timestamp;
 use crate::cache::{CacheDb, CacheError, Coverage, FilterHash, SharedConn, sqlite_span};
 use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::types::{BlockHash, EvmBlock, LogIdx, Topic};
+use crate::share::Share;
 
 // ============================================================
 // Helpers
@@ -91,7 +92,7 @@ impl LogCache {
     /// The shared cross-family coverage view (scanned ranges + reorg
     /// tombstones) over this cache's connection.
     pub fn coverage(&self) -> Coverage {
-        Coverage::from_conn(self.conn.clone())
+        Coverage::from_conn(self.conn.share())
     }
 
     // --------------------------------------------------------

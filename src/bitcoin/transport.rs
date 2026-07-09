@@ -196,6 +196,7 @@ mod tests {
 
     use super::*;
     use crate::observe::RPC_TARGET;
+    use crate::share::Share;
 
     /// One rpc span the decorator emitted: its target and `method`/`reqs`
     /// fields (the same capture shape as the EVM transport tests).
@@ -291,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn single_request_spans_method_and_one_req() {
         let capture = Capture::default();
-        let spans = capture.0.clone();
+        let spans = capture.0.share();
         let subscriber = tracing_subscriber::registry().with(capture);
         with_default(subscriber, || {
             let t = TracingTransport(Echo);
@@ -312,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn homogeneous_batch_spans_shared_method_and_count() {
         let capture = Capture::default();
-        let spans = capture.0.clone();
+        let spans = capture.0.share();
         let subscriber = tracing_subscriber::registry().with(capture);
         with_default(subscriber, || {
             let t = TracingTransport(Echo);
@@ -334,7 +335,7 @@ mod tests {
     #[tokio::test]
     async fn mixed_batch_spans_batch_label() {
         let capture = Capture::default();
-        let spans = capture.0.clone();
+        let spans = capture.0.share();
         let subscriber = tracing_subscriber::registry().with(capture);
         with_default(subscriber, || {
             let t = TracingTransport(Echo);

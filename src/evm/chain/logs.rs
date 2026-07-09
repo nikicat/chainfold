@@ -42,6 +42,7 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx, Topic};
 use crate::evm::{LogPage, LogSpec};
 use crate::range_index::{Fetcher, RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed};
+use crate::share::Share;
 
 // ============================================================
 // LogFilter
@@ -106,7 +107,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
     pub fn logs(&self, filter: &LogFilter, tier: Finality) -> HistStore<EvmEvent, EvmPosition> {
         let _ = tier; // Latest-only until Phase 7.
 
-        let store = self.log_store(filter, Some(self.seeder.clone() as Arc<dyn TipSeed>));
+        let store = self.log_store(filter, Some(self.seeder.share() as Arc<dyn TipSeed>));
 
         let head_rx = self.seeder.head().subscribe();
         let wiring = match &self.transport {
@@ -463,7 +464,6 @@ mod tests {
     use crate::cache::ScanPartition;
     use crate::evm::cache::{LogCache, compute_filter_hash};
     use crate::evm::types::{BlockHash, LogIdx};
-    use crate::shared::Shared;
 
     fn log_store<P>(chain: &EvmChain<P>) -> HistStore<EvmEvent, EvmPosition>
     where
@@ -550,7 +550,7 @@ mod tests {
     async fn iter_uses_log_block_timestamp_without_header_fetch() {
         use super::super::testkit::{BH_0, BH_200, GENESIS, insert_header, make_log};
 
-        let cache = Shared::new(LogCache::open_in_memory().unwrap());
+        let cache = Arc::new(LogCache::open_in_memory().unwrap());
         let fh = compute_filter_hash(&ADDR, &super::super::testkit::TOPICS);
         insert_header(&cache, BlockNumber::ZERO, BH_0, GENESIS);
         insert_header(&cache, HEAD, BH_200, ts(2400));

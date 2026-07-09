@@ -89,6 +89,7 @@ mod tests {
     use super::*;
     use crate::combinators::mapped::map_hist_store;
     use crate::combinators::tests_common::{MockEvent, MockPos, MockSource, collect};
+    use crate::share::Share;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
@@ -120,7 +121,7 @@ mod tests {
             MockEvent("d".into()),
         ]);
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
+        let counter_clone = counter.share();
         let mapped = map_hist_store(src.hist_store(), move |e: &MockEvent| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             e.0.to_uppercase()

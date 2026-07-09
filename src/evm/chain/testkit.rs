@@ -26,7 +26,6 @@ use crate::evm::chain_provider::ChainProvider;
 use crate::evm::transport::RpcTimingLayer;
 use crate::evm::types::{BlockHash, ChainId, EvmBlock, Gas, GasPrice, LogIdx, Topic};
 use crate::observe::RPC_TARGET;
-use crate::shared::Shared;
 
 pub(super) const ADDR: Address = Address::repeat_byte(0x42);
 pub(super) const TOPICS: [Option<Topic>; 4] = [None; 4];
@@ -81,8 +80,8 @@ pub(super) fn insert_header(
 
 /// Warm log cache: three logs in blocks 100/101, headers for the anchor
 /// blocks, full `[0, HEAD]` scan coverage.
-pub(super) fn warm_cache() -> (Shared<LogCache>, FilterHash) {
-    let cache = Shared::new(LogCache::open_in_memory().unwrap());
+pub(super) fn warm_cache() -> (Arc<LogCache>, FilterHash) {
+    let cache = Arc::new(LogCache::open_in_memory().unwrap());
     let fh = compute_filter_hash(&ADDR, &TOPICS);
 
     // Dense headers on the 12 s cadence: the time locator's search probes
@@ -132,8 +131,8 @@ pub(super) fn test_block(n: u64) -> EvmBlock {
 
 /// Warm cache for the blocks source: anchor headers + dense `[0, HEAD]`
 /// block coverage under the blocks partition.
-pub(super) fn warm_blocks_cache() -> Shared<LogCache> {
-    let cache = Shared::new(LogCache::open_in_memory().unwrap());
+pub(super) fn warm_blocks_cache() -> Arc<LogCache> {
+    let cache = Arc::new(LogCache::open_in_memory().unwrap());
     insert_header(&cache, BlockNumber::ZERO, BH_0, GENESIS);
     insert_header(&cache, HEAD, BH_200, ts(2400));
 
@@ -157,7 +156,7 @@ pub(super) fn warm_blocks_cache() -> Shared<LogCache> {
 /// answers of [`HEAD`]. Construction itself is offline; the queue is
 /// consumed by whatever first demands the head (the clock's first poll).
 pub(super) fn chain_with_queued_heads(
-    cache: Shared<LogCache>,
+    cache: Arc<LogCache>,
     responses: usize,
 ) -> EvmChain<impl Provider<Ethereum> + Clone + 'static> {
     let asserter = Asserter::new();
@@ -184,7 +183,7 @@ pub(super) fn chain_with_queued_heads(
 /// The standard test chain: one queued head answer for the single
 /// expected demand.
 pub(super) fn make_chain(
-    cache: Shared<LogCache>,
+    cache: Arc<LogCache>,
 ) -> EvmChain<impl Provider<Ethereum> + Clone + 'static> {
     chain_with_queued_heads(cache, 1)
 }
@@ -192,7 +191,7 @@ pub(super) fn make_chain(
 /// A chain whose mock provider has NO responses queued: any RPC — head
 /// demand included — fails loudly. Pins fully-offline paths.
 pub(super) fn offline_chain(
-    cache: Shared<LogCache>,
+    cache: Arc<LogCache>,
 ) -> EvmChain<impl Provider<Ethereum> + Clone + 'static> {
     chain_with_queued_heads(cache, 0)
 }

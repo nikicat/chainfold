@@ -29,7 +29,6 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::Shared;
 use chainfold::arch::{HistStore, Timestamp, watch_hist};
 use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::ChunkSize;
@@ -43,6 +42,7 @@ use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -262,7 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache_db = CacheDb::open(&db_path)?;
     // Per-concern views over the one shared cache connection.
     let erc20_cache = cache_db.erc20();
-    let log_cache = Shared::new(cache_db.logs());
+    let log_cache = Arc::new(cache_db.logs());
 
     let provider =
         ChainProvider::discover(ProviderBuilder::new().connect_client(client), log_cache).await?;

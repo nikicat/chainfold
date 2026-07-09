@@ -221,7 +221,7 @@ lib.rs                     pub mod {arch, cache, chain, combinators, matcher, me
 ├─ combinators/            mapped.rs · map_pos.rs · filtered.rs · since.rs
 ├─ merge/                  ordered.rs (merge_hist_stores, plain-P anchors) · interleave.rs (interleave_hist_stores · MergedPos) · types.rs · kway.rs
 ├─ matcher/                matcher.rs + anchor_store_sqlite.rs
-├─ shared.rs               Shared<T> — Arc newtype; .share() names the refcount bump
+├─ share.rs                Share — Arc extension trait; .share() names the refcount bump
 ├─ signatures.rs           event-name → signature/topic0 resolution
 ├─ evm/                    ← cfg(feature = "evm")
 │  ├─ types.rs             EvmEvent · EvmPosition · ChainId · Topic · BlockHash/TxHash · LogIdx · Gas · …
@@ -850,7 +850,7 @@ The concrete client for EVM log streams (`feature = "evm"`).
 | **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session. Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
-| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Shared<LogCache>`**. Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
+| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Arc<LogCache>`**. Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
 | **`aligned_block_ranges`** | Snaps RPC ranges to `batch_size` boundaries so concurrent consumers hit the same cache entries. |
 
 **Position bridging:** `EvmPosition(0, 0)` ↔ `BlockPos::Bottom`; otherwise
@@ -1178,7 +1178,7 @@ flowchart LR
 
 ## 14. Ownership & lifetime
 
-Every cancellable thing is owned by either an `Arc`/`Shared` handle (shared)
+Every cancellable thing is owned by either an `Arc` handle (shared)
 or an `AbortOnDropHandle` (single-owner; drop aborts — R7). **No raw
 `tokio::spawn` survives its owning struct.** Background tasks hold only
 `Weak` back-references to the store that owns them, so there is no
@@ -1197,7 +1197,7 @@ flowchart LR
         DrainTask["RangeIndex drain task"]
     end
     subgraph SHARED["Shared handles"]
-        CacheA["Shared&lt;LogCache&gt; (SQLite conn)"]
+        CacheA["Arc&lt;LogCache&gt; (SQLite conn)"]
         IdxA["Arc&lt;RangeIndex&gt; (per filter_hash)"]
     end
 

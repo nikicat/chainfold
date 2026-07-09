@@ -25,7 +25,7 @@
 //! `root()` — so code generic over `Provider` accepts it unchanged.
 //!
 //! Cloning is cheap by contract: alloy providers are `Arc`-backed, and the
-//! bundled resources are [`Shared`].
+//! bundled resources are `Arc`s.
 //!
 //! [`get_block_number`]: ChainProvider::get_block_number
 //! [`get_logs`]: ChainProvider::get_logs
@@ -45,7 +45,7 @@ use crate::chain::BlockNumber;
 use crate::evm::cache::{BlockHeader, LogCache};
 use crate::evm::types::{BlockHash, ChainId};
 use crate::observe::{CacheLayer, CacheOutcome, cache_event};
-use crate::shared::Shared;
+use crate::share::Share;
 
 /// A provider paired with the chain id it serves and the chain's durable
 /// cache.
@@ -53,13 +53,13 @@ use crate::shared::Shared;
 pub struct ChainProvider<P> {
     inner: P,
     chain_id: ChainId,
-    headers: Shared<HeaderSingleflight>,
+    headers: Arc<HeaderSingleflight>,
 }
 
 /// Per-chain header-ensure state: the cache handle plus one gate per
 /// in-flight block fetch. Shared across every clone of the provider.
 struct HeaderSingleflight {
-    store: Shared<LogCache>,
+    store: Arc<LogCache>,
     inflight: Mutex<HashMap<BlockNumber, Arc<AsyncMutex<()>>>>,
 }
 
@@ -76,7 +76,7 @@ impl HeaderSingleflight {
             .unwrap()
             .entry(block)
             .or_default()
-            .clone()
+            .share()
     }
 
     fn ungate(&self, block: BlockNumber) {
@@ -87,11 +87,11 @@ impl HeaderSingleflight {
 impl<P> ChainProvider<P> {
     /// Wrap a provider whose chain id is already known (e.g. resolved from
     /// CLI args or a config). No RPC.
-    pub fn new(inner: P, chain_id: ChainId, cache: Shared<LogCache>) -> Self {
+    pub fn new(inner: P, chain_id: ChainId, cache: Arc<LogCache>) -> Self {
         Self {
             inner,
             chain_id,
-            headers: Shared::new(HeaderSingleflight {
+            headers: Arc::new(HeaderSingleflight {
                 store: cache,
                 inflight: Mutex::new(HashMap::new()),
             }),
@@ -109,7 +109,7 @@ impl<P> ChainProvider<P> {
     }
 
     /// The chain's durable cache.
-    pub fn log_cache(&self) -> &Shared<LogCache> {
+    pub fn log_cache(&self) -> &Arc<LogCache> {
         &self.headers.store
     }
 }
@@ -118,7 +118,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
     /// Discover the chain id from the provider (one `eth_chainId` call) and
     /// wrap it. Use when the caller has a bare provider and doesn't already
     /// know its chain.
-    pub async fn discover(inner: P, cache: Shared<LogCache>) -> Result<Self, HistoryError> {
+    pub async fn discover(inner: P, cache: Arc<LogCache>) -> Result<Self, HistoryError> {
         let chain_id = inner
             .get_chain_id()
             .await

@@ -51,6 +51,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use tokio::sync::Mutex;
 
 use crate::arch::{Hist, HistStore, HistoryError, Position, Positioned, Timestamp};
+use crate::share::Share;
 
 mod anchor_store_sqlite;
 pub use anchor_store_sqlite::SqliteAnchorStore;
@@ -496,7 +497,7 @@ where
     /// `Hist` that triggered it against the currently-cached anchors; consumers
     /// advance via [`set_anchors`](Self::set_anchors).
     pub fn iter(self: &Arc<Self>) -> MatcherStateStream<Src, Dst, Output, SP, DP> {
-        let matcher = self.clone();
+        let matcher = self.share();
         let src_snaps = matcher.base.src_store.snapshots();
         let dst_snaps = matcher.base.dst_store.snapshots();
         Box::pin(unfold(
@@ -641,7 +642,7 @@ mod tests {
         }
 
         fn hist_store(self: &Arc<Self>) -> HistStore<Ev, MockPos> {
-            HistStore::new(Arc::clone(self) as Arc<dyn HistStoreBackend<Ev, MockPos>>)
+            HistStore::new(self.share() as Arc<dyn HistStoreBackend<Ev, MockPos>>)
         }
     }
 
@@ -669,7 +670,7 @@ mod tests {
             Box::pin(poll_fn(move |cx| {
                 StdPin::new(&mut sub)
                     .poll_next(cx)
-                    .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.clone(), MockPos(0), tip)))
+                    .map(|tip_opt| tip_opt.map(|tip| Hist::new(backend.share(), MockPos(0), tip)))
             }))
         }
 
@@ -812,7 +813,7 @@ mod tests {
             src.hist_store(),
             dst.hist_store(),
             bridge_match_fn(),
-            store.clone() as Arc<dyn AnchorStore>,
+            store.share() as Arc<dyn AnchorStore>,
             key,
             Timestamp::new(0),
         );
@@ -855,7 +856,7 @@ mod tests {
             src.hist_store(),
             dst.hist_store(),
             bridge_match_fn(),
-            store.clone() as Arc<dyn AnchorStore>,
+            store.share() as Arc<dyn AnchorStore>,
             "k",
             Timestamp::new(0),
         );

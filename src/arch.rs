@@ -27,6 +27,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::share::Share;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use futures_util::stream::unfold;
@@ -232,7 +233,7 @@ pub struct Hist<T, P: Position> {
 impl<T, P: Position> Clone for Hist<T, P> {
     fn clone(&self) -> Self {
         Self {
-            backend: self.backend.clone(),
+            backend: self.backend.share(),
             start: self.start.clone(),
             end: self.end.clone(),
         }
@@ -295,12 +296,12 @@ impl<T: Send + Sync + 'static, P: Position> Hist<T, P> {
     pub fn split(&self, p: P) -> (Self, Self) {
         let clamped = self.backend.clamp_pos(p, &self.start, &self.end);
         let head = Self {
-            backend: self.backend.clone(),
+            backend: self.backend.share(),
             start: self.start.clone(),
             end: clamped.clone(),
         };
         let tail = Self {
-            backend: self.backend.clone(),
+            backend: self.backend.share(),
             start: clamped,
             end: self.end.clone(),
         };
@@ -325,7 +326,7 @@ pub struct HistStore<T, P: Position> {
 impl<T, P: Position> Clone for HistStore<T, P> {
     fn clone(&self) -> Self {
         Self {
-            backend: self.backend.clone(),
+            backend: self.backend.share(),
         }
     }
 }

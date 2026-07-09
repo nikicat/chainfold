@@ -25,7 +25,6 @@ use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
-use chainfold::Shared;
 use chainfold::arch::HistStore;
 use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::{ChunkSize, Finality};
@@ -36,6 +35,7 @@ use chainfold::evm::{
 use chainfold::merge::{MergedItem, MergedPos, SourceKey, interleave_hist_stores};
 use clap::Parser;
 use futures_util::StreamExt;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let provider = ChainProvider::discover(
             ProviderBuilder::new().connect_client(client),
-            Shared::new(cache_db.logs()),
+            Arc::new(cache_db.logs()),
         )
         .await?;
 
