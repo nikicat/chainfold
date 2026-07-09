@@ -23,8 +23,9 @@ use super::*;
 use crate::arch::Timestamp;
 use crate::cache::{FilterHash, ScanPartition};
 use crate::chain::BlockNumber;
-use crate::evm::cache::LogCache;
-use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx};
+use crate::evm::{
+    BlockHash, BlockPos, EvmEvent, EvmPosition, LogCache, LogIdx, LogPage, LogRef, LogSpec,
+};
 use crate::shared::Shared;
 
 const FH: FilterHash = FilterHash::new([0xAA; 32]);

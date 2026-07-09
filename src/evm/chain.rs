@@ -15,7 +15,7 @@
 //!
 //! Every head the **ws** clock publishes has its block header persisted to
 //! the cache *before* the head event goes out — the headers-present
-//! invariant that lets [`LogSpec::resolve`](super::range_index::LogSpec)
+//! invariant that lets [`LogSpec::resolve`](super::LogSpec)
 //! fill push-delivered timestamps synchronously. Poll heads carry no
 //! header claim: in poll mode every log arrives through the fetcher, which
 //! ensures its own headers.
@@ -50,8 +50,8 @@ use crate::arch::{HistoryError, Timestamp};
 use crate::chain::{BlockNumber, ChunkSize};
 use crate::evm::cache::LogCache;
 use crate::evm::chain_provider::ChainProvider;
-use crate::evm::range_index::TipSeed;
 use crate::evm::types::ChainId;
+use crate::range_index::TipSeed;
 use crate::shared::Shared;
 
 mod blocks;

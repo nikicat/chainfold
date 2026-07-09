@@ -13,12 +13,12 @@
 //! [`persist`](RangeSpec::persist).
 
 use super::block_pos::BlockPos;
-use super::spec::{IndexPos, LoadedSpan, RangeSpec};
 use crate::arch::{HistoryError, Positioned};
 use crate::cache::ScanPartition;
 use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::cache::LogCache;
 use crate::evm::types::{BlockHash, EvmBlock};
+use crate::range_index::{IndexPos, LoadedSpan, RangeSpec};
 use crate::shared::Shared;
 
 /// [`RangeSpec`] for the chain's block history over a [`LogCache`].
@@ -146,12 +146,11 @@ impl RangeSpec for BlockSpec {
 mod tests {
     use futures_util::StreamExt;
 
-    use super::super::gap_fill::never_fetch;
-    use super::super::{Fetcher, RangeIndex};
     use super::*;
     use crate::arch::{Position, Timestamp};
     use crate::chain::{ChunkSize, TxCount};
     use crate::evm::types::{Gas, GasPrice};
+    use crate::range_index::{Fetcher, RangeIndex, never_fetch};
     use alloy::primitives::{Address, B256, U256};
 
     const fn bn(n: u64) -> BlockNumber {

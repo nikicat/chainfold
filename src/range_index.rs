@@ -1,4 +1,4 @@
-//! Generic in-memory range tree over EVM range-based sources (logs, blocks).
+//! Generic in-memory range tree over height-organized range sources.
 //!
 //! A `BTreeMap` keyed by the *end* position of each [`Range`], with
 //! singleflight + late-item handling, generic over a [`RangeSpec`]. The tree
@@ -13,12 +13,13 @@
 //!
 //! Split across submodules:
 //! - [`spec`] — the source-injected [`RangeSpec`]/[`IndexPos`] seam + [`Fetcher`].
-//! - [`block_pos`] — the concrete EVM-log position/pointer types
-//!   ([`BlockPos`], [`LogRef`], [`LogPage`]).
 //! - [`range_tree`] — the [`Range`] entry type, page insertion (four late-item
 //!   cases), the lazy load of scanned ranges, and the gap placeholder.
 //! - [`gap_fill`] — [`RangeIndex::ensure_cached`], the [`RangeIndex::items`]
 //!   async stream, and the fetcher-driven singleflight.
+//!
+//! The concrete specs live with their sources (`crate::evm`'s `LogSpec` /
+//! `BlockSpec`, …).
 //!
 //! This file owns the [`RangeIndex`] struct itself, its constructors and
 //! accessors, [`RangeIndex::resolve`], and the async drain to the durable store.
@@ -30,19 +31,18 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::arch::{HistoryError, Positioned};
 
-mod block_pos;
-mod block_spec;
 mod gap_fill;
-mod log_spec;
 mod range_tree;
 mod spec;
 mod store;
 
-pub use block_pos::{BlockPos, LogPage, LogRef};
-pub use block_spec::{BlockPage, BlockSpec};
-pub use log_spec::LogSpec;
 pub use spec::{Fetcher, IndexPos, LoadedSpan, RangeSpec};
 pub use store::{RangeIndexStore, TimePos, TipSeed};
+
+/// Test-only fetcher that panics on any gap fill — re-exported for the
+/// concrete specs' warm-walk tests, which live with their sources.
+#[cfg(test)]
+pub(crate) use gap_fill::never_fetch;
 
 use crate::chain::{BlockRange, ChunkSize};
 use range_tree::Range;
@@ -93,13 +93,13 @@ impl<S: RangeSpec> RangeIndex<S> {
     }
 
     /// The spec this index delegates storage/resolution to.
-    pub(super) fn spec(&self) -> &S {
+    pub(crate) fn spec(&self) -> &S {
         &self.spec
     }
 
     /// Resolve a stored [`Item`](RangeSpec::Item) to the public positioned
     /// value — delegates to [`RangeSpec::resolve`] (synchronous cache read).
-    pub(super) fn resolve(
+    pub(crate) fn resolve(
         &self,
         item: &S::Item,
     ) -> Result<Positioned<S::Event, S::PubPos>, HistoryError> {
@@ -153,5 +153,8 @@ impl<S: RangeSpec> RangeIndex<S> {
     }
 }
 
-#[cfg(test)]
+// The tests exercise the tree through the concrete EVM specs (LogSpec /
+// BlockSpec) — synthetic-spec fixtures are a TODO — so they need the evm
+// feature.
+#[cfg(all(test, feature = "evm"))]
 mod tests;

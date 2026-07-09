@@ -266,18 +266,20 @@ impl<S: RangeSpec> HistStoreBackend<S::Event, S::PubPos> for RangeIndexStore<S> 
 // Tests
 // ============================================================
 
-#[cfg(test)]
+// Exercises the store through the concrete EVM BlockSpec — see the note on
+// `range_index::tests` about synthetic-spec fixtures.
+#[cfg(all(test, feature = "evm"))]
 mod tests {
     use std::time::Duration;
 
     use futures_util::StreamExt;
     use tokio::time::timeout;
 
+    use super::super::RangeIndex;
     use super::super::gap_fill::never_fetch;
-    use super::super::{BlockSpec, RangeIndex};
     use super::*;
     use crate::chain::BlockNumber;
-    use crate::evm::cache::LogCache;
+    use crate::evm::{BlockSpec, LogCache};
     use crate::shared::Shared;
 
     /// Fixed-position estimator for tests that never exercise `time_pos`.

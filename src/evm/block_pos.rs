@@ -4,7 +4,7 @@
 //! lightweight pointer the tree stores in lieu of full `Log`s; [`LogPage`]
 //! is the unit of input to page insertion and gap fills.
 //!
-//! [`BlockPos`] implements [`IndexPos`](super::spec::IndexPos) so a
+//! [`BlockPos`] implements [`IndexPos`](crate::range_index::IndexPos) so a
 //! [`RangeIndex<LogSpec>`](super::RangeIndex) can map a position-gap back to
 //! the inclusive block range an `eth_getLogs` fetch needs.
 
@@ -12,6 +12,7 @@ use alloy::rpc::types::Log;
 
 use crate::chain::{BlockNumber, BlockRange};
 use crate::evm::types::{BlockHash, LogIdx};
+use crate::range_index::IndexPos;
 
 // ============================================================
 // BlockPos — position type for the tree
@@ -49,7 +50,7 @@ impl BlockPos {
     }
 }
 
-impl super::spec::IndexPos for BlockPos {
+impl IndexPos for BlockPos {
     fn bottom() -> Self {
         BlockPos::Bottom
     }

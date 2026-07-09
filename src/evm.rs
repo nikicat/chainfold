@@ -15,12 +15,14 @@
 //! Requires the `evm` feature flag.
 
 mod aligned_ranges;
+mod block_pos;
+mod block_spec;
 mod cache;
 mod chain;
 mod chain_provider;
 pub mod erc20;
+mod log_spec;
 mod owned_erc20;
-mod range_index;
 mod transport;
 mod types;
 
@@ -30,6 +32,8 @@ pub use types::{
     EvmBlock, EvmEvent, EvmPosition, Gas, GasPrice, LogIdx, Topic, TxHash,
 };
 
+pub use block_pos::{BlockPos, LogPage, LogRef};
+pub use block_spec::{BlockPage, BlockSpec};
 pub use cache::{
     BlockHeader, CachedErc20Metadata, Erc20Cache, EventSignatureCache, EventSignatureRow, LogCache,
     compute_filter_hash,
@@ -43,9 +47,6 @@ pub use erc20::{
     Erc20Metadata, TRANSFER_TOPIC, TransferData, apply_transfer, decode_transfer,
     fetch_erc20_metadata,
 };
+pub use log_spec::LogSpec;
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
-pub use range_index::{
-    BlockPage, BlockPos, BlockSpec, Fetcher, IndexPos, LoadedSpan, LogPage, LogRef, LogSpec,
-    RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed,
-};
 pub use transport::{RpcTimingLayer, rpc_retry_layer};
