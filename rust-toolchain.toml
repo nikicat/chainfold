@@ -1,0 +1,9 @@
+# Single source of truth for the Rust toolchain, local and CI alike —
+# rustup resolves every cargo invocation in this repo through it, and CI's
+# `rustup toolchain install` steps read it. Pin a concrete version, not
+# "stable": new stables ship new clippy lints, and with CI's -D warnings
+# that breakage should land when this file is bumped, not on whoever
+# pushes next. llvm-tools-preview is for cargo-llvm-cov (`just coverage`).
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

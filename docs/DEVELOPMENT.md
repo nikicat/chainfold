@@ -52,16 +52,19 @@ cargo test --all-features --locked
 
 CI (`.github/workflows/ci.yml`) runs the same, plus a parallel coverage job.
 
-**CI is version-pinned.** The Rust toolchain (`RUST_TOOLCHAIN` env at the top
-of `ci.yml`), the Arch container image (digest), and every action (commit
-SHA, `# vX.Y.Z` comment alongside) are pinned so CI only moves when the
-workflow file is edited — a new stable's clippy lints land when *you* bump,
-not on whoever pushes next. To bump: update `RUST_TOOLCHAIN` (and match your
-local `rustup update stable`), re-resolve the image digest
-(`docker manifest inspect archlinux:latest` or the registry API), and take
-new action SHAs from each repo's tags. The one still-rolling input is
-`pacman -Syu` inside the container (taplo/actionlint/yamllint/just); pin the
-mirror to an `archive.archlinux.org` date snapshot if that ever bites.
+**Everything is version-pinned.** The Rust toolchain is pinned in
+`rust-toolchain.toml` (channel + components) — rustup resolves local builds
+and both CI jobs through it, so local and CI stay in lockstep by
+construction; bumping it is a one-line edit (rustup auto-installs the new
+version on the next `cargo` invocation). In `ci.yml`, the Arch container
+image (digest) and every action (commit SHA, `# vX.Y.Z` comment alongside)
+are pinned so CI only moves when a pin is bumped — a new stable's clippy
+lints land when *you* bump, not on whoever pushes next. To bump those:
+re-resolve the image digest (`docker manifest inspect archlinux:latest` or
+the registry API) and take new action SHAs from each repo's tags. The one
+still-rolling input is `pacman -Syu` inside the container
+(taplo/actionlint/yamllint/just); pin the mirror to an
+`archive.archlinux.org` date snapshot if that ever bites.
 
 **Pushing workflow changes:** a `gh`-authenticated push touching
 `.github/workflows/*` needs the `workflow` OAuth scope — the default `repo`

@@ -8,11 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # Rolling inputs are pinned so CI only moves when this file is edited:
-  # the Rust toolchain here, the container image and actions by hash below.
-  # New stables ship new clippy lints (with -D warnings, breakage lands on
-  # whoever pushes next) — bump this deliberately instead.
-  RUST_TOOLCHAIN: 1.97.0
+
+# Every rolling input is pinned so CI only moves when a pin is bumped:
+# the Rust toolchain in rust-toolchain.toml (shared with local dev), the
+# container image and the actions by hash here.
 
 jobs:
   ci:
@@ -30,10 +29,13 @@ jobs:
           pacman -Syu --noconfirm --needed \
             base-devel git pkgconf pacman rustup taplo-cli \
             actionlint yamllint shellcheck just
-          rustup default "$RUST_TOOLCHAIN"
-          rustup component add rustfmt clippy
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Install Rust toolchain
+        # Reads rust-toolchain.toml (channel + components) — must run after
+        # checkout, and before rust-cache probes `rustc -vV`.
+        run: rustup toolchain install
 
       - name: Cache cargo registry and target
         # rust-cache prunes before saving (drops workspace-own artifacts,
@@ -86,13 +88,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Install Rust toolchain
-        # Pinned to a master commit; the toolchain is selected via the
-        # input (the usual @stable ref would both float the action and
-        # float the toolchain).
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88  # master 2026-07
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: llvm-tools-preview
+        # The runner ships rustup; this reads rust-toolchain.toml (channel +
+        # components, incl. llvm-tools-preview for cargo-llvm-cov).
+        run: rustup toolchain install
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb  # v2.83.0
