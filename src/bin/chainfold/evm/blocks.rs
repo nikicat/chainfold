@@ -70,10 +70,12 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         }
         let store = chain.blocks(Finality::Latest);
         // Only the stream's start matters when following.
-        let from = match window_sel(evm_args)? {
+        let from = match window_sel(&evm_args.window)? {
             WindowSel::Blocks { from_block, .. } => from_block,
             WindowSel::Dates { from, to } => {
-                estimate_date_range(chain, evm_args, from, to).await?.from
+                estimate_date_range(chain, &evm_args.window, from, to)
+                    .await?
+                    .from
             }
             WindowSel::Unspecified { num_blocks } => {
                 // Last N ending at the tip: awaiting the first snapshot
@@ -99,13 +101,13 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     // hists — head-free, fully offline when the cache is warm. Only the
     // unspecified "last N blocks" inherently needs the head: it slices the
     // tail off a snapshot of the reactive store.
-    let hist: Hist<EvmBlock, BlockNumber> = match window_sel(evm_args)? {
+    let hist: Hist<EvmBlock, BlockNumber> = match window_sel(&evm_args.window)? {
         WindowSel::Blocks {
             from_block,
             num_blocks,
         } => chain.blocks_hist(inclusive_range(from_block, num_blocks)),
         WindowSel::Dates { from, to } => {
-            chain.blocks_hist(estimate_date_range(chain, evm_args, from, to).await?)
+            chain.blocks_hist(estimate_date_range(chain, &evm_args.window, from, to).await?)
         }
         WindowSel::Unspecified { num_blocks } => {
             let hist = chain.blocks(Finality::Latest).next().await;
@@ -126,7 +128,7 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let items: Vec<Positioned<EvmBlock, BlockNumber>> = hist.iter().try_collect().await?;
 
     let total = items.len();
-    let shown = total.min(evm_args.limit);
+    let shown = total.min(evm_args.window.limit);
     match direction {
         // Newest-first, keeping the newest `--limit` blocks.
         Direction::Backward => {

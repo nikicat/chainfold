@@ -76,6 +76,8 @@ pub enum Command {
     },
     /// EVM chain commands
     Evm(EvmArgs),
+    /// Bitcoin chain commands (bitcoind JSON-RPC)
+    Bitcoin(BitcoinArgs),
     /// Local `SQLite` cache management
     Cache(CacheArgs),
 }
@@ -171,25 +173,8 @@ pub struct EvmArgs {
     #[arg(long, default_value = "1000")]
     pub chunk_size: u64,
 
-    /// Start date, UTC (e.g. 2025-01-15 or 2025-01-15T12:00:00)
-    #[arg(long, value_name = "DATE")]
-    pub from: Option<String>,
-
-    /// End date, UTC (e.g. 2025-01-16 or 2025-01-16T12:00:00)
-    #[arg(long, value_name = "DATE")]
-    pub to: Option<String>,
-
-    /// Starting block number
-    #[arg(long)]
-    pub from_block: Option<u64>,
-
-    /// Number of blocks to scan (used with --from-block)
-    #[arg(long, default_value = "100")]
-    pub num_blocks: u64,
-
-    /// Max events to print
-    #[arg(long, default_value = "20")]
-    pub limit: usize,
+    #[command(flatten)]
+    pub window: WindowArgs,
 
     /// Navigate backwards instead of forwards. `global` here scopes the flag
     /// to the `evm` subtree — direction means nothing to `chains`/`config`.
@@ -291,4 +276,104 @@ pub enum Erc20Command {
     Transfers,
     /// Show ERC20 transfers with running balance column
     Balances,
+}
+
+/// The chain-agnostic window/limit flags, shared by every chain family's
+/// subtree (flattened into [`EvmArgs`] and [`BitcoinArgs`]).
+#[derive(Parser)]
+pub struct WindowArgs {
+    /// Start date, UTC (e.g. 2025-01-15 or 2025-01-15T12:00:00)
+    #[arg(long, value_name = "DATE")]
+    pub from: Option<String>,
+
+    /// End date, UTC (e.g. 2025-01-16 or 2025-01-16T12:00:00)
+    #[arg(long, value_name = "DATE")]
+    pub to: Option<String>,
+
+    /// Starting block number
+    #[arg(long)]
+    pub from_block: Option<u64>,
+
+    /// Number of blocks to scan (used with --from-block)
+    #[arg(long, default_value = "100")]
+    pub num_blocks: u64,
+
+    /// Max rows to print
+    #[arg(long, default_value = "20")]
+    pub limit: usize,
+}
+
+#[derive(Parser)]
+pub struct BitcoinArgs {
+    /// bitcoind JSON-RPC endpoint URL. Overrides the config `[bitcoin]`
+    /// `rpc_url` (default `http://127.0.0.1:8332`).
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+
+    /// Core cookie file for RPC auth (`<datadir>/.cookie`). When neither
+    /// cookie nor user/pass is given, falls back to the config `[bitcoin]`
+    /// auth, then `~/.bitcoin/.cookie` if it exists.
+    #[arg(long, conflicts_with_all = ["rpc_user", "rpc_pass"])]
+    pub rpc_cookie_file: Option<PathBuf>,
+
+    /// RPC username (`rpcuser`); requires --rpc-pass.
+    #[arg(long, requires = "rpc_pass")]
+    pub rpc_user: Option<String>,
+
+    /// RPC password (`rpcpassword`); requires --rpc-user.
+    #[arg(long, requires = "rpc_user")]
+    pub rpc_pass: Option<String>,
+
+    /// `SQLite` cache path. Defaults to `$XDG_CACHE_HOME/chainfold/chainfold.db`
+    /// (typically `~/.cache/chainfold/chainfold.db`).
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+
+    /// Block chunk size for gap-fill alignment
+    #[arg(long, default_value = "1000")]
+    pub chunk_size: u64,
+
+    #[command(flatten)]
+    pub window: WindowArgs,
+
+    /// Navigate backwards instead of forwards. Scoped to the `bitcoin`
+    /// subtree, like `evm --reverse`.
+    #[arg(long, global = true)]
+    pub reverse: bool,
+
+    /// Follow (block at tip for new blocks). Scoped to the `bitcoin`
+    /// subtree.
+    #[arg(long, global = true)]
+    pub follow: bool,
+
+    #[command(subcommand)]
+    pub command: BitcoinCommand,
+}
+
+#[derive(Subcommand)]
+pub enum BitcoinCommand {
+    /// Block history commands
+    Blocks(BtcBlocksArgs),
+}
+
+#[derive(Parser)]
+pub struct BtcBlocksArgs {
+    #[command(subcommand)]
+    pub command: BtcBlocksCommand,
+}
+
+#[derive(Subcommand)]
+pub enum BtcBlocksCommand {
+    /// List blocks in a window as a table, or --follow the live tip.
+    /// Window flags (--from/--to/--from-block/--num-blocks) come from
+    /// `bitcoin`; the default window is the latest --num-blocks ending at
+    /// the chain head.
+    List(BtcBlocksListArgs),
+}
+
+#[derive(Parser)]
+pub struct BtcBlocksListArgs {
+    /// Add the PARENT column and print full hashes.
+    #[arg(long)]
+    pub full: bool,
 }

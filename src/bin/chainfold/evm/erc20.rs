@@ -81,7 +81,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     // One window for every token (the merge is per token, the window is
     // not).
-    let range = resolve_log_range(chain, evm_args).await?;
+    let range = resolve_log_range(chain, &evm_args.window).await?;
 
     for address in &addresses {
         let meta_symbol = metadata
@@ -114,7 +114,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let mut stream = window.iter();
             let mut count = 0;
             while let Some(item) = stream.next().await {
-                if count >= evm_args.limit {
+                if count >= evm_args.window.limit {
                     println!("... (limit reached, use --limit to show more)");
                     break;
                 }

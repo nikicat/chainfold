@@ -28,6 +28,9 @@ api_key = "${{ALCHEMY_KEY:-}}"
 [evm]
 chain_id_check = "verify"
 default_chain = "{}"
+
+[bitcoin]
+rpc_url = "${{BITCOIND_RPC_URL:-http://127.0.0.1:8332}}"
 "#,
         chains::DEFAULT_CHAIN
     )
@@ -86,6 +89,26 @@ pub struct Config {
     pub provider: Option<ProviderConfig>,
     pub etherscan: Option<EtherscanConfig>,
     pub evm: Option<EvmConfig>,
+    pub bitcoin: Option<BitcoinConfig>,
+}
+
+/// The `[bitcoin]` config section: bitcoind endpoint + auth. Flags outrank
+/// every field; user/pass outranks the cookie within a layer (see the auth
+/// funnel in `bitcoin::resolve_auth`).
+// The shared `rpc_` prefix is deliberate: the keys mirror bitcoind's own
+// option vocabulary (rpcuser/rpcpassword/rpccookiefile), and bare
+// `url`/`user`/`pass` would read ambiguously in a merged TOML.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, serde::Deserialize)]
+pub struct BitcoinConfig {
+    /// bitcoind JSON-RPC endpoint URL.
+    pub rpc_url: Option<String>,
+    /// Core cookie file for RPC auth.
+    pub rpc_cookie_file: Option<PathBuf>,
+    /// `rpcuser` credential (pair with `rpc_pass`).
+    pub rpc_user: Option<String>,
+    /// `rpcpassword` credential (pair with `rpc_user`).
+    pub rpc_pass: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -231,6 +254,12 @@ impl Config {
         self.evm.as_ref()?.default_chain.as_ref()
     }
 
+    /// The `[bitcoin]` section, if configured (the built-in default always
+    /// carries `rpc_url`).
+    pub fn bitcoin(&self) -> Option<&BitcoinConfig> {
+        self.bitcoin.as_ref()
+    }
+
     /// Print the effective config as TOML — validated, defaults filled in,
     /// API keys masked. What prints is what the run paths consume, not what
     /// the config file says. `source` is the user file that was merged over
@@ -264,6 +293,12 @@ impl Config {
                     .default_chain()
                     .map_or_else(|| chains::DEFAULT_CHAIN.to_owned(), ToString::to_string),
             },
+            bitcoin: self.bitcoin().map(|b| EffectiveBitcoin {
+                rpc_url: b.rpc_url.clone().unwrap_or_default(),
+                rpc_cookie_file: b.rpc_cookie_file.clone(),
+                rpc_user: b.rpc_user.clone(),
+                rpc_pass: b.rpc_pass.as_deref().map(mask),
+            }),
         }
     }
 }
@@ -277,6 +312,20 @@ struct EffectiveConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     etherscan: Option<EffectiveApiKey>,
     evm: EffectiveEvm,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bitcoin: Option<EffectiveBitcoin>,
+}
+
+#[allow(clippy::struct_field_names)] // mirrors BitcoinConfig's keys
+#[derive(serde::Serialize)]
+struct EffectiveBitcoin {
+    rpc_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_cookie_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_pass: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -465,6 +514,7 @@ mod tests {
             }),
             etherscan: None,
             evm: None,
+            bitcoin: None,
         }
     }
 
@@ -493,6 +543,7 @@ mod tests {
             provider: None,
             etherscan: None,
             evm: None,
+            bitcoin: None,
         };
         assert!(c.alchemy_url(ChainId::new(1)).is_none());
     }
@@ -503,6 +554,7 @@ mod tests {
             provider: Some(ProviderConfig { alchemy: None }),
             etherscan: None,
             evm: None,
+            bitcoin: None,
         };
         assert!(c.alchemy_url(ChainId::new(1)).is_none());
     }

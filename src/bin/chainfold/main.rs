@@ -1,3 +1,4 @@
+mod bitcoin;
 mod cache;
 mod chains;
 mod cli;
@@ -94,6 +95,16 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 evm_args,
                 Direction::from_reverse(evm_args.reverse),
                 FollowMode::from_follow(evm_args.follow),
+            )
+            .await?;
+        }
+        Command::Bitcoin(bitcoin_args) => {
+            let config = Config::load_optional(cli.config.as_deref().map(std::path::Path::new))?;
+            bitcoin::run(
+                &config,
+                bitcoin_args,
+                Direction::from_reverse(bitcoin_args.reverse),
+                FollowMode::from_follow(bitcoin_args.follow),
             )
             .await?;
         }

@@ -8,7 +8,7 @@ use chainfold::cache::versioned_path;
 use chainfold::evm::{EvmChain, EvmPosition, LogIdx};
 use chrono::NaiveDate;
 
-use crate::cli::EvmArgs;
+use crate::cli::WindowArgs;
 use chainfold::chain::{BlockCount, BlockNumber, BlockRange};
 
 /// Setup-phase span (target `chainfold::setup`): the name is the phase's row
@@ -78,7 +78,7 @@ pub enum WindowSel {
 }
 
 /// Decode the window flags. Errors on conflicting or zero-sized selections.
-pub fn window_sel(args: &EvmArgs) -> Result<WindowSel, Box<dyn std::error::Error>> {
+pub fn window_sel(args: &WindowArgs) -> Result<WindowSel, Box<dyn std::error::Error>> {
     if args.num_blocks == 0 {
         return Err("--num-blocks must be positive".into());
     }
@@ -106,7 +106,7 @@ pub fn inclusive_range(from_block: BlockNumber, num_blocks: BlockCount) -> Block
 /// the chain's block-time anchor, printing the CLI estimate note.
 pub async fn estimate_date_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
-    args: &EvmArgs,
+    args: &WindowArgs,
     from: Timestamp,
     to: Timestamp,
 ) -> Result<BlockRange, Box<dyn std::error::Error>> {
@@ -114,6 +114,12 @@ pub async fn estimate_date_range<P: Provider<Ethereum> + Clone + Send + Sync + '
         chain.estimate_block(from).await?,
         chain.estimate_block(to).await?,
     );
+    print_date_estimate(args, range);
+    Ok(range)
+}
+
+/// The CLI note printed with a dates-window estimate.
+pub fn print_date_estimate(args: &WindowArgs, range: BlockRange) {
     // The Dates arm implies both flags are present.
     let (from_str, to_str) = (
         args.from.as_deref().expect("Dates arm has --from"),
@@ -121,7 +127,6 @@ pub async fn estimate_date_range<P: Provider<Ethereum> + Clone + Send + Sync + '
     );
     println!("  Date range: {from_str} → {to_str}");
     println!("  Estimated blocks: {range}");
-    Ok(range)
 }
 
 /// Resolve the inclusive block window for the log commands (`events`,
@@ -129,7 +134,7 @@ pub async fn estimate_date_range<P: Provider<Ethereum> + Clone + Send + Sync + '
 /// demand; a fully-cached run stays offline.
 pub async fn resolve_log_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
-    args: &EvmArgs,
+    args: &WindowArgs,
 ) -> Result<BlockRange, Box<dyn std::error::Error>> {
     match window_sel(args)? {
         WindowSel::Dates { from, to } => estimate_date_range(chain, args, from, to).await,

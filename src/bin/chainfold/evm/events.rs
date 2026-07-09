@@ -69,7 +69,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     let topics: [Option<Topic>; 4] = [Some(Topic::from(resolved.topic0)), None, None, None];
     let filter = LogFilter::new(address, topics);
-    let range = resolve_log_range(chain, evm_args).await?;
+    let range = resolve_log_range(chain, &evm_args.window).await?;
 
     println!("  Address:  {address:#x}");
     if let Some(sig) = &resolved.signature {
@@ -102,7 +102,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         let mut count = 0;
         while let Some(item) = stream.next().await {
             let item = item?;
-            if count >= evm_args.limit {
+            if count >= evm_args.window.limit {
                 println!("... (limit reached, use --limit to show more)");
                 break;
             }
