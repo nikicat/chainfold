@@ -149,7 +149,19 @@ mod tests {
 
     // -- table_counts / purge / vacuum --
 
-    /// Seed one row into every table, through the public cache APIs only.
+    /// Rows [`seed_all_tables`] leaves in `table` — 1 everywhere, except
+    /// the Bitcoin table when that family isn't compiled in.
+    fn seeded_rows(table: CacheTable) -> u64 {
+        #[cfg(not(feature = "bitcoin"))]
+        if table == CacheTable::CachedBtcBlocks {
+            return 0;
+        }
+        let _ = table;
+        1
+    }
+
+    /// Seed one row into every table (every compiled family's), through the
+    /// public cache APIs only.
     fn seed_all_tables(db: &CacheDb) {
         let fh = FilterHash::new([0xAA; 32]);
         let bh = BlockHash::repeat_byte(0xBB);
@@ -210,13 +222,33 @@ mod tests {
                 None,
             )
             .unwrap();
+
+        #[cfg(feature = "bitcoin")]
+        {
+            use crate::bitcoin::{BtcBlock, BtcBlockHash, CompactTarget};
+            db.btc_blocks()
+                .insert_blocks(&[BtcBlock {
+                    height: bn,
+                    hash: BtcBlockHash::repeat_byte(0xEB),
+                    prev_hash: BtcBlockHash::ZERO,
+                    time: ts,
+                    tx_count: TxCount::new(1),
+                    bits: CompactTarget::new(0x1d00_ffff),
+                }])
+                .unwrap();
+        }
     }
 
     #[test]
     fn purge_section_clears_only_its_tables() {
         let db = CacheDb::open_in_memory().unwrap();
         seed_all_tables(&db);
-        assert!(db.table_stats().unwrap().iter().all(|s| s.rows == 1));
+        assert!(
+            db.table_stats()
+                .unwrap()
+                .iter()
+                .all(|s| s.rows == seeded_rows(s.table))
+        );
 
         let report = db.purge(&[CacheSection::Erc20]).unwrap();
         // The report covers exactly the in-scope tables...
@@ -235,7 +267,11 @@ mod tests {
         );
         // ...which are now empty, while every other section is untouched.
         for stat in db.table_stats().unwrap() {
-            let expected = u64::from(stat.table.section() != CacheSection::Erc20);
+            let expected = if stat.table.section() == CacheSection::Erc20 {
+                0
+            } else {
+                seeded_rows(stat.table)
+            };
             assert_eq!(stat.rows, expected, "{}", stat.table.name());
         }
     }

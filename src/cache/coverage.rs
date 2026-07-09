@@ -134,10 +134,15 @@ pub enum ScanPartition {
     Filter(FilterHash),
     /// Coverage for the EVM chain's block history (the blocks source).
     Blocks,
+    /// Coverage for the Bitcoin chain's block history.
+    BtcBlocks,
 }
 
 static BLOCKS_PARTITION_BLOB: LazyLock<[u8; 32]> =
     LazyLock::new(|| *blake3::hash(b"chainfold:blocks").as_bytes());
+
+static BTC_BLOCKS_PARTITION_BLOB: LazyLock<[u8; 32]> =
+    LazyLock::new(|| *blake3::hash(b"chainfold:bitcoin:blocks").as_bytes());
 
 impl ScanPartition {
     /// The raw 32 bytes this partition binds as in `scanned_ranges`.
@@ -145,6 +150,7 @@ impl ScanPartition {
         match self {
             Self::Filter(fh) => fh.as_bytes(),
             Self::Blocks => &BLOCKS_PARTITION_BLOB,
+            Self::BtcBlocks => &BTC_BLOCKS_PARTITION_BLOB,
         }
     }
 }
@@ -509,12 +515,16 @@ mod tests {
     // -- partitions --
 
     #[test]
-    fn blocks_scan_partition_disjoint_from_filters() {
-        // Coverage recorded under the Blocks partition must not leak into any
-        // filter's partition, and vice versa — they share one table.
+    fn scan_partitions_are_mutually_disjoint() {
+        // Coverage recorded under any partition must not leak into another —
+        // filters, EVM blocks, and Bitcoin blocks all share one table (and,
+        // in the one shared DB file, one row space).
         let store = coverage();
         store
             .record_scanned_range(&ScanPartition::Blocks, br(100, 200), BLOCK_HASH_A)
+            .unwrap();
+        store
+            .record_scanned_range(&ScanPartition::BtcBlocks, br(500, 600), BLOCK_HASH_C)
             .unwrap();
         store
             .record_scanned_range(&SP, br(300, 400), BLOCK_HASH_B)
@@ -522,6 +532,10 @@ mod tests {
         assert_eq!(
             store.get_scanned_ranges(&ScanPartition::Blocks).unwrap(),
             vec![br(100, 200)]
+        );
+        assert_eq!(
+            store.get_scanned_ranges(&ScanPartition::BtcBlocks).unwrap(),
+            vec![br(500, 600)]
         );
         assert_eq!(store.get_scanned_ranges(&SP).unwrap(), vec![br(300, 400)]);
     }

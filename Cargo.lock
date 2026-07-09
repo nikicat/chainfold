@@ -1315,6 +1315,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "jsonrpc",
  "reqwest",
  "rusqlite",
  "rusqlite_migration",
@@ -2598,6 +2599,16 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonrpc"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f106cca655869522988b976127096f0aa36e0f1a8ff1f1f425a5c85b61e59391"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

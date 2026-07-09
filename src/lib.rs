@@ -11,5 +11,7 @@ pub mod signatures;
 
 pub use shared::Shared;
 
+#[cfg(feature = "bitcoin")]
+pub mod bitcoin;
 #[cfg(feature = "evm")]
 pub mod evm;

@@ -170,18 +170,20 @@ pub enum CacheTable {
     ScannedRanges,
     CachedBlockHeaders,
     CachedBlocks,
+    CachedBtcBlocks,
     Erc20Metadata,
     Erc20Balances,
     EventSignatures,
 }
 
 impl CacheTable {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::CachedLogs,
         Self::ReorgedBlocks,
         Self::ScannedRanges,
         Self::CachedBlockHeaders,
         Self::CachedBlocks,
+        Self::CachedBtcBlocks,
         Self::Erc20Metadata,
         Self::Erc20Balances,
         Self::EventSignatures,
@@ -198,6 +200,7 @@ impl CacheTable {
             Self::ScannedRanges => "scanned_ranges",
             Self::CachedBlockHeaders => "cached_block_headers",
             Self::CachedBlocks => "cached_blocks",
+            Self::CachedBtcBlocks => "cached_btc_blocks",
             Self::Erc20Metadata => "erc20_metadata",
             Self::Erc20Balances => "erc20_balances",
             Self::EventSignatures => "event_signatures",
@@ -212,7 +215,8 @@ impl CacheTable {
             | Self::ReorgedBlocks
             | Self::ScannedRanges
             | Self::CachedBlockHeaders
-            | Self::CachedBlocks => CacheSection::History,
+            | Self::CachedBlocks
+            | Self::CachedBtcBlocks => CacheSection::History,
             Self::Erc20Metadata | Self::Erc20Balances => CacheSection::Erc20,
             Self::EventSignatures => CacheSection::Signatures,
         }
@@ -519,6 +523,26 @@ pub(crate) fn migrations() -> rusqlite_migration::Migrations<'static> {
             gas_limit    INTEGER NOT NULL,
             base_fee     INTEGER,            -- NULL pre-EIP-1559
             miner        BLOB    NOT NULL
+        );
+        ",
+        ),
+        rusqlite_migration::M::up(
+            "
+        -- Bitcoin block history (BtcBlockSpec) — the Bitcoin analog of
+        -- cached_blocks. Height-keyed INSERT OR REPLACE (a reorg refetch
+        -- overwrites the stale fork row in place; until then the stale row
+        -- is filtered at query time via reorged_blocks). Coverage lives in
+        -- scanned_ranges under the BtcBlocks ScanPartition; reorg
+        -- tombstones share reorged_blocks (the hash spaces are disjoint).
+        -- Like cached_blocks, no network column: one DB file scopes one
+        -- chain.
+        CREATE TABLE cached_btc_blocks (
+            height    INTEGER PRIMARY KEY,
+            hash      BLOB    NOT NULL,
+            prev_hash BLOB    NOT NULL,
+            time      INTEGER NOT NULL,
+            tx_count  INTEGER NOT NULL,
+            bits      INTEGER NOT NULL
         );
         ",
         ),

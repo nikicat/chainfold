@@ -5,8 +5,10 @@ edition = "2024"
 
 [features]
 evm = ["dep:alloy"]
+bitcoin = ["dep:jsonrpc"]
 cli = [
   "evm",
+  "bitcoin",
   "dep:clap",
   "dep:tracing-subscriber",
   "dep:chrono",
@@ -49,6 +51,12 @@ alloy = { version = "1", features = [
 ], optional = true }
 tracing = "0.1"
 blake3 = "1.8"
+# JSON-RPC 2.0 framing + batching for the bitcoind client. Only the
+# dependency-free `client_async` machinery — the wire transport is our own
+# reqwest-backed `Transport` impl in `bitcoin::transport`.
+jsonrpc = { version = "0.20", default-features = false, features = [
+  "client_async",
+], optional = true }
 # Trait-only crates (the same traits `tower` re-exports) for the timing
 # layers in `observe` / `evm::transport` — no need for the full tower
 # stack.
