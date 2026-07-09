@@ -158,13 +158,13 @@ mod tests {
     fn block_pos_bottom_below_everything() {
         assert!(BlockPos::Bottom < BlockPos::at(bn(0), LogIdx::ZERO));
         assert!(BlockPos::Bottom < BlockPos::end_of_block(bn(0)));
-        assert!(BlockPos::before_block(bn(0)) == BlockPos::Bottom);
-        assert!(
-            BlockPos::before_block(bn(1))
-                == BlockPos::At {
-                    block: bn(0),
-                    log_index: LogIdx::MAX,
-                }
+        assert_eq!(BlockPos::before_block(bn(0)), BlockPos::Bottom);
+        assert_eq!(
+            BlockPos::before_block(bn(1)),
+            BlockPos::At {
+                block: bn(0),
+                log_index: LogIdx::MAX,
+            }
         );
     }
 }
