@@ -103,6 +103,11 @@ reqwest = { version = "0.13", default-features = false, features = [
   "json",
 ] }
 
+# Unreleased fix for the E0365 future-incompat warning (`pub use proc_macro`);
+# drop once upstream merges GnomedDev/proc-macro-error-2#14 and cuts a release.
+[patch.crates-io]
+proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
+
 [[bin]]
 name = "chainfold"
 path = "src/bin/chainfold/main.rs"
