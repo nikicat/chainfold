@@ -172,7 +172,8 @@ impl LogCache {
         filter_hash: &FilterHash,
         range: BlockRange,
     ) -> Result<Vec<Log>, CacheError> {
-        let _span = sqlite_span!("get_logs_in_range", filter = ?filter_hash, range = %range).entered();
+        let _span =
+            sqlite_span!("get_logs_in_range", filter = ?filter_hash, range = %range).entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT block_number, log_index, address, topic0, topic1, topic2, topic3,
