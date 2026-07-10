@@ -21,6 +21,11 @@
 - **Clean abstractions; no leaky generics.** If a generic layer needs to
   know something source-specific to work, the abstraction boundary is in the
   wrong place — move the concern, don't parameterize around it.
+- **Prefer the native mechanism over hand-rolling.** When a dependency, the
+  stdlib, or an existing module already covers a need, use it. Example:
+  clap's `env = "CHAINFOLD_STATS"` attribute (self-documenting in `--help`,
+  flag-beats-env precedence) replaced a hand-written `std::env::var` check
+  beside the arg it duplicated.
 
 ---
 
@@ -158,6 +163,13 @@ feedback: `absolute_paths` (write a `use`, not a `crate::a::b::c` chain),
 `redundant_clone`, `needless_pass_by_value`, `clone_on_ref_ptr`,
 `unused_async`, explicit-iter loops. Don't `#[allow]` around a lint the
 table turned on without a comment saying why.
+
+### Comments and docs are concise and DRY
+
+State a fact once, at its owning site (the arg's doc comment, the type doc,
+the relevant `docs/` section); elsewhere point, don't paraphrase. A comment
+restating semantics already documented on the item beside it is rot waiting
+to happen. Keep only what the code can't show.
 
 ### Tests
 
