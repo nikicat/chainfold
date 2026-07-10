@@ -27,14 +27,13 @@ async fn main() -> ExitCode {
     let started = Instant::now();
     let cli = Cli::parse();
 
-    // Stats are opt-in via `--stats` or `CHAINFOLD_STATS` (any non-empty,
-    // non-"0" value). When on, install an aggregating layer alongside the
-    // normal fmt logger; the RUST_LOG/-v filter gates only the fmt layer, so
-    // the summary is independent of it. Logs go to stderr — stdout is
-    // reserved for command output. Warnings are visible by default; setting
-    // RUST_LOG replaces that baseline, and -v layers extra directives on
-    // top of either.
-    let stats = (cli.stats || stats_env_enabled()).then(Stats::default);
+    // Stats are opt-in via `--stats` or `CHAINFOLD_STATS`. When on, install
+    // an aggregating layer alongside the normal fmt logger; the RUST_LOG/-v
+    // filter gates only the fmt layer, so the summary is independent of it.
+    // Logs go to stderr — stdout is reserved for command output. Warnings
+    // are visible by default; setting RUST_LOG replaces that baseline, and
+    // -v layers extra directives on top of either.
+    let stats = cli.stats.then(Stats::default);
     let mut log_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::WARN.into())
         .from_env_lossy();
@@ -78,13 +77,6 @@ fn verbosity_directive(verbosity: Verbosity) -> Option<Directive> {
         Verbosity::AllDebug => Some(LevelFilter::DEBUG.into()),
         Verbosity::AllTrace => Some(LevelFilter::TRACE.into()),
     }
-}
-
-/// `CHAINFOLD_STATS` is truthy when set to any value other than empty or `0`.
-fn stats_env_enabled() -> bool {
-    std::env::var("CHAINFOLD_STATS")
-        .ok()
-        .is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {

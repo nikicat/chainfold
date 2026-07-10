@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use clap::builder::FalseyValueParser;
 use clap::{ArgAction, Parser, Subcommand};
 
 /// Iteration direction — funneled from the `evm` `--reverse` flag, so the two
@@ -80,9 +81,9 @@ pub struct Cli {
     pub config: Option<String>,
 
     /// Print a session summary at exit: RPC calls by method (+ wall-time),
-    /// `SQLite` read time, and cache hit/miss counts. Also enabled by setting
-    /// `CHAINFOLD_STATS=1`.
-    #[arg(long, global = true)]
+    /// `SQLite` read time, and cache hit/miss counts. Falsey env values
+    /// (empty, `0`, `false`, `no`, `off`) count as unset.
+    #[arg(long, global = true, env = "CHAINFOLD_STATS", value_parser = FalseyValueParser::new())]
     pub stats: bool,
 
     /// Log diagnostics to stderr: `-v` shows chainfold's own logs (debug),
