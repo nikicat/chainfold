@@ -119,10 +119,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
     /// wrap it. Use when the caller has a bare provider and doesn't already
     /// know its chain.
     pub async fn discover(inner: P, cache: Arc<LogCache>) -> Result<Self, HistoryError> {
-        let chain_id = inner
-            .get_chain_id()
-            .await
-            .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {}", error_chain(&e))))?;
+        let chain_id = inner.get_chain_id().await.map_err(|e| {
+            HistoryError::internal(format!("get_chain_id failed: {}", error_chain(&e)))
+        })?;
         Ok(Self::new(inner, ChainId::new(chain_id), cache))
     }
 

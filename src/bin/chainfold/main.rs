@@ -74,9 +74,7 @@ async fn main() -> ExitCode {
 fn verbosity_directive(verbosity: Verbosity) -> Option<Directive> {
     match verbosity {
         Verbosity::Baseline => None,
-        Verbosity::OwnDebug => {
-            Some("chainfold=debug".parse().expect("static directive parses"))
-        }
+        Verbosity::OwnDebug => Some("chainfold=debug".parse().expect("static directive parses")),
         Verbosity::AllDebug => Some(LevelFilter::DEBUG.into()),
         Verbosity::AllTrace => Some(LevelFilter::TRACE.into()),
     }
