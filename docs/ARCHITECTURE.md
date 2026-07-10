@@ -1400,7 +1400,11 @@ RPC.
 **Bitcoin endpoint resolution:** `--rpc-url` > config `[bitcoin] rpc_url`
 (env-interpolated from `BITCOIND_RPC_URL`) > `http://127.0.0.1:8332`. Auth
 funnels once to `BtcAuth`: flag user/pass > flag cookie > config user/pass >
-config cookie > `~/.bitcoin/.cookie` when present > none.
+config cookie > `~/.bitcoin/.cookie` when present > none. The implicit
+`~/.bitcoin/.cookie` step applies to loopback endpoints only — an explicit
+cookie works anywhere, but the implicit one never reaches a remote host
+(it would leak the node's secret, and hosted providers reject requests
+carrying a stray `Authorization` header).
 
 **Histories-first** is the through-line: a `balances` read is a *history of
 balances*, an `events` read a slice of *event history*, a `blocks list` a

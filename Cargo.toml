@@ -15,6 +15,7 @@ cli = [
   "dep:toml",
   "dep:dirs",
   "dep:tempfile",
+  "dep:url",
 ]
 
 [dependencies]
@@ -70,6 +71,9 @@ chrono = { version = "0.4", optional = true }
 toml = { version = "0.8", optional = true }
 dirs = { version = "6", optional = true }
 tempfile = { version = "3", optional = true }
+# reqwest's own URL crate, taken directly for `Host` matching (the implicit
+# bitcoind-cookie fallback in the CLI is loopback-only).
+url = { version = "2", optional = true }
 bytesize = "2"
 
 [dev-dependencies]

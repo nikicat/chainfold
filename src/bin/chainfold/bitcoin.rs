@@ -5,6 +5,7 @@
 
 pub mod blocks;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chainfold::bitcoin::{
@@ -13,6 +14,7 @@ use chainfold::bitcoin::{
 use chainfold::cache::CacheDb;
 use chainfold::chain::ChunkSize;
 use chainfold::observe::ConnectTimingLayer;
+use url::Host;
 
 use crate::cli::{BitcoinArgs, BitcoinCommand, Direction, FollowMode};
 use crate::config::Config;
@@ -37,7 +39,7 @@ pub async fn run(
         .unwrap_or(DEFAULT_RPC_URL)
         .parse()?;
 
-    let auth = resolve_auth(args, config);
+    let auth = resolve_auth(args, config, &url);
 
     let db_path = resolved_db_path(args.db.as_deref());
     if let Some(parent) = db_path.parent()
@@ -79,8 +81,8 @@ pub async fn run(
 
 /// Funnel the auth flags/config into one [`BtcAuth`], once. Precedence:
 /// flag user/pass > flag cookie > config user/pass > config cookie >
-/// `~/.bitcoin/.cookie` when present > none.
-fn resolve_auth(args: &BitcoinArgs, config: &Config) -> BtcAuth {
+/// `~/.bitcoin/.cookie` when present and `url` is loopback > none.
+fn resolve_auth(args: &BitcoinArgs, config: &Config, url: &reqwest::Url) -> BtcAuth {
     if let (Some(user), Some(pass)) = (&args.rpc_user, &args.rpc_pass) {
         return BtcAuth::UserPass {
             user: user.clone(),
@@ -101,11 +103,95 @@ fn resolve_auth(args: &BitcoinArgs, config: &Config) -> BtcAuth {
             return BtcAuth::Cookie(cookie.clone());
         }
     }
-    if let Some(home) = dirs::home_dir() {
-        let cookie = home.join(".bitcoin").join(".cookie");
-        if cookie.exists() {
-            return BtcAuth::Cookie(cookie);
+    implicit_cookie(url, dirs::home_dir().as_deref()).map_or(BtcAuth::None, BtcAuth::Cookie)
+}
+
+/// The implicit cookie fallback: `<home>/.bitcoin/.cookie`, honored only
+/// when `url` points at the local machine. An *explicit* cookie flag/config
+/// works for any endpoint; the implicit one must never reach a remote host —
+/// it would leak the local node's secret off-machine, and hosted providers
+/// (e.g. Alchemy) reject any request carrying an unexpected `Authorization`
+/// header even when the URL itself is properly keyed.
+fn implicit_cookie(url: &reqwest::Url, home: Option<&Path>) -> Option<PathBuf> {
+    if !url_is_loopback(url) {
+        return None;
+    }
+    let cookie = home?.join(".bitcoin").join(".cookie");
+    cookie.exists().then_some(cookie)
+}
+
+/// Whether `url`'s host is the local machine: `localhost`, an IPv4 loopback
+/// (127.0.0.0/8), or IPv6 `::1`.
+fn url_is_loopback(url: &reqwest::Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(domain)) => domain == "localhost",
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(s: &str) -> reqwest::Url {
+        s.parse().unwrap()
+    }
+
+    /// A home dir whose `.bitcoin/.cookie` exists — the machine state that
+    /// used to leak credentials to remote endpoints.
+    fn home_with_cookie() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".bitcoin");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join(".cookie"), "__cookie__:s3cret").unwrap();
+        home
+    }
+
+    /// The footgun this gate exists for: a remote endpoint must never
+    /// inherit the local node's cookie (Alchemy answers "Must be
+    /// authenticated!" to any request carrying a stray Authorization
+    /// header, even with a valid key in the URL path).
+    #[test]
+    fn remote_endpoint_never_inherits_home_cookie() {
+        let home = home_with_cookie();
+        for endpoint in [
+            "https://bitcoin-mainnet.g.alchemy.com/v2/some-key",
+            "http://192.168.1.10:8332",
+        ] {
+            assert_eq!(
+                implicit_cookie(&url(endpoint), Some(home.path())),
+                None,
+                "{endpoint}"
+            );
         }
     }
-    BtcAuth::None
+
+    #[test]
+    fn loopback_endpoints_pick_up_home_cookie() {
+        let home = home_with_cookie();
+        let expected = home.path().join(".bitcoin").join(".cookie");
+        for endpoint in [
+            "http://127.0.0.1:8332",
+            "http://127.1.2.3:8332",
+            "http://localhost:8332",
+            "http://[::1]:8332",
+        ] {
+            assert_eq!(
+                implicit_cookie(&url(endpoint), Some(home.path())),
+                Some(expected.clone()),
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_cookie_file_resolves_to_no_auth() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            implicit_cookie(&url("http://127.0.0.1:8332"), Some(home.path())),
+            None
+        );
+    }
 }

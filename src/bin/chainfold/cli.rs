@@ -345,7 +345,8 @@ pub struct BitcoinArgs {
 
     /// Core cookie file for RPC auth (`<datadir>/.cookie`). When neither
     /// cookie nor user/pass is given, falls back to the config `[bitcoin]`
-    /// auth, then `~/.bitcoin/.cookie` if it exists.
+    /// auth, then — for loopback endpoints only — `~/.bitcoin/.cookie` if
+    /// it exists.
     #[arg(long, conflicts_with_all = ["rpc_user", "rpc_pass"])]
     pub rpc_cookie_file: Option<PathBuf>,
 
