@@ -1347,7 +1347,9 @@ open + migrations (`db_open`).
   phases, RPC by method, SQLite read time, cache hit/miss, and the untracked
   remainder. Opt-in via `--stats` / `CHAINFOLD_STATS`; writes to stderr so
   stdout stays pipeable (the summary renders through the same table funnel
-  as command output, with the mode sniffed from stderr itself — see §16).
+  as command output — one table per section with labeled columns
+  (`method`/`phase`/`query`, `calls`, `wire` where batching occurred,
+  `time`) — with the mode sniffed from stderr itself; see §16).
 - **Daemon** (planned) — routes the same spans to an OTLP exporter
   (Tempo/Jaeger); no chainfold-specific glue. (`tracing-opentelemetry`'s
   `otel.name` convention can restore per-method operation names there.)
@@ -1396,19 +1398,19 @@ module that imports `tabled` or emits raw ANSI (SGR, OSC-8 hyperlinks). An
 `Out` value binds a destination stream to the render mode sniffed *from that
 stream*, once, at the edge (`main`: stdout for command output, stderr for
 `--stats`), so a table can never render with one stream's mode and land on
-the other. Pretty (TTY) means sharp borders, a spanning `Panel` title, bold
-headers, modest colors, and OSC-8 explorer links; Plain (piped) means
-borderless space-separated columns with **no escape bytes at all** — links
-and colors drop, headers keep the same text (uppercased by default;
-`HeaderCase::AsIs` preserves identifier headers like chainlist's `chainId`).
-Each table declares one `TableSpec` (column names, alignment, min-width
-hints; `HexDetail` picks value abbreviation orthogonally) consumed by both
-render paths: buffered `TableBuf` for bounded one-shot output, and the
-append-only `RowWriter` (via `Out::rows`) for `--follow` streams, which must
-print rows as they arrive and therefore use fixed spec widths. `tabled`'s
-`ansi` feature keeps column math correct with escapes embedded in cells;
-unit tests in `table.rs` pin both modes, including OSC-8 zero-width
-measurement.
+the other. Both modes share one borderless space-separated layout — an
+append-only `--follow` stream can never close a frame, so no table gets one.
+Pretty (TTY) is dressing over it, never geometry: bold titles/headers,
+modest colors, OSC-8 explorer links; Plain (piped) is the same text with
+**no escape bytes at all** — stripping Pretty's ANSI yields the Plain render
+byte-for-byte (pinned by test, which also pins `tabled`'s `ansi` feature
+measuring embedded escapes as zero-width). Headers are uppercased by
+default; `HeaderCase::AsIs` preserves identifier headers like chainlist's
+`chainId`. Each table declares one `TableSpec` (column names, alignment,
+min-width hints; `HexDetail` picks value abbreviation orthogonally) consumed
+by both render paths: buffered `TableBuf` for bounded one-shot output, and
+the append-only `RowWriter` (via `Out::rows`) for `--follow` streams, which
+must print rows as they arrive and therefore use fixed spec widths.
 
 **Chain resolution precedence (evm):** `--chain-id` > `--chain` > env
 `CHAINFOLD_CHAIN` > config `[evm] default_chain` > built-in `ethereum`. Names

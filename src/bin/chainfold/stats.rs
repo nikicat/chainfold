@@ -42,14 +42,40 @@ use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
 /// all of it and abstains from everything else.
 const TARGET_PREFIX: &str = "chainfold::";
 
-/// Section order and headers for the targets we know today. Spans under any
-/// other `chainfold::*` target still print — appended after these, headed by
-/// the target's suffix — so a new span kind can't silently vanish.
-const SECTIONS: &[(&str, &str)] = &[
-    (SETUP_TARGET, "setup"),
-    (RPC_TARGET, "rpc calls"),
-    (CONNECT_TARGET, "connections"),
-    (SQLITE_TARGET, "sqlite reads"),
+/// Presentation of one known span target: its summary-section header and
+/// what a row label *means* there (the row-label column's header).
+struct Section {
+    target: &'static str,
+    header: &'static str,
+    /// An RPC row is labeled by method, a setup row by phase, …
+    label: &'static str,
+}
+
+/// Section order for the targets we know today. Spans under any other
+/// `chainfold::*` target still print — appended after these, headed by the
+/// target's suffix with a generic `span` label column — so a new span kind
+/// can't silently vanish.
+const SECTIONS: &[Section] = &[
+    Section {
+        target: SETUP_TARGET,
+        header: "setup",
+        label: "phase",
+    },
+    Section {
+        target: RPC_TARGET,
+        header: "rpc calls",
+        label: "method",
+    },
+    Section {
+        target: CONNECT_TARGET,
+        header: "connections",
+        label: "connection",
+    },
+    Section {
+        target: SQLITE_TARGET,
+        header: "sqlite reads",
+        label: "query",
+    },
 ];
 
 /// Call count + summed wall-time for one row (an RPC method, a `SQLite`
@@ -257,38 +283,50 @@ impl Stats {
     /// for piped data). `wall` is the whole-invocation wall-clock.
     pub fn print_summary(&self, wall: Duration, out: Out) {
         let inner = self.inner.lock().unwrap();
-        let mut table = TableBuf::new(summary_spec());
-        table.title("chainfold session summary");
-        table.push(summary_row("duration", None, Some(wall), String::new()));
+        out.blank_line();
+        let mut head = TableBuf::new(kv_spec());
+        head.title("chainfold session summary");
+        head.push(kv_row("duration", wall, ""));
+        out.table(&head);
 
-        for &(target, header) in SECTIONS {
-            let rows = inner.spans.get(target);
+        for section in SECTIONS {
+            let rows = inner.spans.get(section.target);
             // A zero on "rpc calls" is the headline warm-cache number —
             // always print it. Other absent sections just don't apply.
-            if rows.is_none() && target != RPC_TARGET {
+            if rows.is_none() && section.target != RPC_TARGET {
                 continue;
             }
-            push_section(&mut table, header, rows);
+            print_section(out, section.header, section.label, rows);
         }
         for (target, rows) in &inner.spans {
-            if SECTIONS.iter().any(|(known, _)| known == target) {
+            if SECTIONS.iter().any(|known| known.target == *target) {
                 continue;
             }
             let header = target.strip_prefix(TARGET_PREFIX).unwrap_or(target);
-            push_section(&mut table, header, Some(rows));
+            print_section(out, header, "span", Some(rows));
         }
 
         if !inner.cache_by_layer.is_empty() {
-            table.push(summary_row("cache", None, None, String::new()));
+            let mut table = TableBuf::new(TableSpec::new(vec![
+                Column::left("layer").min(22),
+                Column::right("hits"),
+                Column::right("misses"),
+                Column::right("rate"),
+            ]));
+            table.title("cache");
             for (layer, hm) in &inner.cache_by_layer {
-                let rate = hm.hit_rate().unwrap_or(0.0) * 100.0;
-                table.push(summary_row(
-                    &format!("  {}", layer.as_str()),
-                    None,
-                    None,
-                    format!("{} hit / {} miss  ({rate:.1}%)", hm.hits, hm.misses),
-                ));
+                let rate = hm
+                    .hit_rate()
+                    .map_or_else(|| "-".to_string(), |r| format!("{:.1}%", r * 100.0));
+                table.push(vec![
+                    Cell::new(layer.as_str()),
+                    Cell::new(hm.hits.to_string()),
+                    Cell::new(hm.misses.to_string()),
+                    Cell::new(rate),
+                ]);
             }
+            out.blank_line();
+            out.table(&table);
         }
 
         // Root spans only — the contract's summing rule (a nested connect
@@ -299,65 +337,70 @@ impl Stats {
             .flat_map(BTreeMap::values)
             .map(|t| t.root_total)
             .sum();
-        table.push(summary_row(
+        let mut tail = TableBuf::new(kv_spec());
+        tail.push(kv_row(
             "untracked",
-            None,
-            Some(wall.saturating_sub(tracked)),
-            "(process init, gaps)".to_string(),
+            wall.saturating_sub(tracked),
+            "(process init, gaps)",
         ));
-
-        eprintln!();
-        out.table(&table);
-        eprintln!();
+        out.blank_line();
+        out.table(&tail);
+        out.blank_line();
     }
 }
 
-/// Label / wire-request count / time / note. A summary list, not a data
-/// table — no header row.
-fn summary_spec() -> TableSpec {
+/// Label / time / note rows for the flat summary lines (`duration`,
+/// `untracked`) — self-labeled, so headerless (and thus content-width).
+fn kv_spec() -> TableSpec {
     TableSpec::new(vec![
-        Column::left("label").min(22),
-        Column::right("reqs"),
-        Column::right("time").min(9),
+        Column::left("label"),
+        Column::right("time"),
         Column::left("note"),
     ])
     .no_header()
 }
 
-/// One summary row from typed values — absent columns render empty, and
-/// this is the one place durations/counts turn into cell text.
-fn summary_row(label: &str, reqs: Option<u64>, time: Option<Duration>, note: String) -> Vec<Cell> {
-    vec![
-        Cell::new(label),
-        Cell::new(reqs.map(|r| r.to_string()).unwrap_or_default()),
-        Cell::new(time.map(fmt_dur).unwrap_or_default()),
-        Cell::new(note),
-    ]
+fn kv_row(label: &str, time: Duration, note: &str) -> Vec<Cell> {
+    vec![Cell::new(label), Cell::new(fmt_dur(time)), Cell::new(note)]
 }
 
-/// One section: header row with the total call count, then a row per label.
-/// Where batching makes logical calls outnumber wire requests (`reqs >
-/// count`), the logical count is the headline and the wire count is the
-/// trailing annotation; sections without batching print the one number.
-fn push_section(table: &mut TableBuf, header: &str, rows: Option<&Rows>) {
+/// One section as its own table: the title carries the section's total
+/// logical-call count (plus the wire total where batching made them
+/// differ), and each row labels its numbers — CALLS is logical calls, WIRE
+/// (present only in batched sections) the wire round-trips they rode in,
+/// TIME the summed wall-time.
+fn print_section(out: Out, header: &str, label_header: &'static str, rows: Option<&Rows>) {
     let (count, reqs) = rows
         .into_iter()
         .flatten()
         .fold((0u64, 0u64), |(c, r), (_, t)| (c + t.count, r + t.reqs));
-    table.push(summary_row(
-        header,
-        Some(reqs),
-        None,
-        wire_note(count, reqs),
-    ));
-    for (label, tally) in rows.into_iter().flatten() {
-        table.push(summary_row(
-            &format!("  {label}"),
-            Some(tally.reqs),
-            Some(tally.total),
-            wire_note(tally.count, tally.reqs),
-        ));
+    let title = format!("{header}: {reqs}{}", wire_note(count, reqs));
+    out.blank_line();
+    let Some(rows) = rows else {
+        // The rpc-zero headline (warm cache) — nothing to tabulate.
+        out.heading(&title);
+        return;
+    };
+    let batched = count != reqs;
+    let mut cols = vec![
+        Column::left(label_header).min(22),
+        Column::right("calls").min(5),
+    ];
+    if batched {
+        cols.push(Column::right("wire"));
     }
+    cols.push(Column::right("time").min(9));
+    let mut table = TableBuf::new(TableSpec::new(cols));
+    table.title(title);
+    for (label, tally) in rows {
+        let mut row = vec![Cell::new(label.as_ref()), Cell::new(tally.reqs.to_string())];
+        if batched {
+            row.push(Cell::new(tally.count.to_string()));
+        }
+        row.push(Cell::new(fmt_dur(tally.total)));
+        table.push(row);
+    }
+    out.table(&table);
 }
 
 /// ` (N wire requests)` when batching packed several JSON-RPC calls into
@@ -366,7 +409,7 @@ fn wire_note(count: u64, reqs: u64) -> String {
     if reqs == count {
         String::new()
     } else {
-        format!("   ({count} wire requests)")
+        format!(" ({count} wire requests)")
     }
 }
 

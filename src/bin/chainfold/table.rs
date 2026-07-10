@@ -21,12 +21,12 @@ use std::io::IsTerminal;
 
 use tabled::builder::Builder;
 use tabled::settings::object::Columns;
-use tabled::settings::{Alignment, Padding, Panel, Style};
+use tabled::settings::{Alignment, Padding, Style};
 use url::Url;
 
-/// How to render for the target stream: `Pretty` (borders, in-frame titles,
-/// colors, OSC-8 links) on terminals, `Plain` (borderless columns, no escape
-/// bytes at all) when piped.
+/// How to render for the target stream: `Pretty` (bold titles/headers,
+/// colors, OSC-8 links) on terminals, `Plain` (the same borderless columns
+/// with no escape bytes at all) when piped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderMode {
     Pretty,
@@ -94,6 +94,17 @@ impl Out {
     /// event params) — dimmed in `Pretty`, bare in `Plain`.
     pub fn dim_line(self, text: &str) {
         self.write_line(&dim(text, self.mode));
+    }
+
+    /// A standalone heading — the same dressing table titles get (bold in
+    /// `Pretty`); for headlines whose table has no rows.
+    pub fn heading(self, text: &str) {
+        self.write_line(&styled(text, CellStyle::Default, self.mode, BOLD));
+    }
+
+    /// A blank separator line on this stream.
+    pub fn blank_line(self) {
+        self.write_line("");
     }
 }
 
@@ -204,7 +215,8 @@ impl TableSpec {
     }
 
     /// Skip the header row — for label/value summaries where column names
-    /// would be noise.
+    /// would be noise. `Min` width hints are enforced by padding the header
+    /// cell, so a headerless [`TableBuf`] ignores them (content width).
     pub fn no_header(mut self) -> Self {
         self.header = false;
         self
@@ -264,8 +276,8 @@ impl TableBuf {
         }
     }
 
-    /// Table title: a spanning `Panel` header in `Pretty`, a bare line above
-    /// the table in `Plain`.
+    /// Table title: a line above the table — bold in `Pretty`, bare in
+    /// `Plain`.
     pub fn title(&mut self, title: impl Into<String>) {
         self.title = Some(title.into());
     }
@@ -294,33 +306,18 @@ impl TableBuf {
         for (i, col) in self.spec.columns.iter().enumerate() {
             table.modify(Columns::one(i), alignment(col.align));
         }
-        match mode {
-            RenderMode::Pretty => {
-                if self.spec.header {
-                    table.with(Style::sharp());
-                } else {
-                    // sharp()'s inner rule separates the header from the
-                    // data; without a header there is nothing to separate.
-                    table.with(Style::sharp().remove_horizontals());
-                }
-                if let Some(title) = &self.title {
-                    table.with(Panel::header(sgr(title, BOLD)));
-                    table.modify((0, 0), Alignment::center());
-                }
-            }
-            RenderMode::Plain => {
-                table.with(Style::empty());
-                table.with(Padding::new(0, 2, 0, 0));
-                table.modify(Columns::last(), Padding::zero());
-            }
-        }
+        // One borderless layout for both modes — an append-only `--follow`
+        // stream can never close a frame, so no table gets one; `Pretty` is
+        // dressing (bold, colors, links), never geometry. Stripping the
+        // ANSI from a Pretty render yields the Plain render exactly.
+        table.with(Style::empty());
+        table.with(Padding::new(0, 2, 0, 0));
+        table.modify(Columns::last(), Padding::zero());
 
         let rendered = table.to_string();
         let mut out = String::new();
-        if mode == RenderMode::Plain
-            && let Some(title) = &self.title
-        {
-            out.push_str(title);
+        if let Some(title) = &self.title {
+            out.push_str(&styled(title, CellStyle::Default, mode, BOLD));
             out.push('\n');
         }
         // tabled pads every cell to its column width; strip the resulting
@@ -486,14 +483,14 @@ mod tests {
         t
     }
 
-    /// Visible width: `char` count excluding ANSI escape sequences (SGR
-    /// `ESC [ … m` and OSC `ESC ] … BEL`/`ESC \`).
-    fn visible_width(line: &str) -> usize {
-        let mut width = 0;
-        let mut chars = line.chars().peekable();
+    /// Drop ANSI escape sequences (SGR `ESC [ … m` and OSC
+    /// `ESC ] … BEL`/`ESC \`), keeping the visible text.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
             if c != '\x1b' {
-                width += 1;
+                out.push(c);
                 continue;
             }
             match chars.next() {
@@ -512,7 +509,11 @@ mod tests {
                 _ => {}
             }
         }
-        width
+        out
+    }
+
+    fn visible_width(line: &str) -> usize {
+        strip_ansi(line).chars().count()
     }
 
     #[test]
@@ -533,30 +534,23 @@ mod tests {
         );
     }
 
+    /// Pretty is dressing over the identical layout — stripping its ANSI
+    /// yields the Plain render byte-for-byte. This also pins tabled's
+    /// `ansi` feature measuring OSC-8 links and SGR as zero-width: were
+    /// they counted, the linked column's padding would differ.
     #[test]
-    fn pretty_render_has_borders_title_and_links() {
+    fn pretty_is_plain_plus_dressing() {
         let mut t = sample();
         t.title("Things");
-        let out = t.render(RenderMode::Pretty);
-        assert!(out.contains('─'), "expected border glyphs: {out}");
-        assert!(out.contains("Things"));
+        let pretty = t.render(RenderMode::Pretty);
+        assert_eq!(strip_ansi(&pretty), t.render(RenderMode::Plain));
+        assert!(!pretty.contains('│'), "no borders expected: {pretty}");
+        assert!(pretty.contains(&format!("{BOLD}Things{RESET}")));
         assert!(
-            out.contains("\x1b]8;;https://example.com/a\x07alpha\x1b]8;;\x07"),
-            "expected OSC-8 wrapped cell: {out:?}"
+            pretty.contains("\x1b]8;;https://example.com/a\x07alpha\x1b]8;;\x07"),
+            "expected OSC-8 wrapped cell: {pretty:?}"
         );
-        assert!(out.contains(&format!("{GREEN}beta{RESET}")));
-    }
-
-    /// R1 pin: tabled's `ansi` feature must measure OSC-8 links and SGR as
-    /// zero-width, so linked and plain rows come out equally wide.
-    #[test]
-    fn pretty_rows_share_visible_width() {
-        let out = sample().render(RenderMode::Pretty);
-        let widths: Vec<usize> = out.lines().map(visible_width).collect();
-        assert!(
-            widths.iter().all(|w| *w == widths[0]),
-            "ragged visible widths {widths:?} in: {out}"
-        );
+        assert!(pretty.contains(&format!("{GREEN}beta{RESET}")));
     }
 
     #[test]
@@ -589,8 +583,8 @@ mod tests {
             TableBuf::new(TableSpec::new(vec![Column::left("a"), Column::right("b")]).no_header());
         t.push(vec![Cell::new("x"), Cell::new("1")]);
         assert_eq!(t.render(RenderMode::Plain), "x  1");
-        let pretty = t.render(RenderMode::Pretty);
-        assert!(!pretty.contains('├'), "no inner rule expected: {pretty}");
+        // No header, no title, no styled cells → Pretty has nothing to dress.
+        assert_eq!(t.render(RenderMode::Pretty), "x  1");
     }
 
     #[test]

@@ -268,7 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ]);
         }
         let mut table = builder.build();
-        table.with(Style::sharp());
+        table.with(Style::empty());
         table.modify(Columns::one(1), Alignment::right());
         table.modify(Columns::one(2), Alignment::right());
         println!("{table}");

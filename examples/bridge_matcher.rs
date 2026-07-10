@@ -337,7 +337,7 @@ fn print_state(out: &MatchOutput<EvmEvent, EvmEvent>) {
             ]);
         }
         let mut table = builder.build();
-        table.with(Style::sharp());
+        table.with(Style::empty());
         table.modify(Columns::one(0), Alignment::right());
         table.modify(Columns::one(1), Alignment::right());
         table.modify(Columns::one(3), Alignment::right());
