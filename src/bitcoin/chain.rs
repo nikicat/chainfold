@@ -317,7 +317,7 @@ fn build_btc_block_fetcher(rpc: BtcRpcClient) -> Fetcher<BtcBlockPage> {
                      ({from}..={to}) — bound the walk with split() before iterating"
                 )));
             }
-            tracing::debug!(from = %from, to = %to, blocks = span, "getblockheader batch");
+            tracing::debug!(from = %from, to = %to, blocks = span, "filling block gap");
 
             let mut items: Vec<BtcBlock> = Vec::with_capacity(span as usize);
             let mut n = from;
