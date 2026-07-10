@@ -87,7 +87,9 @@ matcher then work automatically.
 | [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) | Dev setup — test suites and their external dependencies, pre-push CI gate, coverage. |
 
 The `chainfold` CLI also ships a `--stats` flag that reports RPC counts and
-cache hit/miss at exit — see [ARCHITECTURE.md](./docs/ARCHITECTURE.md#15-observability-contract).
+cache hit/miss at exit — see [ARCHITECTURE.md](./docs/ARCHITECTURE.md#15-observability-contract) —
+and a repeatable `-v`/`--verbose` flag for diagnostic logs on stderr (`-v`
+chainfold debug, `-vv` all-crate debug, `-vvv` trace; layered over `RUST_LOG`).
 
 ## Running tests
 

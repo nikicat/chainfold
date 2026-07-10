@@ -14,10 +14,11 @@ use std::time::Instant;
 
 use chains::{ChainResolver, ChainlistEntry, ListFilter};
 use clap::Parser;
-use cli::{ChainsCommand, Cli, Command, ConfigCommand, Direction, FollowMode};
+use cli::{ChainsCommand, Cli, Command, ConfigCommand, Direction, FollowMode, Verbosity};
 use config::Config;
 use stats::Stats;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{Directive, LevelFilter};
 use tracing_subscriber::fmt::layer as fmt_layer;
 use tracing_subscriber::prelude::*;
 
@@ -28,11 +29,20 @@ async fn main() -> ExitCode {
 
     // Stats are opt-in via `--stats` or `CHAINFOLD_STATS` (any non-empty,
     // non-"0" value). When on, install an aggregating layer alongside the
-    // normal fmt logger; the env filter gates only the fmt layer, so the
-    // summary is independent of RUST_LOG.
+    // normal fmt logger; the RUST_LOG/-v filter gates only the fmt layer, so
+    // the summary is independent of it. Logs go to stderr — stdout is
+    // reserved for command output.
     let stats = (cli.stats || stats_env_enabled()).then(Stats::default);
+    let mut log_filter = EnvFilter::from_default_env();
+    if let Some(directive) = verbosity_directive(Verbosity::from_count(cli.verbose)) {
+        log_filter = log_filter.add_directive(directive);
+    }
     tracing_subscriber::registry()
-        .with(fmt_layer().with_filter(EnvFilter::from_default_env()))
+        .with(
+            fmt_layer()
+                .with_writer(std::io::stderr)
+                .with_filter(log_filter),
+        )
         .with(stats.clone())
         .init();
 
@@ -52,6 +62,19 @@ async fn main() -> ExitCode {
             eprintln!("Error: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The extra `EnvFilter` directive a [`Verbosity`] level layers over
+/// `RUST_LOG` (both apply; on a tie the flag wins).
+fn verbosity_directive(verbosity: Verbosity) -> Option<Directive> {
+    match verbosity {
+        Verbosity::EnvOnly => None,
+        Verbosity::OwnDebug => {
+            Some("chainfold=debug".parse().expect("static directive parses"))
+        }
+        Verbosity::AllDebug => Some(LevelFilter::DEBUG.into()),
+        Verbosity::AllTrace => Some(LevelFilter::TRACE.into()),
     }
 }
 

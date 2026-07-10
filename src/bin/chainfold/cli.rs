@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 /// Iteration direction — funneled from the `evm` `--reverse` flag, so the two
 /// run-fn plumbing args (`Direction`, [`FollowMode`]) can't be silently swapped
@@ -45,6 +45,33 @@ impl FollowMode {
     }
 }
 
+/// Diagnostic-log verbosity — funneled from the repeatable `-v` flag's raw
+/// count, so consumers match a closed ladder instead of comparing a bare
+/// `u8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verbosity {
+    /// No `-v`: only what `RUST_LOG` enables.
+    EnvOnly,
+    /// `-v`: chainfold's own logs, at debug.
+    OwnDebug,
+    /// `-vv`: debug for every crate.
+    AllDebug,
+    /// `-vvv` (or more): trace for every crate.
+    AllTrace,
+}
+
+impl Verbosity {
+    /// From the `-v` occurrence count; saturates at [`Self::AllTrace`].
+    pub fn from_count(count: u8) -> Self {
+        match count {
+            0 => Self::EnvOnly,
+            1 => Self::OwnDebug,
+            2 => Self::AllDebug,
+            _ => Self::AllTrace,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "chainfold", about = "Blockchain history explorer")]
 pub struct Cli {
@@ -57,6 +84,11 @@ pub struct Cli {
     /// `CHAINFOLD_STATS=1`.
     #[arg(long, global = true)]
     pub stats: bool,
+
+    /// Log diagnostics to stderr: `-v` shows chainfold's own logs (debug),
+    /// `-vv` debug for all crates, `-vvv` trace. Layered over `RUST_LOG`.
+    #[arg(short, long, global = true, action = ArgAction::Count)]
+    pub verbose: u8,
 
     #[command(subcommand)]
     pub command: Command,
