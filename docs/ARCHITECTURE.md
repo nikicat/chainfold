@@ -1398,13 +1398,15 @@ module that imports `tabled` or emits raw ANSI (SGR, OSC-8 hyperlinks). An
 `Out` value binds a destination stream to the render mode sniffed *from that
 stream*, once, at the edge (`main`: stdout for command output, stderr for
 `--stats`), so a table can never render with one stream's mode and land on
-the other. Both modes share one borderless space-separated layout — an
-append-only `--follow` stream can never close a frame, so no table gets one.
-Pretty (TTY) is dressing over it, never geometry: bold titles/headers,
-modest colors, OSC-8 explorer links; Plain (piped) is the same text with
-**no escape bytes at all** — stripping Pretty's ANSI yields the Plain render
-byte-for-byte (pinned by test, which also pins `tabled`'s `ansi` feature
-measuring embedded escapes as zero-width). Headers are uppercased by
+the other. Both modes share one space-separated layout whose only frame is
+a single top rule per table with the title drawn inline (`── title ────`) —
+an append-only `--follow` stream can never close a frame, so no table gets
+more. Pretty (TTY) is dressing over it, never geometry: dimmed rules,
+italic-cyan titles, bold headers, modest colors, OSC-8 explorer links;
+Plain (piped) is the same text with **no escape bytes at all** — stripping
+Pretty's ANSI yields the Plain render byte-for-byte (pinned by test, which
+also pins `tabled`'s `ansi` feature measuring embedded escapes as
+zero-width). Headers are uppercased by
 default; `HeaderCase::AsIs` preserves identifier headers like chainlist's
 `chainId`. Each table declares one `TableSpec` (column names, alignment,
 min-width hints; `HexDetail` picks value abbreviation orthogonally) consumed

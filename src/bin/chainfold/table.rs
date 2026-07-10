@@ -24,9 +24,9 @@ use tabled::settings::object::Columns;
 use tabled::settings::{Alignment, Padding, Style};
 use url::Url;
 
-/// How to render for the target stream: `Pretty` (bold titles/headers,
-/// colors, OSC-8 links) on terminals, `Plain` (the same borderless columns
-/// with no escape bytes at all) when piped.
+/// How to render for the target stream: `Pretty` (dimmed rules, italic
+/// colored titles, bold headers, colors, OSC-8 links) on terminals, `Plain`
+/// (the same layout with no escape bytes at all) when piped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderMode {
     Pretty,
@@ -96,10 +96,11 @@ impl Out {
         self.write_line(&dim(text, self.mode));
     }
 
-    /// A standalone heading — the same dressing table titles get (bold in
-    /// `Pretty`); for headlines whose table has no rows.
+    /// A standalone heading — the same dressing table titles get (a short
+    /// rule with the text inline, `── text ──`); for headlines whose table
+    /// has no rows.
     pub fn heading(self, text: &str) {
-        self.write_line(&styled(text, CellStyle::Default, self.mode, BOLD));
+        self.write_line(&top_rule(Some(text), 0, self.mode));
     }
 
     /// A blank separator line on this stream.
@@ -276,8 +277,8 @@ impl TableBuf {
         }
     }
 
-    /// Table title: a line above the table — bold in `Pretty`, bare in
-    /// `Plain`.
+    /// Table title: drawn inline in the table's top rule
+    /// (`── title ────`) — italic and colored in `Pretty`, bare in `Plain`.
     pub fn title(&mut self, title: impl Into<String>) {
         self.title = Some(title.into());
     }
@@ -306,27 +307,25 @@ impl TableBuf {
         for (i, col) in self.spec.columns.iter().enumerate() {
             table.modify(Columns::one(i), alignment(col.align));
         }
-        // One borderless layout for both modes — an append-only `--follow`
-        // stream can never close a frame, so no table gets one; `Pretty` is
-        // dressing (bold, colors, links), never geometry. Stripping the
-        // ANSI from a Pretty render yields the Plain render exactly.
+        // One layout for both modes, whose only frame is the top rule below —
+        // an append-only `--follow` stream can never close a frame, so no
+        // table gets more; `Pretty` is dressing (italics, colors, links),
+        // never geometry. Stripping the ANSI from a Pretty render yields the
+        // Plain render exactly.
         table.with(Style::empty());
         table.with(Padding::new(0, 2, 0, 0));
         table.modify(Columns::last(), Padding::zero());
 
-        let rendered = table.to_string();
-        let mut out = String::new();
-        if let Some(title) = &self.title {
-            out.push_str(&styled(title, CellStyle::Default, mode, BOLD));
-            out.push('\n');
-        }
         // tabled pads every cell to its column width; strip the resulting
         // trailing spaces so plain output stays clean for pipes.
-        for line in rendered.lines() {
-            out.push_str(line.trim_end());
+        let rendered = table.to_string();
+        let lines: Vec<&str> = rendered.lines().map(str::trim_end).collect();
+        let width = lines.iter().copied().map(visible_width).max().unwrap_or(0);
+        let mut out = top_rule(self.title.as_deref(), width, mode);
+        for line in lines {
             out.push('\n');
+            out.push_str(line);
         }
-        out.pop();
         out
     }
 }
@@ -343,7 +342,14 @@ pub struct RowWriter {
 
 impl RowWriter {
     pub fn print_header(&self) {
+        self.out.write_line(&self.rule());
         self.out.write_line(&self.header());
+    }
+
+    /// The stream's top border: a bare rule as wide as the header (titles
+    /// don't exist on the follow path).
+    fn rule(&self) -> String {
+        top_rule(None, visible_width(&self.header()), self.out.mode)
     }
 
     pub fn print_row(&self, cells: &[Cell]) {
@@ -374,6 +380,33 @@ impl RowWriter {
     }
 }
 
+/// A table's single border: the top rule, with the title (when present)
+/// drawn inline — `── title ────`. `width` is the table's visible width;
+/// the trailing run never drops below two dashes, so a title wider than its
+/// table (or a bare [`Out::heading`], which passes 0) still reads as a
+/// rule. In `Pretty` the dashes are dimmed and the title italic + colored;
+/// `Plain` is the same text bare, keeping the strip-ANSI parity.
+fn top_rule(title: Option<&str>, width: usize, mode: RenderMode) -> String {
+    let Some(title) = title else {
+        return dim(&"─".repeat(width), mode);
+    };
+    let fill = width.saturating_sub(title.chars().count() + 4).max(2);
+    format!(
+        "{}{}{}",
+        dim("── ", mode),
+        title_text(title, mode),
+        dim(&format!(" {}", "─".repeat(fill)), mode),
+    )
+}
+
+/// Title dressing: italic + cyan in `Pretty`, bare in `Plain`.
+fn title_text(text: &str, mode: RenderMode) -> String {
+    match mode {
+        RenderMode::Pretty => sgr(text, &format!("{ITALIC}{CYAN}")),
+        RenderMode::Plain => text.to_string(),
+    }
+}
+
 /// Dim free-form text in `Pretty`; pass-through in `Plain`.
 fn dim(text: &str, mode: RenderMode) -> String {
     match mode {
@@ -384,12 +417,50 @@ fn dim(text: &str, mode: RenderMode) -> String {
 
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
+const ITALIC: &str = "\x1b[3m";
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
+const CYAN: &str = "\x1b[36m";
 const RESET: &str = "\x1b[0m";
 
 fn sgr(text: &str, code: &str) -> String {
     format!("{code}{text}{RESET}")
+}
+
+/// Drop ANSI escape sequences (SGR `ESC [ … m` and OSC `ESC ] … BEL`/
+/// `ESC \`), keeping the visible text. This module writes every escape it
+/// ever needs to measure, so the two forms above are the whole vocabulary.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => while chars.next().is_some_and(|c| c != 'm') {},
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Width as the terminal shows it: `char` count of the ANSI-stripped text —
+/// same double-width-glyph caveat as the rest of this module's padding.
+fn visible_width(line: &str) -> usize {
+    strip_ansi(line).chars().count()
 }
 
 fn osc8_link(url: &Url, text: &str) -> String {
@@ -483,39 +554,6 @@ mod tests {
         t
     }
 
-    /// Drop ANSI escape sequences (SGR `ESC [ … m` and OSC
-    /// `ESC ] … BEL`/`ESC \`), keeping the visible text.
-    fn strip_ansi(s: &str) -> String {
-        let mut out = String::new();
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c != '\x1b' {
-                out.push(c);
-                continue;
-            }
-            match chars.next() {
-                Some('[') => while chars.next().is_some_and(|c| c != 'm') {},
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\x07' {
-                            break;
-                        }
-                        if c == '\x1b' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        out
-    }
-
-    fn visible_width(line: &str) -> usize {
-        strip_ansi(line).chars().count()
-    }
-
     #[test]
     fn plain_render_is_exact_and_ansi_free() {
         let mut t = sample();
@@ -527,7 +565,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            "Things\n\
+            "── Things ────────\n\
              \x20 ID  NAME    NOTE\n\
              \x20  7  alpha   x\n\
              \x20 42  beta    y"
@@ -544,8 +582,10 @@ mod tests {
         t.title("Things");
         let pretty = t.render(RenderMode::Pretty);
         assert_eq!(strip_ansi(&pretty), t.render(RenderMode::Plain));
-        assert!(!pretty.contains('│'), "no borders expected: {pretty}");
-        assert!(pretty.contains(&format!("{BOLD}Things{RESET}")));
+        assert!(!pretty.contains('│'), "no side borders expected: {pretty}");
+        assert!(pretty.contains(&format!(
+            "{DIM}── {RESET}{ITALIC}{CYAN}Things{RESET}{DIM} ────────{RESET}"
+        )));
         assert!(
             pretty.contains("\x1b]8;;https://example.com/a\x07alpha\x1b]8;;\x07"),
             "expected OSC-8 wrapped cell: {pretty:?}"
@@ -556,6 +596,7 @@ mod tests {
     #[test]
     fn row_writer_plain_is_exact() {
         let w = writer(RenderMode::Plain);
+        assert_eq!(w.rule(), "─".repeat(18));
         assert_eq!(w.header(), "  ID  NAME    NOTE");
         let row = w.row(&[Cell::new("7"), Cell::new("alpha"), Cell::new("x")]);
         assert_eq!(row, "   7  alpha   x");
@@ -575,16 +616,36 @@ mod tests {
             visible_width(&plain.row(&cells)),
         );
         assert_eq!(visible_width(&pretty.header()), plain.header().len());
+        assert_eq!(strip_ansi(&pretty.rule()), plain.rule());
     }
 
     #[test]
-    fn no_header_renders_rows_only() {
+    fn no_header_renders_rule_and_rows() {
         let mut t =
             TableBuf::new(TableSpec::new(vec![Column::left("a"), Column::right("b")]).no_header());
         t.push(vec![Cell::new("x"), Cell::new("1")]);
-        assert_eq!(t.render(RenderMode::Plain), "x  1");
-        // No header, no title, no styled cells → Pretty has nothing to dress.
-        assert_eq!(t.render(RenderMode::Pretty), "x  1");
+        assert_eq!(t.render(RenderMode::Plain), "────\nx  1");
+        // No header, no title, no styled cells → the dimmed rule is Pretty's
+        // only dressing.
+        assert_eq!(
+            t.render(RenderMode::Pretty),
+            format!("{DIM}────{RESET}\nx  1")
+        );
+    }
+
+    /// The rule's trailing run tracks the table width but never drops below
+    /// two dashes — a title wider than its table (and the width-0 heading
+    /// path) still reads as a rule.
+    #[test]
+    fn top_rule_fill_floors_at_two() {
+        assert_eq!(
+            top_rule(Some("Things"), 18, RenderMode::Plain),
+            "── Things ────────"
+        );
+        assert_eq!(
+            top_rule(Some("rpc calls: 0"), 0, RenderMode::Plain),
+            "── rpc calls: 0 ──"
+        );
     }
 
     #[test]
