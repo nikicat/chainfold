@@ -13,7 +13,8 @@ use crate::cli::{
     BitcoinArgs, BtcBlocksArgs, BtcBlocksCommand, BtcBlocksListArgs, Direction, FollowMode,
     WindowArgs,
 };
-use crate::fmt::{format_timestamp, osc8_link};
+use crate::fmt::{HexDetail, explorer_url, format_timestamp};
+use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
 use crate::util::{WindowSel, block_cut, inclusive_range, print_date_estimate, window_sel};
 
 /// Which columns to render — driven by the `--full` flag.
@@ -33,6 +34,12 @@ impl ColumnSet {
     fn is_full(self) -> bool {
         matches!(self, Self::Full)
     }
+
+    /// `--full` also means full hashes — the value detail follows the
+    /// column set.
+    fn hex_detail(self) -> HexDetail {
+        HexDetail::from_full(self.is_full())
+    }
 }
 
 pub async fn run(
@@ -42,10 +49,11 @@ pub async fn run(
     args: &BtcBlocksArgs,
     direction: Direction,
     follow: FollowMode,
+    out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match &args.command {
         BtcBlocksCommand::List(list_args) => {
-            list(chain, db_path, btc_args, list_args, direction, follow).await
+            list(chain, db_path, btc_args, list_args, direction, follow, out).await
         }
     }
 }
@@ -57,6 +65,7 @@ async fn list(
     args: &BtcBlocksListArgs,
     direction: Direction,
     follow: FollowMode,
+    out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let columns = ColumnSet::from_full(args.full);
 
@@ -81,12 +90,13 @@ async fn list(
             }
         };
         print_info(db_path, from, None);
-        print_header(columns);
+        let writer = out.rows(spec(columns));
+        writer.print_header();
         println!("Following new blocks (Ctrl+C to stop)...\n");
         let mut stream = watch_hist(&store, block_cut(from));
         let mut count: usize = 0;
         while let Some(item) = stream.next().await {
-            print_block(&item?.item, columns);
+            writer.print_row(&row(&item?.item, columns));
             count += 1;
         }
         println!("\nHistory closed ({count} blocks).");
@@ -117,7 +127,6 @@ async fn list(
     let from = *hist.start() + 1;
     let to = *hist.end();
     print_info(db_path, from, Some(to));
-    print_header(columns);
 
     // The window is bounded (≤ --num-blocks), so collecting it is fine —
     // and lets --reverse print newest-first.
@@ -125,23 +134,27 @@ async fn list(
 
     let total = items.len();
     let shown = total.min(btc_args.window.limit);
+    let mut table = TableBuf::new(spec(columns));
     match direction {
         // Newest-first, keeping the newest `--limit` blocks.
         Direction::Backward => {
             for item in items.iter().rev().take(shown) {
-                print_block(&item.item, columns);
+                table.push(row(&item.item, columns));
             }
         }
         Direction::Forward => {
             for item in items.iter().take(shown) {
-                print_block(&item.item, columns);
+                table.push(row(&item.item, columns));
             }
         }
     }
 
     if total == 0 {
         println!("No blocks found.");
-    } else if shown < total {
+        return Ok(());
+    }
+    out.table(&table);
+    if shown < total {
         println!("... (limit reached, use --limit to show more)");
         println!("\n{shown} of {total} blocks shown.");
     } else {
@@ -177,42 +190,44 @@ fn print_info(db_path: &Path, from: BlockNumber, to: Option<BlockNumber>) {
     println!();
 }
 
-fn print_header(columns: ColumnSet) {
-    let base = format!(
-        "{:>9}  {:<20}  {:>6}  {:>14}  {:<16}",
-        "HEIGHT", "TIME", "TXS", "DIFFICULTY", "HASH"
-    );
+/// The block table's columns — the one source of truth for both the
+/// buffered one-shot table and the `--follow` row stream.
+fn spec(columns: ColumnSet) -> TableSpec {
+    let mut cols = vec![
+        Column::right("height").min(9),
+        Column::left("time").min(20),
+        Column::right("txs").min(6),
+        Column::right("difficulty").min(14),
+        Column::left("hash").min(16),
+    ];
     if columns.is_full() {
-        println!("{base}  PARENT");
-    } else {
-        println!("{base}");
+        cols.push(Column::left("parent"));
     }
+    TableSpec::new(cols)
 }
 
-/// mempool.space link wrapping the (possibly abbreviated) hash.
-fn linked_hash(hash: &BtcBlockHash, full: bool) -> String {
-    let text = if full {
+/// mempool.space-linked cell on the (possibly abbreviated) hash.
+fn hash_cell(hash: &BtcBlockHash, detail: HexDetail) -> Cell {
+    let text = if detail.is_full() {
         hash.to_string()
     } else {
         // Bitcoin hashes lead with zeroes — the suffix is the telling part.
         let hex = hash.to_string();
         format!("..{}", &hex[hex.len() - 14..])
     };
-    osc8_link(&format!("https://mempool.space/block/{hash}"), &text)
+    Cell::new(text).link(explorer_url(&format!("https://mempool.space/block/{hash}")))
 }
 
-fn print_block(b: &BtcBlock, columns: ColumnSet) {
-    let base = format!(
-        "{:>9}  {:<20}  {:>6}  {:>14.4e}  {:<16}",
-        b.height,
-        format_timestamp(b.time),
-        b.tx_count,
-        b.bits.difficulty(),
-        linked_hash(&b.hash, columns.is_full()),
-    );
+fn row(b: &BtcBlock, columns: ColumnSet) -> Vec<Cell> {
+    let mut row = vec![
+        Cell::new(b.height.to_string()),
+        Cell::new(format_timestamp(b.time)),
+        Cell::new(b.tx_count.to_string()),
+        Cell::new(format!("{:.4e}", b.bits.difficulty())),
+        hash_cell(&b.hash, columns.hex_detail()),
+    ];
     if columns.is_full() {
-        println!("{base}  {}", b.prev_hash);
-    } else {
-        println!("{base}");
+        row.push(Cell::new(b.prev_hash.to_string()));
     }
+    row
 }

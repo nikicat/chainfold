@@ -45,6 +45,9 @@ use chainfold::matcher::{
 };
 use clap::{Parser, ValueEnum};
 use futures_util::StreamExt;
+use tabled::builder::Builder;
+use tabled::settings::object::Columns;
+use tabled::settings::{Alignment, Style};
 
 #[derive(Parser)]
 #[command(
@@ -322,13 +325,22 @@ fn print_state(out: &MatchOutput<EvmEvent, EvmEvent>) {
     );
     if !out.matched.is_empty() {
         println!("\nrecent matches (up to 10):");
+        let mut builder = Builder::default();
+        builder.push_record(["#", "SRC BLOCK", "SRC TX", "DST BLOCK", "DST TX"]);
         for (i, m) in out.matched.iter().take(10).enumerate() {
-            let src_tx = hex::encode(&m.src.tx_hash.as_slice()[..8]);
-            let dst_tx = hex::encode(&m.dst.tx_hash.as_slice()[..8]);
-            println!(
-                "  [{i:>3}] src=blk{:<9} tx=0x{}  ↔  dst=blk{:<9} tx=0x{}",
-                m.src.block_number, src_tx, m.dst.block_number, dst_tx,
-            );
+            builder.push_record([
+                i.to_string(),
+                m.src.block_number.to_string(),
+                format!("0x{}", hex::encode(&m.src.tx_hash.as_slice()[..8])),
+                m.dst.block_number.to_string(),
+                format!("0x{}", hex::encode(&m.dst.tx_hash.as_slice()[..8])),
+            ]);
         }
+        let mut table = builder.build();
+        table.with(Style::sharp());
+        table.modify(Columns::one(0), Alignment::right());
+        table.modify(Columns::one(1), Alignment::right());
+        table.modify(Columns::one(3), Alignment::right());
+        println!("{table}");
     }
 }

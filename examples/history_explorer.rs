@@ -30,6 +30,9 @@ use chrono::NaiveDate;
 use clap::Parser;
 use futures_util::StreamExt;
 use std::sync::Arc;
+use tabled::builder::Builder;
+use tabled::settings::object::Columns;
+use tabled::settings::{Alignment, Style};
 
 #[derive(Parser)]
 #[command(
@@ -249,9 +252,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--measure summary over {} blocks:",
             end.block.get() - start.block.get() + 1
         );
-        println!("  cold  {cold_n:>6} events  {cold_ms:>10.2} ms  (RPC + SQLite + BTree)");
-        println!("  warm  {warm_n:>6} events  {warm_ms:>10.2} ms  (SQLite -> fresh BTree)");
-        println!("  hot   {hot_n:>6} events  {hot_ms:>10.2} ms  (warm BTree only)");
+        let mut builder = Builder::default();
+        builder.push_record(["TIER", "EVENTS", "MS", "PATH"]);
+        let tiers = [
+            ("cold", cold_n, cold_ms, "RPC + SQLite + BTree"),
+            ("warm", warm_n, warm_ms, "SQLite -> fresh BTree"),
+            ("hot", hot_n, hot_ms, "warm BTree only"),
+        ];
+        for (tier, n, ms, path) in tiers {
+            builder.push_record([
+                tier.to_string(),
+                n.to_string(),
+                format!("{ms:.2}"),
+                path.to_string(),
+            ]);
+        }
+        let mut table = builder.build();
+        table.with(Style::sharp());
+        table.modify(Columns::one(1), Alignment::right());
+        table.modify(Columns::one(2), Alignment::right());
+        println!("{table}");
         println!(
             "  speedup: cold/warm={:.1}x  warm/hot={:.1}x  cold/hot={:.1}x",
             cold_ms / warm_ms,

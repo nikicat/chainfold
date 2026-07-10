@@ -12,35 +12,33 @@ use chainfold::evm::{ChainId, EvmChain, EvmEvent, EvmPosition, LogFilter, Topic}
 use chainfold::signatures::{resolve_event, topic_from_signature};
 use futures_util::StreamExt;
 
+use url::Url;
+
 use crate::cli::{Direction, EventsArgs, EvmArgs, FollowMode};
 use crate::config::Config;
-use crate::fmt::format_timestamp;
+use crate::fmt::{HexDetail, explorer_base_url, format_timestamp, tx_cell};
 use crate::signature_cache::SqliteSignatureCache;
+use crate::table::{Cell, Column, Out, RowWriter, TableSpec};
 use crate::util::{log_cut, parse_hex_address, resolve_log_range};
-
-/// How much of a hex value to render — driven by the `--full` flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HexDetail {
-    /// Every byte.
-    Full,
-    /// Abbreviated `0xdead…beef` head/tail.
-    Abbreviated,
-}
-
-impl HexDetail {
-    /// From the `--full` flag: `true` → [`Self::Full`].
-    fn from_full(full: bool) -> Self {
-        if full { Self::Full } else { Self::Abbreviated }
-    }
-
-    fn is_full(self) -> bool {
-        matches!(self, Self::Full)
-    }
-}
 
 struct PrintOpts {
     detail: HexDetail,
     decoder: Option<Event>,
+    base_url: Url,
+}
+
+/// The event table's columns. The trailing DETAILS cell carries the
+/// topics/data suffix, whose width is unbounded — rows stream through a
+/// [`RowWriter`] in both modes (decoded params interleave *between* rows,
+/// which a buffered frame can't express).
+fn spec() -> TableSpec {
+    TableSpec::new(vec![
+        Column::right("#").min(4),
+        Column::left("block").min(10),
+        Column::left("time").min(20),
+        Column::left("tx").min(15),
+        Column::left("details"),
+    ])
 }
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
@@ -52,6 +50,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     events_args: &EventsArgs,
     _direction: Direction,
     follow: FollowMode,
+    out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let address = parse_hex_address(&events_args.address)?;
     let chain_id = chain.chain_id();
@@ -65,6 +64,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let opts = PrintOpts {
         detail: HexDetail::from_full(events_args.full),
         decoder,
+        base_url: explorer_base_url(chain_id.get()),
     };
 
     let topics: [Option<Topic>; 4] = [Some(Topic::from(resolved.topic0)), None, None, None];
@@ -81,6 +81,9 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     println!("  DB:       {}", db_path.display());
     println!();
 
+    let writer = out.rows(spec());
+    writer.print_header();
+
     if follow.is_follow() {
         // Awaiting the stream demand-starts the head clock; consume items
         // past the window's start.
@@ -90,7 +93,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         let mut count = 0;
         while let Some(item) = stream.next().await {
             let item = item?;
-            print_event(&item, count, &opts);
+            print_event(&item, count, &opts, &writer, out);
             count += 1;
         }
         println!("\nHistory closed ({count} events).");
@@ -106,7 +109,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 println!("... (limit reached, use --limit to show more)");
                 break;
             }
-            print_event(&item, count, &opts);
+            print_event(&item, count, &opts, &writer, out);
             count += 1;
         }
         if count == 0 {
@@ -185,35 +188,35 @@ fn build_decoder(lookup: &Lookup) -> Result<Event, Box<dyn std::error::Error>> {
     Ok(event)
 }
 
-fn print_event(item: &Positioned<EvmEvent, EvmPosition>, index: usize, opts: &PrintOpts) {
+fn print_event(
+    item: &Positioned<EvmEvent, EvmPosition>,
+    index: usize,
+    opts: &PrintOpts,
+    writer: &RowWriter,
+    out: Out,
+) {
     let e = &item.item;
-    let tx_str = if opts.detail.is_full() {
-        format!("{:#x}", e.tx_hash)
-    } else {
-        let b = e.tx_hash.as_slice();
-        format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
-    };
     // When decoding, raw topics + data are redundant with the per-param
     // breakdown below.
-    let (topics_str, data_str) = if opts.decoder.is_some() {
-        (String::new(), String::new())
+    let details = if opts.decoder.is_some() {
+        String::new()
     } else {
-        (
+        let joined = format!(
+            "{}{}",
             format_topics(&e.topics, opts.detail),
             format_data(&e.data, opts.detail),
-        )
+        );
+        joined.trim_start().to_string()
     };
-    println!(
-        "[{:>4}] {:<10} {}  {}{}{}",
-        index,
-        e.block_number,
-        format_timestamp(e.timestamp),
-        tx_str,
-        topics_str,
-        data_str,
-    );
+    writer.print_row(&[
+        Cell::new(index.to_string()),
+        Cell::new(e.block_number.to_string()),
+        Cell::new(format_timestamp(e.timestamp)),
+        tx_cell(&e.tx_hash, &opts.base_url, opts.detail),
+        Cell::new(details),
+    ]);
     if let Some(event) = &opts.decoder {
-        print_decoded(event, e, opts.detail);
+        print_decoded(event, e, opts.detail, out);
     }
 }
 
@@ -248,11 +251,11 @@ fn format_data(data: &[u8], detail: HexDetail) -> String {
     format!("  data=0x{}{}", hex::encode(&data[..n]), suffix)
 }
 
-fn print_decoded(event: &Event, log: &EvmEvent, detail: HexDetail) {
+fn print_decoded(event: &Event, log: &EvmEvent, detail: HexDetail, out: Out) {
     let decoded = match event.decode_log_parts(log.topics.iter().map(|t| t.b256()), &log.data) {
         Ok(d) => d,
         Err(err) => {
-            println!("       decode error: {err}");
+            out.dim_line(&format!("      decode error: {err}"));
             return;
         }
     };
@@ -277,7 +280,10 @@ fn print_decoded(event: &Event, log: &EvmEvent, detail: HexDetail) {
         } else {
             ty.into_owned()
         };
-        println!("       {name} ({kind}) = {}", format_value(&value, detail));
+        out.dim_line(&format!(
+            "      {name} ({kind}) = {}",
+            format_value(&value, detail)
+        ));
     }
 }
 

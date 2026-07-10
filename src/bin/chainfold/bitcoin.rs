@@ -18,6 +18,7 @@ use url::Host;
 
 use crate::cli::{BitcoinArgs, BitcoinCommand, Direction, FollowMode};
 use crate::config::Config;
+use crate::table::Out;
 use crate::util::{resolved_db_path, setup_span};
 
 /// Fallback endpoint when neither `--rpc-url` nor the config provides one
@@ -29,6 +30,7 @@ pub async fn run(
     args: &BitcoinArgs,
     direction: Direction,
     follow: FollowMode,
+    out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Endpoint: --rpc-url > [bitcoin] rpc_url > the local-node default.
     let url: reqwest::Url = args
@@ -74,7 +76,7 @@ pub async fn run(
 
     match &args.command {
         BitcoinCommand::Blocks(blocks_args) => {
-            blocks::run(&chain, &db_path, args, blocks_args, direction, follow).await
+            blocks::run(&chain, &db_path, args, blocks_args, direction, follow, out).await
         }
     }
 }

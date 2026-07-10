@@ -17,6 +17,7 @@ use chainfold::observe::ConnectTimingLayer;
 use crate::chains::{ChainHandle, ChainResolver, ChainSelector, select_chain};
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
 use crate::config::{ChainIdCheck, Config, ConfigError, RpcSource};
+use crate::table::Out;
 use crate::util::{resolved_db_path, setup_span};
 use chainfold::chain::ChunkSize;
 
@@ -29,6 +30,7 @@ pub async fn run(
     args: &EvmArgs,
     direction: Direction,
     follow: FollowMode,
+    out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve which chain to target. Precedence (see `select_chain`):
     // --chain-id > --chain > $CHAINFOLD_CHAIN > [evm] default_chain > ethereum.
@@ -178,11 +180,11 @@ pub async fn run(
 
     match &args.command {
         EvmCommand::Blocks(blocks_args) => {
-            blocks::run(&chain, &db_path, args, blocks_args, direction, follow).await
+            blocks::run(&chain, &db_path, args, blocks_args, direction, follow, out).await
         }
         EvmCommand::Erc20(erc20_args) => {
             erc20::run(
-                &chain, &cache, &db_path, args, erc20_args, direction, follow,
+                &chain, &cache, &db_path, args, erc20_args, direction, follow, out,
             )
             .await
         }
@@ -196,6 +198,7 @@ pub async fn run(
                 events_args,
                 direction,
                 follow,
+                out,
             )
             .await
         }

@@ -36,6 +36,8 @@ use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
+use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
+
 /// Everything the library emits lives under this prefix; the layer tracks
 /// all of it and abstains from everything else.
 const TARGET_PREFIX: &str = "chainfold::";
@@ -251,13 +253,13 @@ where
 }
 
 impl Stats {
-    /// Print the end-of-run report to stderr (keeps stdout clean for piped
-    /// data). `wall` is the whole-invocation wall-clock.
-    pub fn print_summary(&self, wall: Duration) {
+    /// Print the end-of-run report to `out` (stderr, so stdout stays clean
+    /// for piped data). `wall` is the whole-invocation wall-clock.
+    pub fn print_summary(&self, wall: Duration, out: Out) {
         let inner = self.inner.lock().unwrap();
-        eprintln!();
-        eprintln!("── chainfold session summary ──");
-        eprintln!("  {:<22}{:>12}", "duration", fmt_dur(wall));
+        let mut table = TableBuf::new(summary_spec());
+        table.title("chainfold session summary");
+        table.push(summary_row("duration", None, Some(wall), String::new()));
 
         for &(target, header) in SECTIONS {
             let rows = inner.spans.get(target);
@@ -266,26 +268,26 @@ impl Stats {
             if rows.is_none() && target != RPC_TARGET {
                 continue;
             }
-            print_section(header, rows);
+            push_section(&mut table, header, rows);
         }
         for (target, rows) in &inner.spans {
             if SECTIONS.iter().any(|(known, _)| known == target) {
                 continue;
             }
             let header = target.strip_prefix(TARGET_PREFIX).unwrap_or(target);
-            print_section(header, Some(rows));
+            push_section(&mut table, header, Some(rows));
         }
 
         if !inner.cache_by_layer.is_empty() {
-            eprintln!("  cache");
+            table.push(summary_row("cache", None, None, String::new()));
             for (layer, hm) in &inner.cache_by_layer {
                 let rate = hm.hit_rate().unwrap_or(0.0) * 100.0;
-                eprintln!(
-                    "    {:<22}{:>4} hit / {:>4} miss  ({rate:>5.1}%)",
-                    layer.as_str(),
-                    hm.hits,
-                    hm.misses
-                );
+                table.push(summary_row(
+                    &format!("  {}", layer.as_str()),
+                    None,
+                    None,
+                    format!("{} hit / {} miss  ({rate:.1}%)", hm.hits, hm.misses),
+                ));
             }
         }
 
@@ -297,33 +299,64 @@ impl Stats {
             .flat_map(BTreeMap::values)
             .map(|t| t.root_total)
             .sum();
-        eprintln!(
-            "  {:<22}{:>12}   (process init, gaps)",
+        table.push(summary_row(
             "untracked",
-            fmt_dur(wall.saturating_sub(tracked))
-        );
+            None,
+            Some(wall.saturating_sub(tracked)),
+            "(process init, gaps)".to_string(),
+        ));
+
+        eprintln!();
+        out.table(&table);
         eprintln!();
     }
 }
 
-/// One section: header line with the total call count, then a row per label.
+/// Label / wire-request count / time / note. A summary list, not a data
+/// table — no header row.
+fn summary_spec() -> TableSpec {
+    TableSpec::new(vec![
+        Column::left("label").min(22),
+        Column::right("reqs"),
+        Column::right("time").min(9),
+        Column::left("note"),
+    ])
+    .no_header()
+}
+
+/// One summary row from typed values — absent columns render empty, and
+/// this is the one place durations/counts turn into cell text.
+fn summary_row(label: &str, reqs: Option<u64>, time: Option<Duration>, note: String) -> Vec<Cell> {
+    vec![
+        Cell::new(label),
+        Cell::new(reqs.map(|r| r.to_string()).unwrap_or_default()),
+        Cell::new(time.map(fmt_dur).unwrap_or_default()),
+        Cell::new(note),
+    ]
+}
+
+/// One section: header row with the total call count, then a row per label.
 /// Where batching makes logical calls outnumber wire requests (`reqs >
 /// count`), the logical count is the headline and the wire count is the
 /// trailing annotation; sections without batching print the one number.
-fn print_section(header: &str, rows: Option<&Rows>) {
+fn push_section(table: &mut TableBuf, header: &str, rows: Option<&Rows>) {
     let (count, reqs) = rows
         .into_iter()
         .flatten()
         .fold((0u64, 0u64), |(c, r), (_, t)| (c + t.count, r + t.reqs));
-    eprintln!("  {header:<22}{reqs:>12}{}", wire_note(count, reqs));
+    table.push(summary_row(
+        header,
+        Some(reqs),
+        None,
+        wire_note(count, reqs),
+    ));
     for (label, tally) in rows.into_iter().flatten() {
-        eprintln!(
-            "    {:<22}{:>5}  {:>12}{}",
-            label,
-            tally.reqs,
-            fmt_dur(tally.total),
+        table.push(summary_row(
+            &format!("  {label}"),
+            Some(tally.reqs),
+            Some(tally.total),
             wire_note(tally.count, tally.reqs),
-        );
+        ));
     }
 }
 

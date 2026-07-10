@@ -11,14 +11,15 @@ use bytesize::ByteSize;
 use chainfold::cache::{CACHE_VERSION, CacheDb, CacheSection, versioned_path};
 
 use crate::cli::{CacheArgs, CacheCommand, CachePurgeArgs};
+use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
 use crate::util::db_base_path;
 
-pub fn run(args: &CacheArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: &CacheArgs, out: Out) -> Result<(), Box<dyn std::error::Error>> {
     let base = db_base_path(args.db.as_deref());
     let db_path = versioned_path(&base);
     match &args.command {
-        CacheCommand::Size => size(&base, &db_path),
-        CacheCommand::Purge(purge_args) => purge(&base, &db_path, purge_args),
+        CacheCommand::Size => size(&base, &db_path, out),
+        CacheCommand::Purge(purge_args) => purge(&base, &db_path, purge_args, out),
     }
 }
 
@@ -144,7 +145,16 @@ fn is_stale_version(name: &str, stem: &str, ext: &str) -> bool {
 // Subcommands
 // ============================================================
 
-fn size(base: &Path, db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// A fresh per-section table for `cache size` (name / rows / bytes).
+fn section_table() -> TableBuf {
+    TableBuf::new(TableSpec::new(vec![
+        Column::left("table").min(22),
+        Column::right("rows").min(10),
+        Column::right("bytes").min(12),
+    ]))
+}
+
+fn size(base: &Path, db_path: &Path, out: Out) -> Result<(), Box<dyn std::error::Error>> {
     if !db_path.exists() {
         println!("no cache at {}", db_path.display());
         return Ok(());
@@ -155,16 +165,17 @@ fn size(base: &Path, db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Cache: {}", db_path.display());
     for section in CacheSection::ALL {
-        println!();
-        println!("  {}", section.name());
+        let mut table = section_table();
+        table.title(section.name());
         for stat in stats.iter().filter(|s| s.table.section() == section) {
-            println!(
-                "    {:<22} {:>10} {:>12}",
-                stat.table.name(),
-                stat.rows,
-                stat.bytes
-            );
+            table.push(vec![
+                Cell::new(stat.table.name()),
+                Cell::new(stat.rows.to_string()),
+                Cell::new(stat.bytes.to_string()),
+            ]);
         }
+        println!();
+        out.table(&table);
     }
     println!();
     if footprint.sidecars == ByteSize::b(0) {
@@ -180,11 +191,19 @@ fn size(base: &Path, db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     let stale = stale_version_files(base);
     if !stale.is_empty() {
-        println!();
-        println!("  stale caches (older versions, removed by a full `cache purge`):");
+        let mut table = TableBuf::new(TableSpec::new(vec![
+            Column::left("path").min(40),
+            Column::right("size").min(10),
+        ]));
+        table.title("stale caches (older versions, removed by a full `cache purge`)");
         for (path, size) in &stale {
-            println!("    {:<40} {:>10}", path.display(), size);
+            table.push(vec![
+                Cell::new(path.display().to_string()),
+                Cell::new(size.to_string()),
+            ]);
         }
+        println!();
+        out.table(&table);
     }
     Ok(())
 }
@@ -193,6 +212,7 @@ fn purge(
     base: &Path,
     db_path: &Path,
     args: &CachePurgeArgs,
+    out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !db_path.exists() {
         println!("no cache at {} — nothing to purge", db_path.display());
@@ -208,9 +228,17 @@ fn purge(
     println!("Purged {}", db_path.display());
     println!();
     // Every in-scope table, zero-row ones included — the scope stays visible.
+    let mut table = TableBuf::new(TableSpec::new(vec![
+        Column::left("table").min(22),
+        Column::right("rows removed").min(10),
+    ]));
     for count in &report {
-        println!("    {:<22} {:>10} removed", count.table.name(), count.rows);
+        table.push(vec![
+            Cell::new(count.table.name()),
+            Cell::new(count.rows.to_string()),
+        ]);
     }
+    out.table(&table);
 
     if is_full_purge(args) {
         for (path, size) in stale_version_files(base) {

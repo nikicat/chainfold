@@ -16,6 +16,7 @@ use futures_util::future::join_all;
 
 use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode};
 use crate::fmt::{self, FmtContext};
+use crate::table::{Cell, Out, TableBuf};
 use crate::util::{log_cut, log_end, parse_hex_address, resolve_log_range};
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
@@ -26,6 +27,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     erc20_args: &Erc20Args,
     _direction: Direction,
     follow: FollowMode,
+    out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addresses: Vec<Address> = erc20_args
         .address
@@ -68,7 +70,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         metadata: &metadata,
         max_sym_width,
         max_decimals,
-        base_url,
+        base_url: &base_url,
     };
 
     println!("  Owner:    0x{}", hex::encode(owner.as_slice()));
@@ -90,19 +92,24 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             .unwrap_or_default();
         let owned = OwnedErc20::new(chain, owner, *address);
 
-        println!("── {meta_symbol} ({range}) ──");
-
         let merged_hs = owned.transfers();
         let mut balance = U256::ZERO;
 
         if follow.is_follow() {
+            out.dim_line(&format!("── {meta_symbol} ({range}) ──"));
+            let writer = out.rows(fmt::transfer_spec(&ctx, show_balance));
+            writer.print_header();
             // Awaiting the merged stream demand-starts the head clock,
             // which drives both inner stores' tips.
             let mut stream = watch_hist(&merged_hs, log_cut(range.from));
             let mut count = 0;
             while let Some(item) = stream.next().await {
-                render_transfer(&item?, &mut balance, count, &ctx, show_balance, owner);
-                count += 1;
+                if let Some(row) =
+                    render_transfer(&item?, &mut balance, count, &ctx, show_balance, owner)
+                {
+                    writer.print_row(&row);
+                    count += 1;
+                }
             }
         } else {
             // The merge works on reactive stores, so the snapshot demands
@@ -112,18 +119,29 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let (_, after_start) = hist.split(log_cut(range.from));
             let (window, _) = after_start.split(log_end(range.to));
             let mut stream = window.iter();
+            let mut table = TableBuf::new(fmt::transfer_spec(&ctx, show_balance));
+            table.title(format!("{meta_symbol} ({range})"));
             let mut count = 0;
+            let mut limited = false;
             while let Some(item) = stream.next().await {
                 if count >= evm_args.window.limit {
-                    println!("... (limit reached, use --limit to show more)");
+                    limited = true;
                     break;
                 }
-                render_transfer(&item?, &mut balance, count, &ctx, show_balance, owner);
-                count += 1;
+                if let Some(row) =
+                    render_transfer(&item?, &mut balance, count, &ctx, show_balance, owner)
+                {
+                    table.push(row);
+                    count += 1;
+                }
             }
             if count == 0 {
                 println!("No transfers involving owner.");
             } else {
+                out.table(&table);
+                if limited {
+                    println!("... (limit reached, use --limit to show more)");
+                }
                 println!("\n{count} transfers shown.\n");
             }
         }
@@ -132,9 +150,9 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     Ok(())
 }
 
-/// Render one merged transfer: fold the running balance when enabled, and
-/// print. The merge yields each log once (same-position copies coalesce),
-/// so no dedupe is needed here.
+/// One merged transfer as table cells: fold the running balance when
+/// enabled, and build the row. The merge yields each log once
+/// (same-position copies coalesce), so no dedupe is needed here.
 fn render_transfer(
     item: &Positioned<MergedItem<EvmEvent, EvmPosition>, EvmPosition>,
     balance: &mut U256,
@@ -142,15 +160,11 @@ fn render_transfer(
     ctx: &FmtContext<'_>,
     show_balance: bool,
     owner: Address,
-) {
+) -> Option<Vec<Cell>> {
     let mi = &item.item;
     if show_balance {
         *balance = apply_transfer(owner, *balance, &mi.value);
     }
     let positioned = Positioned::new(mi.value.clone(), item.pos);
-    if show_balance {
-        fmt::print_balance(&positioned, *balance, count, ctx);
-    } else {
-        fmt::print_transfer(&positioned, count, ctx);
-    }
+    fmt::transfer_row(&positioned, show_balance.then_some(*balance), count, ctx)
 }

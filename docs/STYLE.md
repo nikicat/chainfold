@@ -139,9 +139,12 @@ ends there. The rule's force applies at the funnel: convert **once** into
 the domain type of the joint decision, exhaustively. Examples:
 `Direction::from_reverse(bool)`, `FollowMode::from_follow(bool)`, purge
 flags → `Vec<CacheSection>` via a per-section match (so a new section can't
-be silently ignored), `BtcAuth` funneling four auth flags/configs. Clap
-`bool` fields stay raw — an `Enable/Disable` enum would rename the bool
-without adding swap-safety.
+be silently ignored), `BtcAuth` funneling four auth flags/configs,
+`Out::stdout()`/`Out::stderr()` sniffing "is this stream a TTY?" once and
+binding the resolved `RenderMode` to its stream (no ad-hoc `is_terminal()`
+downstream), `HexDetail::from_full(bool)` for the `--full` value-detail
+flag. Clap `bool` fields stay raw — an `Enable/Disable` enum would rename
+the bool without adding swap-safety.
 
 **Low-churn tactics:** coordinate constructors keep raw params and wrap
 internally (`EvmPosition::new(u64, u32)` — position literals in tests don't

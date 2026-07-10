@@ -158,6 +158,28 @@ shipped; these are forward tracks, not yet sized into phases:
 
 ## Backlog
 
+### Consolidate `examples/` into the CLI
+
+The examples predate the CLI and duplicate its arg-parsing and rendering
+(they had already drifted from `fmt.rs` when the 2026-07 table migration
+touched them). The CLI bin consumes the library through the same public API,
+and `tests/` covers the `evm`-only feature combination, so nothing technical
+holds them in place — only the linear-demo documentation value. Staged plan:
+
+- `erc20_explorer` — redundant with `evm erc20 transfers/balances`; delete,
+  point the README quickstart at the real CLI, retarget the Phase 7
+  `--prune-after` deliverable (above) at `evm erc20`.
+- `history_explorer` — listing is redundant with `evm events`; move the
+  `--measure` cold/warm/hot cache benchmark to a new `evm bench` (or
+  similar) first.
+- `bridge_explorer` / `bridge_matcher` — no CLI surface exists (cross-chain
+  interleave, anchored matching); absorbing them needs repeatable
+  `--chain`+`--rpc-url`+`--address` group design (chainfoldd-adjacent
+  product work, discuss first). Until then they stay, and the `--match-on`
+  deliverable (above) stays theirs. Preserve their API-walkthrough value as
+  module docs on the new subcommands (or doc examples on `AnchoredMatcher`).
+- Once empty: drop the `tabled` `[dev-dependencies]` entry.
+
 ### Family-scoped reorg tombstones — blocks Phase 7 cleanup wiring
 
 `reorged_blocks` is shared by every family in the one cache file, and heights

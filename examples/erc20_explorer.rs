@@ -135,24 +135,9 @@ async fn resolve_range(
     }
 }
 
-fn explorer_base_url(chain_id: u64) -> &'static str {
-    match chain_id {
-        10 => "https://optimistic.etherscan.io",
-        56 => "https://bscscan.com",
-        100 => "https://gnosisscan.io",
-        137 => "https://polygonscan.com",
-        8453 => "https://basescan.org",
-        42161 => "https://arbiscan.io",
-        43114 => "https://snowscan.xyz",
-        534_352 => "https://scrollscan.com",
-        _ => "https://etherscan.io",
-    }
-}
-
-fn osc8_link(url: &str, text: &str) -> String {
-    format!("\x1b]8;;{url}\x07{text}\x1b]8;;\x07")
-}
-
+// The CLI dresses these up as OSC-8 explorer links (see
+// `src/bin/chainfold/table.rs`); the example keeps plain abbreviated text —
+// it demonstrates the library, not the render stack.
 fn abbrev_addr(addr: &Address) -> String {
     let b = addr.as_slice();
     format!("0x{}…{}", hex::encode(&b[..3]), hex::encode(&b[18..]))
@@ -161,16 +146,6 @@ fn abbrev_addr(addr: &Address) -> String {
 fn abbrev_tx_hash(hash: &TxHash) -> String {
     let b = hash.as_slice();
     format!("0x{}…{}", hex::encode(&b[..4]), hex::encode(&b[30..]))
-}
-
-fn linked_addr(addr: &Address, base_url: &str) -> String {
-    let url = format!("{base_url}/address/{addr:#x}");
-    osc8_link(&url, &abbrev_addr(addr))
-}
-
-fn linked_tx_hash(hash: &TxHash, base_url: &str) -> String {
-    let url = format!("{base_url}/tx/{hash:#x}");
-    osc8_link(&url, &abbrev_tx_hash(hash))
 }
 
 fn format_timestamp(ts: Timestamp) -> String {
@@ -212,7 +187,6 @@ fn print_transfer(
     meta: &Erc20Metadata,
     max_sym_width: usize,
     max_decimals: usize,
-    base_url: &str,
 ) {
     let Some(t) = decode_transfer(event) else {
         return;
@@ -232,9 +206,9 @@ fn print_transfer(
         index,
         event.block_number,
         format_timestamp(event.timestamp),
-        linked_tx_hash(&event.tx_hash, base_url),
+        abbrev_tx_hash(&event.tx_hash),
         direction,
-        linked_addr(counterparty, base_url),
+        abbrev_addr(counterparty),
         amount,
         sym,
         balance_str,
@@ -267,7 +241,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider =
         ChainProvider::discover(ProviderBuilder::new().connect_client(client), log_cache).await?;
     let chain_id = provider.chain_id();
-    let base_url = explorer_base_url(chain_id.get());
     println!("Fetching token metadata...");
     let meta_futures = addresses
         .iter()
@@ -342,7 +315,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     meta,
                     max_sym_width,
                     max_decimals,
-                    base_url,
                 );
                 count += 1;
             }
@@ -371,7 +343,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     meta,
                     max_sym_width,
                     max_decimals,
-                    base_url,
                 );
                 count += 1;
             }

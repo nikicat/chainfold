@@ -16,6 +16,7 @@ cli = [
   "dep:dirs",
   "dep:tempfile",
   "dep:url",
+  "dep:tabled",
 ]
 
 [dependencies]
@@ -75,6 +76,13 @@ tempfile = { version = "3", optional = true }
 # bitcoind-cookie fallback in the CLI is loopback-only).
 url = { version = "2", optional = true }
 bytesize = "2"
+# Table rendering for the CLI (funneled through `bin/chainfold/table.rs`).
+# `ansi` keeps column widths correct when cells embed OSC-8 hyperlinks/SGR;
+# default `derive` is unused (rows are Vec<Cell>, not structs).
+tabled = { version = "0.20", default-features = false, features = [
+  "std",
+  "ansi",
+], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
@@ -105,6 +113,12 @@ corepc-node = { version = "0.12.0", default-features = false, features = [
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls",
   "json",
+] }
+# Examples render their summary tables with tabled directly (they can't
+# import the bin-private funnel module).
+tabled = { version = "0.20", default-features = false, features = [
+  "std",
+  "ansi",
 ] }
 
 # Unreleased fix for the E0365 future-incompat warning (`pub use proc_macro`);

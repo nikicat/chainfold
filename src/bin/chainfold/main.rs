@@ -7,6 +7,7 @@ mod evm;
 mod fmt;
 mod signature_cache;
 mod stats;
+mod table;
 mod util;
 
 use std::process::ExitCode;
@@ -17,6 +18,7 @@ use clap::Parser;
 use cli::{ChainsCommand, Cli, Command, ConfigCommand, Direction, FollowMode, Verbosity};
 use config::Config;
 use stats::Stats;
+use table::{Cell, Column, HeaderCase, Out, TableBuf, TableSpec};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::{Directive, LevelFilter};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -55,8 +57,9 @@ async fn main() -> ExitCode {
 
     let result = run(&cli).await;
 
+    // The summary goes to stderr — its own stream, its own mode.
     if let Some(stats) = &stats {
-        stats.print_summary(started.elapsed());
+        stats.print_summary(started.elapsed(), Out::stderr());
     }
 
     match result {
@@ -84,6 +87,10 @@ fn verbosity_directive(verbosity: Verbosity) -> Option<Directive> {
 }
 
 async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // Command output goes to stdout; `Out` binds that stream to the render
+    // mode sniffed from it, once, here at the edge (the boundary-funnel —
+    // see `table.rs`).
+    let out = Out::stdout();
     match &cli.command {
         Command::Config { action } => {
             let (config, source) =
@@ -106,7 +113,7 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     include_testnets: list_args.testnets,
                     alchemy_only: list_args.alchemy_supported,
                 };
-                print_chain_list(&resolver.list(filter));
+                print_chain_list(&resolver.list(filter), out);
             }
         },
         Command::Evm(evm_args) => {
@@ -116,6 +123,7 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 evm_args,
                 Direction::from_reverse(evm_args.reverse),
                 FollowMode::from_follow(evm_args.follow),
+                out,
             )
             .await?;
         }
@@ -126,10 +134,11 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 bitcoin_args,
                 Direction::from_reverse(bitcoin_args.reverse),
                 FollowMode::from_follow(bitcoin_args.follow),
+                out,
             )
             .await?;
         }
-        Command::Cache(cache_args) => cache::run(cache_args)?,
+        Command::Cache(cache_args) => cache::run(cache_args, out)?,
     }
 
     Ok(())
@@ -137,22 +146,28 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Print the `chains list` table to stdout: `chainId · shortName · chainSlug ·
 /// name`, one row per resolvable chain. A missing `chainSlug` renders as `-`.
-fn print_chain_list(entries: &[&ChainlistEntry]) {
+fn print_chain_list(entries: &[&ChainlistEntry], out: Out) {
     if entries.is_empty() {
         eprintln!("no chains match the given filters.");
         return;
     }
-    println!(
-        "{:>12}  {:<14}  {:<18}  name",
-        "chainId", "shortName", "chainSlug"
+    // chainlist.org field identifiers — their casing is meaningful, keep it.
+    let mut table = TableBuf::new(
+        TableSpec::new(vec![
+            Column::right("chainId").min(12),
+            Column::left("shortName").min(14),
+            Column::left("chainSlug").min(18),
+            Column::left("name"),
+        ])
+        .header_case(HeaderCase::AsIs),
     );
     for e in entries {
-        println!(
-            "{:>12}  {:<14}  {:<18}  {}",
-            e.chain_id,
-            e.short_name,
-            e.chain_slug.as_deref().unwrap_or("-"),
-            e.name,
-        );
+        table.push(vec![
+            Cell::new(e.chain_id.to_string()),
+            Cell::new(e.short_name.as_str()),
+            Cell::new(e.chain_slug.as_deref().unwrap_or("-")),
+            Cell::new(e.name.as_str()),
+        ]);
     }
+    out.table(&table);
 }
