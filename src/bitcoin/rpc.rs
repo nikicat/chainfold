@@ -21,7 +21,7 @@ use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 
 use super::types::{BtcBlock, BtcBlockHash, CompactTarget};
-use crate::arch::{HistoryError, Timestamp};
+use crate::arch::{HistoryError, Timestamp, error_chain};
 use crate::chain::{BlockNumber, BlockRange, TxCount};
 
 /// Cheap-`Clone` handle over the async JSON-RPC client.
@@ -113,7 +113,7 @@ impl BtcRpcClient {
 }
 
 fn rpc_error(method: &str, e: &jsonrpc::Error) -> HistoryError {
-    HistoryError::internal(format!("{method}: {e}"))
+    HistoryError::internal(format!("{method}: {}", error_chain(e)))
 }
 
 /// The `getblockheader` (verbose) fields the block history consumes, per

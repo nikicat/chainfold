@@ -107,6 +107,26 @@ impl HistoryError {
     }
 }
 
+/// Render `err` and its `source()` chain as one `: `-separated line, for
+/// funneling an external error into a [`HistoryError`] message. A layer is
+/// skipped when its text already appears in the message so far: conventions
+/// mix — our types (and e.g. `jsonrpc`) embed their source in `Display`,
+/// while reqwest keeps the actionable root cause ("connection refused")
+/// hops down the `source()` chain with no `Display` breadcrumb.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(layer) = source {
+        let text = layer.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = layer.source();
+    }
+    out
+}
+
 // ============================================================
 // Position
 // ============================================================
@@ -495,4 +515,40 @@ where
     Err(HistoryError::internal(
         "act_and_wait: stream ended without match",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("mid layer")]
+    struct Mid {
+        #[source]
+        root: std::io::Error,
+    }
+
+    /// jsonrpc-style outer: `Display` embeds the source *and* exposes it
+    /// via `source()`.
+    #[derive(Debug, thiserror::Error)]
+    #[error("outer: {mid}")]
+    struct Embedding {
+        #[source]
+        mid: Mid,
+    }
+
+    #[test]
+    fn error_chain_appends_hidden_sources_without_repeating_embedded_ones() {
+        let err = Embedding {
+            mid: Mid {
+                root: std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "connection refused",
+                ),
+            },
+        };
+        // "mid layer" is already embedded by the outer Display (skipped);
+        // the io root is reachable only via source() (appended).
+        assert_eq!(error_chain(&err), "outer: mid layer: connection refused");
+    }
 }

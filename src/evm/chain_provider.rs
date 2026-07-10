@@ -40,7 +40,7 @@ use alloy::network::Ethereum;
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::{Filter, Log};
 
-use crate::arch::{HistoryError, Timestamp};
+use crate::arch::{HistoryError, Timestamp, error_chain};
 use crate::chain::BlockNumber;
 use crate::evm::cache::{BlockHeader, LogCache};
 use crate::evm::types::{BlockHash, ChainId};
@@ -122,7 +122,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
         let chain_id = inner
             .get_chain_id()
             .await
-            .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {e}")))?;
+            .map_err(|e| HistoryError::internal(format!("get_chain_id failed: {}", error_chain(&e))))?;
         Ok(Self::new(inner, ChainId::new(chain_id), cache))
     }
 
@@ -131,14 +131,16 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
         Provider::get_block_number(&self.inner)
             .await
             .map(BlockNumber::new)
-            .map_err(|e| HistoryError::internal(format!("get_block_number failed: {e}")))
+            .map_err(|e| {
+                HistoryError::internal(format!("get_block_number failed: {}", error_chain(&e)))
+            })
     }
 
     /// `eth_getLogs`, error-mapped. Shadows the [`Provider`] method.
     pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>, HistoryError> {
         Provider::get_logs(&self.inner, filter)
             .await
-            .map_err(|e| HistoryError::internal(format!("eth_getLogs failed: {e}")))
+            .map_err(|e| HistoryError::internal(format!("eth_getLogs failed: {}", error_chain(&e))))
     }
 
     /// Cache-first block-header lookup; falls back to one
@@ -179,7 +181,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> ChainProvider<P> {
             .inner
             .get_block_by_number(BlockNumberOrTag::Number(block.get()))
             .await
-            .map_err(|e| HistoryError::internal(format!("get_block failed: {e}")))?
+            .map_err(|e| HistoryError::internal(format!("get_block failed: {}", error_chain(&e))))?
             .ok_or_else(|| HistoryError::internal(format!("block {block} not found")))?;
 
         let hash = BlockHash::new(fetched.header.hash);

@@ -16,7 +16,7 @@ use alloy::providers::Provider;
 use tokio::time::sleep;
 
 use super::config::SubscribeTransport;
-use crate::arch::{HistoryError, Timestamp};
+use crate::arch::{HistoryError, Timestamp, error_chain};
 use crate::chain::{BlockNumber, HeadCell, HeadClock};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::BlockHash;
@@ -84,7 +84,7 @@ where
 
     let sub = match provider.subscribe_blocks().await {
         Ok(s) => s,
-        Err(e) => return HistoryError::internal(format!("subscribe_blocks: {e}")),
+        Err(e) => return HistoryError::internal(format!("subscribe_blocks: {}", error_chain(&e))),
     };
     let mut heads = sub.into_stream();
     loop {
