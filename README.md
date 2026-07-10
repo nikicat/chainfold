@@ -88,8 +88,9 @@ matcher then work automatically.
 
 The `chainfold` CLI also ships a `--stats` flag that reports RPC counts and
 cache hit/miss at exit — see [ARCHITECTURE.md](./docs/ARCHITECTURE.md#15-observability-contract) —
-and a repeatable `-v`/`--verbose` flag for diagnostic logs on stderr (`-v`
-chainfold debug, `-vv` all-crate debug, `-vvv` trace; layered over `RUST_LOG`).
+and a repeatable `-v`/`--verbose` flag for diagnostic logs on stderr (warnings
+are on by default; `-v` chainfold debug, `-vv` all-crate debug, `-vvv` trace;
+layered over `RUST_LOG`).
 
 ## Running tests
 

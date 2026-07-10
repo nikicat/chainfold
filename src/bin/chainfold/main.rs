@@ -31,9 +31,13 @@ async fn main() -> ExitCode {
     // non-"0" value). When on, install an aggregating layer alongside the
     // normal fmt logger; the RUST_LOG/-v filter gates only the fmt layer, so
     // the summary is independent of it. Logs go to stderr — stdout is
-    // reserved for command output.
+    // reserved for command output. Warnings are visible by default; setting
+    // RUST_LOG replaces that baseline, and -v layers extra directives on
+    // top of either.
     let stats = (cli.stats || stats_env_enabled()).then(Stats::default);
-    let mut log_filter = EnvFilter::from_default_env();
+    let mut log_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::WARN.into())
+        .from_env_lossy();
     if let Some(directive) = verbosity_directive(Verbosity::from_count(cli.verbose)) {
         log_filter = log_filter.add_directive(directive);
     }
@@ -69,7 +73,7 @@ async fn main() -> ExitCode {
 /// `RUST_LOG` (both apply; on a tie the flag wins).
 fn verbosity_directive(verbosity: Verbosity) -> Option<Directive> {
     match verbosity {
-        Verbosity::EnvOnly => None,
+        Verbosity::Baseline => None,
         Verbosity::OwnDebug => {
             Some("chainfold=debug".parse().expect("static directive parses"))
         }

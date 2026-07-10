@@ -50,8 +50,8 @@ impl FollowMode {
 /// `u8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verbosity {
-    /// No `-v`: only what `RUST_LOG` enables.
-    EnvOnly,
+    /// No `-v`: warnings everywhere (or whatever `RUST_LOG` says when set).
+    Baseline,
     /// `-v`: chainfold's own logs, at debug.
     OwnDebug,
     /// `-vv`: debug for every crate.
@@ -64,7 +64,7 @@ impl Verbosity {
     /// From the `-v` occurrence count; saturates at [`Self::AllTrace`].
     pub fn from_count(count: u8) -> Self {
         match count {
-            0 => Self::EnvOnly,
+            0 => Self::Baseline,
             1 => Self::OwnDebug,
             2 => Self::AllDebug,
             _ => Self::AllTrace,
@@ -86,7 +86,8 @@ pub struct Cli {
     pub stats: bool,
 
     /// Log diagnostics to stderr: `-v` shows chainfold's own logs (debug),
-    /// `-vv` debug for all crates, `-vvv` trace. Layered over `RUST_LOG`.
+    /// `-vv` debug for all crates, `-vvv` trace. Warnings are always on;
+    /// layered over `RUST_LOG`.
     #[arg(short, long, global = true, action = ArgAction::Count)]
     pub verbose: u8,
 
