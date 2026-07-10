@@ -110,7 +110,7 @@ impl BtcBlockCache {
     /// All cached, non-reorged blocks with heights in `range` (inclusive),
     /// ordered by height.
     pub fn get_blocks_in_range(&self, range: BlockRange) -> Result<Vec<BtcBlock>, CacheError> {
-        let _span = sqlite_span!("get_btc_blocks_in_range").entered();
+        let _span = sqlite_span!("get_btc_blocks_in_range", range = %range).entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT height, hash, prev_hash, time, tx_count, bits

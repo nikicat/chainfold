@@ -90,10 +90,12 @@ sql_newtype_u32!(TxCount);
 
 /// `SQLite`-read span (target `chainfold::sqlite`): the name is the query's
 /// row label in a stats report. A macro, not a fn — `tracing` span names are
-/// static callsite metadata, so each needs its own literal.
+/// static callsite metadata, so each needs its own literal. Trailing fields
+/// (query bounds, partition) pass through so the span log records carry
+/// them.
 macro_rules! sqlite_span {
-    ($name:literal) => {
-        tracing::span!(target: "chainfold::sqlite", tracing::Level::DEBUG, $name)
+    ($name:literal $(, $($fields:tt)+)?) => {
+        tracing::span!(target: "chainfold::sqlite", tracing::Level::DEBUG, $name $(, $($fields)+)?)
     };
 }
 

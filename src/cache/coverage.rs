@@ -247,7 +247,7 @@ impl Coverage {
         &self,
         partition: &ScanPartition,
     ) -> Result<Vec<BlockRange>, CacheError> {
-        let _span = sqlite_span!("get_scanned_ranges").entered();
+        let _span = sqlite_span!("get_scanned_ranges", partition = ?partition).entered();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT start_block, end_block FROM scanned_ranges
