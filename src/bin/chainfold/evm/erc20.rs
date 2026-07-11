@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, U256};
@@ -22,7 +21,6 @@ use crate::util::{log_cut, log_end, parse_hex_address, resolve_log_range};
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
     cache: &CacheDb,
-    db_path: &Path,
     evm_args: &EvmArgs,
     erc20_args: &Erc20Args,
     _direction: Direction,
@@ -75,8 +73,6 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     println!("  Owner:    0x{}", hex::encode(owner.as_slice()));
     println!("  Tokens:   {}", addresses.len());
-    println!("  Chain:    {chain_id}");
-    println!("  DB:       {}", db_path.display());
     println!();
 
     let show_balance = matches!(erc20_args.command, Erc20Command::Balances);
@@ -96,8 +92,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         let mut balance = U256::ZERO;
 
         if follow.is_follow() {
-            out.dim_line(&format!("── {meta_symbol} ({range}) ──"));
-            let writer = out.rows(fmt::transfer_spec(&ctx, show_balance));
+            let mut writer = out.rows(fmt::transfer_spec(&ctx, show_balance));
+            writer.title(format!(
+                "{meta_symbol} transfers {range} · chain {chain_id}"
+            ));
             writer.print_header();
             // Awaiting the merged stream demand-starts the head clock,
             // which drives both inner stores' tips.
@@ -120,7 +118,9 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let (window, _) = after_start.split(log_end(range.to));
             let mut stream = window.iter();
             let mut table = TableBuf::new(fmt::transfer_spec(&ctx, show_balance));
-            table.title(format!("{meta_symbol} ({range})"));
+            table.title(format!(
+                "{meta_symbol} transfers {range} · chain {chain_id}"
+            ));
             let mut count = 0;
             let mut limited = false;
             while let Some(item) = stream.next().await {

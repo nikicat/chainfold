@@ -76,7 +76,7 @@ pub async fn run(
 
     match &args.command {
         BitcoinCommand::Blocks(blocks_args) => {
-            blocks::run(&chain, &db_path, args, blocks_args, direction, follow, out).await
+            blocks::run(&chain, args, blocks_args, direction, follow, out).await
         }
     }
 }

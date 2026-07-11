@@ -180,19 +180,15 @@ pub async fn run(
 
     match &args.command {
         EvmCommand::Blocks(blocks_args) => {
-            blocks::run(&chain, &db_path, args, blocks_args, direction, follow, out).await
+            blocks::run(&chain, args, blocks_args, direction, follow, out).await
         }
         EvmCommand::Erc20(erc20_args) => {
-            erc20::run(
-                &chain, &cache, &db_path, args, erc20_args, direction, follow, out,
-            )
-            .await
+            erc20::run(&chain, &cache, args, erc20_args, direction, follow, out).await
         }
         EvmCommand::Events(events_args) => {
             events::run(
                 &chain,
                 &cache,
-                &db_path,
                 config,
                 args,
                 events_args,

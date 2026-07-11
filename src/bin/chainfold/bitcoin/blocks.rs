@@ -2,8 +2,6 @@
 //! sibling of `evm blocks`: the default output is the block *history* over
 //! a window (cached, resumable, followable).
 
-use std::path::Path;
-
 use chainfold::arch::{Hist, Positioned, Timestamp, watch_hist};
 use chainfold::bitcoin::{BitcoinChain, BtcBlock, BtcBlockHash};
 use chainfold::chain::{BlockNumber, BlockRange, Finality};
@@ -44,7 +42,6 @@ impl ColumnSet {
 
 pub async fn run(
     chain: &BitcoinChain,
-    db_path: &Path,
     btc_args: &BitcoinArgs,
     args: &BtcBlocksArgs,
     direction: Direction,
@@ -53,14 +50,13 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match &args.command {
         BtcBlocksCommand::List(list_args) => {
-            list(chain, db_path, btc_args, list_args, direction, follow, out).await
+            list(chain, btc_args, list_args, direction, follow, out).await
         }
     }
 }
 
 async fn list(
     chain: &BitcoinChain,
-    db_path: &Path,
     btc_args: &BitcoinArgs,
     args: &BtcBlocksListArgs,
     direction: Direction,
@@ -89,8 +85,8 @@ async fn list(
                 tip.saturating_sub(num_blocks.get() - 1)
             }
         };
-        print_info(db_path, from, None);
-        let writer = out.rows(spec(columns));
+        let mut writer = out.rows(spec(columns));
+        writer.title(title(from, None));
         writer.print_header();
         println!("Following new blocks (Ctrl+C to stop)...\n");
         let mut stream = watch_hist(&store, block_cut(from));
@@ -126,7 +122,6 @@ async fn list(
 
     let from = *hist.start() + 1;
     let to = *hist.end();
-    print_info(db_path, from, Some(to));
 
     // The window is bounded (≤ --num-blocks), so collecting it is fine —
     // and lets --reverse print newest-first.
@@ -135,6 +130,7 @@ async fn list(
     let total = items.len();
     let shown = total.min(btc_args.window.limit);
     let mut table = TableBuf::new(spec(columns));
+    table.title(title(from, Some(to)));
     match direction {
         // Newest-first, keeping the newest `--limit` blocks.
         Direction::Backward => {
@@ -180,14 +176,13 @@ async fn estimate_date_range(
     Ok(range)
 }
 
-fn print_info(db_path: &Path, from: BlockNumber, to: Option<BlockNumber>) {
-    println!("  Chain:    bitcoin");
+/// Table title: entity, window, and chain — `blocks 100..=199 · bitcoin`;
+/// an open end (`--follow`) renders as `blocks 100.. · bitcoin`.
+fn title(from: BlockNumber, to: Option<BlockNumber>) -> String {
     match to {
-        Some(to) => println!("  Range:    block {}", BlockRange::new(from, to)),
-        None => println!("  Range:    block {from}..  (following)"),
+        Some(to) => format!("blocks {} · bitcoin", BlockRange::new(from, to)),
+        None => format!("blocks {from}.. · bitcoin"),
     }
-    println!("  DB:       {}", db_path.display());
-    println!();
 }
 
 /// The block table's columns — the one source of truth for both the

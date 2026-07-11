@@ -3,12 +3,10 @@
 //! over a window (cached, resumable, followable); a single block is just a
 //! slice of it.
 
-use std::path::Path;
-
 use alloy::network::Ethereum;
 use alloy::providers::Provider;
 use chainfold::arch::{Hist, Positioned, watch_hist};
-use chainfold::evm::{EvmBlock, EvmChain};
+use chainfold::evm::{ChainId, EvmBlock, EvmChain};
 use futures_util::{StreamExt, TryStreamExt};
 
 use url::Url;
@@ -49,7 +47,6 @@ impl ColumnSet {
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
-    db_path: &Path,
     evm_args: &EvmArgs,
     args: &BlocksArgs,
     direction: Direction,
@@ -58,14 +55,13 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match &args.command {
         BlocksCommand::List(list_args) => {
-            list(chain, db_path, evm_args, list_args, direction, follow, out).await
+            list(chain, evm_args, list_args, direction, follow, out).await
         }
     }
 }
 
 async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
-    db_path: &Path,
     evm_args: &EvmArgs,
     args: &BlocksListArgs,
     direction: Direction,
@@ -95,8 +91,8 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 tip.saturating_sub(num_blocks.get() - 1)
             }
         };
-        print_info(chain, db_path, from, None);
-        let writer = out.rows(spec(columns));
+        let mut writer = out.rows(spec(columns));
+        writer.title(title(chain.chain_id(), from, None));
         writer.print_header();
         println!("Following new blocks (Ctrl+C to stop)...\n");
         let mut stream = watch_hist(&store, block_cut(from));
@@ -132,7 +128,6 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     let from = *hist.start() + 1;
     let to = *hist.end();
-    print_info(chain, db_path, from, Some(to));
 
     // The window is bounded (≤ --num-blocks), so collecting it is fine —
     // and lets --reverse print newest-first.
@@ -141,6 +136,7 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let total = items.len();
     let shown = total.min(evm_args.window.limit);
     let mut table = TableBuf::new(spec(columns));
+    table.title(title(chain.chain_id(), from, Some(to)));
     match direction {
         // Newest-first, keeping the newest `--limit` blocks.
         Direction::Backward => {
@@ -170,19 +166,13 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     Ok(())
 }
 
-fn print_info<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
-    chain: &EvmChain<P>,
-    db_path: &Path,
-    from: BlockNumber,
-    to: Option<BlockNumber>,
-) {
-    println!("  Chain:    {}", chain.chain_id());
+/// Table title: entity, window, and chain — `blocks 100..=199 · chain 1`;
+/// an open end (`--follow`) renders as `blocks 100.. · chain 1`.
+fn title(chain_id: ChainId, from: BlockNumber, to: Option<BlockNumber>) -> String {
     match to {
-        Some(to) => println!("  Range:    block {}", BlockRange::new(from, to)),
-        None => println!("  Range:    block {from}..  (following)"),
+        Some(to) => format!("blocks {} · chain {chain_id}", BlockRange::new(from, to)),
+        None => format!("blocks {from}.. · chain {chain_id}"),
     }
-    println!("  DB:       {}", db_path.display());
-    println!();
 }
 
 /// The block table's columns — the one source of truth for both the

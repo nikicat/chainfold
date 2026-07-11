@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use alloy::dyn_abi::{DecodedEvent, DynSolValue, EventExt};
 use alloy::json_abi::Event;
 use alloy::network::Ethereum;
@@ -44,7 +42,6 @@ fn spec() -> TableSpec {
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
     cache: &CacheDb,
-    db_path: &Path,
     config: &Config,
     evm_args: &EvmArgs,
     events_args: &EventsArgs,
@@ -76,12 +73,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         println!("  Event:    {sig}");
     }
     println!("  Topic0:   {:#x}", resolved.topic0);
-    println!("  Chain:    {chain_id}");
-    println!("  Range:    block {range}");
-    println!("  DB:       {}", db_path.display());
     println!();
 
-    let writer = out.rows(spec());
+    let mut writer = out.rows(spec());
+    writer.title(format!("events {range} · chain {chain_id}"));
     writer.print_header();
 
     if follow.is_follow() {

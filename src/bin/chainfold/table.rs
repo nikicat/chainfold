@@ -87,7 +87,11 @@ impl Out {
 
     /// A `--follow` row writer bound to this stream and mode.
     pub fn rows(self, spec: TableSpec) -> RowWriter {
-        RowWriter { spec, out: self }
+        RowWriter {
+            spec,
+            title: None,
+            out: self,
+        }
     }
 
     /// Print free-form meta text (lines interleaved with rows, e.g. decoded
@@ -331,25 +335,37 @@ impl TableBuf {
 }
 
 /// Append-only row printer for `--follow` streams: fixed widths from the
-/// spec, borderless by construction (an unbounded stream has no closing
-/// frame). "Pretty follow" keeps the bold header, colors, and links.
-/// Created via [`Out::rows`] and prints to that stream itself, so streamed
-/// rows can't drift to another fd.
+/// spec, opened by the same titled top rule as [`TableBuf`] and never
+/// closed (an unbounded stream has no closing frame). "Pretty follow"
+/// keeps the bold header, colors, and links. Created via [`Out::rows`] and
+/// prints to that stream itself, so streamed rows can't drift to another
+/// fd.
 pub struct RowWriter {
     spec: TableSpec,
+    title: Option<String>,
     out: Out,
 }
 
 impl RowWriter {
+    /// Stream title: drawn inline in the top rule, like
+    /// [`TableBuf::title`]. Set before [`print_header`](Self::print_header).
+    pub fn title(&mut self, title: impl Into<String>) {
+        self.title = Some(title.into());
+    }
+
     pub fn print_header(&self) {
         self.out.write_line(&self.rule());
         self.out.write_line(&self.header());
     }
 
-    /// The stream's top border: a bare rule as wide as the header (titles
-    /// don't exist on the follow path).
+    /// The stream's top border: a rule as wide as the header, carrying the
+    /// title when one is set.
     fn rule(&self) -> String {
-        top_rule(None, visible_width(&self.header()), self.out.mode)
+        top_rule(
+            self.title.as_deref(),
+            visible_width(&self.header()),
+            self.out.mode,
+        )
     }
 
     pub fn print_row(&self, cells: &[Cell]) {
