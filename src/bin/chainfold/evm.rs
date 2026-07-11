@@ -63,8 +63,8 @@ pub async fn run(
     };
 
     if defaulted {
-        eprintln!(
-            "note: no --chain/--chain-id given; using chain {chain_id} \
+        tracing::info!(
+            "no --chain/--chain-id given; using chain {chain_id} \
              (set {CHAIN_ENV_VAR} or [evm] default_chain to change)"
         );
     }
