@@ -33,7 +33,10 @@ thiserror = "2"
 futures-core = "0.3"
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] } # AbortOnDropHandle
-rusqlite = { version = "0.34", features = ["bundled"] }
+# `fallible_uint` restores the pre-0.40 `u64` ToSql/FromSql impls (runtime
+# range-checked through SQLite's i64) that `sql_newtype_u64!` and the raw
+# block-number/timestamp binds build on.
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 rusqlite_migration = "2"
 hex = "0.4"
 reqwest = { version = "0.13", default-features = false, features = [
@@ -41,7 +44,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "json",
 ] }
 tiny-keccak = { version = "2", features = ["keccak"] }
-alloy = { version = "1", features = [
+alloy = { version = "2", features = [
   "provider-http",
   "provider-ws",
   "pubsub",
@@ -69,7 +72,7 @@ tracing-subscriber = { version = "0.3", features = [
   "env-filter",
 ], optional = true }
 chrono = { version = "0.4", optional = true }
-toml = { version = "0.8", optional = true }
+toml = { version = "1", optional = true }
 dirs = { version = "6", optional = true }
 tempfile = { version = "3", optional = true }
 # reqwest's own URL crate, taken directly for `Host` matching (the implicit
@@ -79,7 +82,7 @@ bytesize = "2"
 # Table rendering for the CLI (funneled through `bin/chainfold/table.rs`).
 # `ansi` keeps column widths correct when cells embed OSC-8 hyperlinks/SGR;
 # default `derive` is unused (rows are Vec<Cell>, not structs).
-tabled = { version = "0.20", default-features = false, features = [
+tabled = { version = "0.21", default-features = false, features = [
   "std",
   "ansi",
 ], optional = true }
@@ -88,7 +91,7 @@ tabled = { version = "0.20", default-features = false, features = [
 tokio = { version = "1", features = ["rt", "macros"] }
 futures-util = "0.3"
 tempfile = "3"
-alloy = { version = "1", features = [
+alloy = { version = "2", features = [
   "provider-http",
   "provider-ws",
   "pubsub",
@@ -97,7 +100,7 @@ alloy = { version = "1", features = [
   "contract",
   "json-abi",
 ] }
-alloy-node-bindings = "1"
+alloy-node-bindings = "2"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 tracing = "0.1"
@@ -116,7 +119,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 # Examples render their summary tables with tabled directly (they can't
 # import the bin-private funnel module).
-tabled = { version = "0.20", default-features = false, features = [
+tabled = { version = "0.21", default-features = false, features = [
   "std",
   "ansi",
 ] }
