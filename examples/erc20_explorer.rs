@@ -35,7 +35,7 @@ use chainfold::chain::ChunkSize;
 use chainfold::evm::{
     ChainProvider, Erc20Metadata, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, OwnedErc20,
     TransferDirection, TxHash, apply_transfer, decode_transfer, fetch_erc20_metadata,
-    rpc_retry_layer,
+    HttpTransport, rpc_retry_layer,
 };
 use chainfold::merge::MergedItem;
 use chrono::NaiveDate;
@@ -231,7 +231,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let owner: Address = args.owner.parse()?;
 
     let url: Url = args.rpc_url.parse()?;
-    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
+    let transport = HttpTransport::new(reqwest::Client::new(), url);
+    let is_local = transport.guess_local();
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
+        .transport(transport, is_local);
     let db_path = versioned_path(Path::new(&args.db));
     let cache_db = CacheDb::open(&db_path)?;
     // Per-concern views over the one shared cache connection.

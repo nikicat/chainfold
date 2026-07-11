@@ -37,7 +37,7 @@ use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::{ChunkSize, Finality};
 use chainfold::evm::{
     ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, LogFilter, SubscribeTransport,
-    TRANSFER_TOPIC, Topic, rpc_retry_layer,
+    HttpTransport, TRANSFER_TOPIC, Topic, rpc_retry_layer,
 };
 use chainfold::matcher::{
     AnchorStore, AnchoredMatcher, Match, MatchFn, MatchInput, MatchOutput, Matcher,
@@ -174,7 +174,11 @@ async fn open_chain(
 ) -> Result<EvmChain<impl Provider<Ethereum> + Clone + 'static + use<>>, Box<dyn std::error::Error>>
 {
     let url: Url = rpc_url.parse()?;
-    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
+    let http_transport = HttpTransport::new(reqwest::Client::new(), url);
+    let is_local = http_transport.guess_local();
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
+        .transport(http_transport, is_local);
     std::fs::create_dir_all(db_subdir).ok();
     let db_path = versioned_path(&Path::new(db_subdir).join("log_store.db"));
     let cache_db = CacheDb::open(&db_path)?;

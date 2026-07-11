@@ -27,7 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chainfold::observe::{
-    CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, RPC_TARGET, SETUP_TARGET, SQLITE_TARGET,
+    ATTEMPT_TARGET, CACHE_TARGET, CONNECT_TARGET, CacheLayer, CacheOutcome, RPC_TARGET,
+    SETUP_TARGET, SQLITE_TARGET,
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
@@ -65,6 +66,11 @@ const SECTIONS: &[Section] = &[
         target: RPC_TARGET,
         header: "rpc calls",
         label: "method",
+    },
+    Section {
+        target: ATTEMPT_TARGET,
+        header: "rpc attempts",
+        label: "span",
     },
     Section {
         target: CONNECT_TARGET,

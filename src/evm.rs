@@ -46,4 +46,4 @@ pub use erc20::{
 };
 pub use log_spec::LogSpec;
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
-pub use transport::{RpcTimingLayer, rpc_retry_layer};
+pub use transport::{HttpTransport, RpcTimingLayer, rpc_retry_layer};

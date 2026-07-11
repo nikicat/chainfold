@@ -30,7 +30,7 @@ use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::{ChunkSize, Finality};
 use chainfold::evm::{
     ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, LogFilter, TRANSFER_TOPIC,
-    Topic, rpc_retry_layer,
+    HttpTransport, Topic, rpc_retry_layer,
 };
 use chainfold::merge::{MergedItem, MergedPos, SourceKey, interleave_hist_stores};
 use clap::Parser;
@@ -116,7 +116,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, key) in chain_keys.iter().enumerate() {
         println!("Setting up '{}' from {}...", key, args.rpc_url[i]);
         let url: Url = args.rpc_url[i].parse()?;
-        let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
+        let transport = HttpTransport::new(reqwest::Client::new(), url);
+        let is_local = transport.guess_local();
+        let client = ClientBuilder::default()
+            .layer(rpc_retry_layer())
+            .transport(transport, is_local);
         let address: Address = args.address[i].parse()?;
 
         let db_dir = format!("{}/{}", args.db.trim_end_matches('/'), key);

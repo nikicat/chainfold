@@ -242,7 +242,7 @@ lib.rs                     pub mod {arch, cache, chain, combinators, matcher, me
 │  ├─ erc20.rs             Transfer decode · metadata · balance apply
 │  ├─ owned_erc20.rs       two-filter in/out ordered merge
 │  ├─ chain_provider.rs    ChainProvider<P> — chain-scoped RPC seam
-│  └─ transport.rs         alloy client-stack layers — RpcTimingLayer · rpc_retry_layer
+│  └─ transport.rs         wire layer — HttpTransport (owned; no URL in telemetry/errors) · RpcTimingLayer · rpc_retry_layer
 ├─ bitcoin/                ← cfg(feature = "bitcoin")
 │  ├─ types.rs             BtcBlock · BtcBlockHash (display-order hex) · CompactTarget
 │  ├─ transport.rs         BtcAuth · ReqwestTransport (jsonrpc async Transport) · TracingTransport
@@ -1306,6 +1306,7 @@ dynamic wire data, so RPC spans are named `rpc` and carry the method in a
 | Kind | target | row label |
 |---|---|---|
 | RPC call (span) | `chainfold::rpc` | `method` field — the JSON-RPC method (`eth_getLogs`, …) |
+| HTTP attempt (span) | `chainfold::attempt` | span name — `attempt`; carries `endpoint` (scheme+host+port, key-bearing path/query stripped); nests inside its rpc span, one per wire try, so `attempt − rpc` counts retries |
 | Connection setup (span) | `chainfold::connect` | span name — `connect` |
 | SQLite read (span) | `chainfold::sqlite` | span name — the query (`get_blocks_in_range`, …) |
 | Setup phase (span) | `chainfold::setup` | span name — the phase (`chainlist_load`, `client_build`, `db_open`, …) |

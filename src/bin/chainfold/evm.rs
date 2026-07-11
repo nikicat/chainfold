@@ -4,13 +4,13 @@ pub mod events;
 
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
-use alloy::transports::http::Http;
 use alloy::transports::http::reqwest::Url;
 use std::sync::Arc;
 
 use chainfold::cache::CacheDb;
 use chainfold::evm::{
-    ChainId, ChainProvider, EvmChain, EvmChainConfig, RpcTimingLayer, rpc_retry_layer,
+    ChainId, ChainProvider, EvmChain, EvmChainConfig, HttpTransport, RpcTimingLayer,
+    rpc_retry_layer,
 };
 use chainfold::observe::ConnectTimingLayer;
 
@@ -136,7 +136,7 @@ pub async fn run(
             .connector_layer(ConnectTimingLayer)
             .build()?
     };
-    let transport = Http::with_client(http_client, url);
+    let transport = HttpTransport::new(http_client, url);
     let is_local = transport.guess_local();
     // Rpc timing goes outermost (before retry) so one `rpc` span covers each
     // logical request end-to-end, retries and backoff included.

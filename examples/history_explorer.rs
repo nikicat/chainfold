@@ -24,7 +24,7 @@ use chainfold::cache::{CacheDb, versioned_path};
 use chainfold::chain::{ChunkSize, Finality};
 use chainfold::evm::{
     ChainProvider, EvmChain, EvmChainConfig, EvmEvent, EvmPosition, LogFilter, Topic,
-    rpc_retry_layer,
+    HttpTransport, rpc_retry_layer,
 };
 use chrono::NaiveDate;
 use clap::Parser;
@@ -166,7 +166,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topics: [Option<Topic>; 4] = [topic0, None, None, None];
 
     let url: Url = args.rpc_url.parse()?;
-    let client = ClientBuilder::default().layer(rpc_retry_layer()).http(url);
+    let transport = HttpTransport::new(reqwest::Client::new(), url);
+    let is_local = transport.guess_local();
+    let client = ClientBuilder::default()
+        .layer(rpc_retry_layer())
+        .transport(transport, is_local);
     let db_path = versioned_path(Path::new(&args.db));
     let cache_db = CacheDb::open(&db_path)?;
     let provider = ChainProvider::discover(
@@ -230,7 +234,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         drop(chain);
         let cache_db2 = CacheDb::open(&db_path)?;
         let url2: Url = args.rpc_url.parse()?;
-        let client2 = ClientBuilder::default().layer(rpc_retry_layer()).http(url2);
+        let transport2 = HttpTransport::new(reqwest::Client::new(), url2);
+        let is_local2 = transport2.guess_local();
+        let client2 = ClientBuilder::default()
+            .layer(rpc_retry_layer())
+            .transport(transport2, is_local2);
         let provider2 = ChainProvider::discover(
             ProviderBuilder::new().connect_client(client2),
             Arc::new(cache_db2.logs()),

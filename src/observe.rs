@@ -33,6 +33,7 @@
 //! | Kind | target | row label |
 //! |---|---|---|
 //! | RPC wire request | `chainfold::rpc` | `method` field — the JSON-RPC method (`eth_getLogs`, …); `reqs` counts the batched calls |
+//! | HTTP attempt | `chainfold::attempt` | span name — `attempt`; carries `endpoint` (scheme+host+port, key-bearing path/query stripped); nests inside its rpc span, one per wire try, so `attempt − rpc` counts retries |
 //! | Connection setup | `chainfold::connect` | span name — `connect` |
 //! | `SQLite` read | `chainfold::sqlite` | span name — the query (`get_logs_in_range`, …) |
 //! | Setup phase | `chainfold::setup` | span name — the phase (`db_open`, `chainlist_load`, …) |
@@ -73,6 +74,10 @@ use tracing::{Instrument, Level, Span};
 /// `evm::transport`) — `tracing`'s `target:` slot only accepts a string
 /// literal, so the const exists for the *subscriber* side to match against.
 pub const RPC_TARGET: &str = "chainfold::rpc";
+/// Target for per-HTTP-attempt spans (`HttpTransport` in `evm::transport`).
+/// The rpc span covers a logical request end-to-end — retries, backoff —
+/// while each attempt span covers one wire try inside it.
+pub const ATTEMPT_TARGET: &str = "chainfold::attempt";
 /// Target for connection-establishment spans (see [`connect_span`]).
 pub const CONNECT_TARGET: &str = "chainfold::connect";
 /// Target for durable SQLite-read spans.
@@ -288,6 +293,7 @@ mod tests {
     #[test]
     fn targets_match_literals() {
         assert_eq!(RPC_TARGET, "chainfold::rpc");
+        assert_eq!(ATTEMPT_TARGET, "chainfold::attempt");
         assert_eq!(CONNECT_TARGET, "chainfold::connect");
         assert_eq!(SQLITE_TARGET, "chainfold::sqlite");
         assert_eq!(SETUP_TARGET, "chainfold::setup");
