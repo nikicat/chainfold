@@ -129,9 +129,9 @@ pub enum WidthHint {
 /// in both modes so piped headers stay stable.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum HeaderCase {
-    /// Upper-case headers (`gas used` → `GAS USED`) — the CLI default.
+    /// Capitalize each word (`gas used` → `Gas Used`) — the CLI default.
     #[default]
-    Upper,
+    Capitalized,
     /// Names as declared — for headers that are identifiers with meaningful
     /// casing (e.g. chainlist's `chainId` / `shortName`).
     AsIs,
@@ -167,7 +167,7 @@ impl Column {
 
     fn cased_name(&self, case: HeaderCase) -> String {
         match case {
-            HeaderCase::Upper => self.name.to_uppercase(),
+            HeaderCase::Capitalized => capitalize_words(self.name),
             HeaderCase::AsIs => self.name.to_string(),
         }
     }
@@ -474,6 +474,22 @@ fn alignment(align: Align) -> Alignment {
     }
 }
 
+/// Capitalize the first letter of each space-separated word
+/// (`gas used` → `Gas Used`).
+fn capitalize_words(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut word_start = true;
+    for c in s.chars() {
+        if word_start {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push(c);
+        }
+        word_start = c == ' ';
+    }
+    out
+}
+
 fn pad(text: &str, width: usize, align: Align) -> String {
     match align {
         Align::Left => format!("{text:<width$}"),
@@ -520,9 +536,9 @@ mod tests {
 
     fn spec() -> TableSpec {
         TableSpec::new(vec![
-            Column::right("ID").min(4),
-            Column::left("NAME").min(6),
-            Column::left("NOTE"),
+            Column::right("id").min(4),
+            Column::left("name").min(6),
+            Column::left("note"),
         ])
     }
 
@@ -566,7 +582,7 @@ mod tests {
         assert_eq!(
             out,
             "── Things ────────\n\
-             \x20 ID  NAME    NOTE\n\
+             \x20 Id  Name    Note\n\
              \x20  7  alpha   x\n\
              \x20 42  beta    y"
         );
@@ -597,7 +613,7 @@ mod tests {
     fn row_writer_plain_is_exact() {
         let w = writer(RenderMode::Plain);
         assert_eq!(w.rule(), "─".repeat(18));
-        assert_eq!(w.header(), "  ID  NAME    NOTE");
+        assert_eq!(w.header(), "  Id  Name    Note");
         let row = w.row(&[Cell::new("7"), Cell::new("alpha"), Cell::new("x")]);
         assert_eq!(row, "   7  alpha   x");
     }
@@ -650,16 +666,16 @@ mod tests {
 
     #[test]
     fn header_case_is_style_not_content() {
-        let cols = || vec![Column::right("id").min(4), Column::left("name")];
+        let cols = || vec![Column::right("id").min(4), Column::left("gas used")];
         let out = Out {
             mode: RenderMode::Plain,
             target: Target::Stdout,
         };
-        assert_eq!(out.rows(TableSpec::new(cols())).header(), "  ID  NAME");
+        assert_eq!(out.rows(TableSpec::new(cols())).header(), "  Id  Gas Used");
         assert_eq!(
             out.rows(TableSpec::new(cols()).header_case(HeaderCase::AsIs))
                 .header(),
-            "  id  name"
+            "  id  gas used"
         );
     }
 

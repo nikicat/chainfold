@@ -1406,9 +1406,9 @@ italic-cyan titles, bold headers, modest colors, OSC-8 explorer links;
 Plain (piped) is the same text with **no escape bytes at all** — stripping
 Pretty's ANSI yields the Plain render byte-for-byte (pinned by test, which
 also pins `tabled`'s `ansi` feature measuring embedded escapes as
-zero-width). Headers are uppercased by
-default; `HeaderCase::AsIs` preserves identifier headers like chainlist's
-`chainId`. Each table declares one `TableSpec` (column names, alignment,
+zero-width). Headers are word-capitalized by default (`gas used` →
+`Gas Used`); `HeaderCase::AsIs` preserves identifier headers like
+chainlist's `chainId`. Each table declares one `TableSpec` (column names, alignment,
 min-width hints; `HexDetail` picks value abbreviation orthogonally) consumed
 by both render paths: buffered `TableBuf` for bounded one-shot output, and
 the append-only `RowWriter` (via `Out::rows`) for `--follow` streams, which
