@@ -35,21 +35,30 @@ async fn main() -> ExitCode {
     // filter gates only the fmt layer, so the summary is independent of it.
     // Logs go to stderr — stdout is reserved for command output. Warnings
     // are visible by default; setting RUST_LOG replaces that baseline, and
-    // -v layers extra directives on top of either. Span new/close events
-    // render the boundary spans (rpc, connect, sqlite, setup) as log
-    // records, so -v shows each wire request with its fields and timing.
+    // -v layers extra directives on top of either. Span close events render
+    // the boundary spans (rpc, connect, sqlite, setup) as log records, so
+    // -v shows each wire request with its fields and timing.
     let stats = cli.stats.then(Stats::default);
+    let verbosity = Verbosity::from_count(cli.verbose);
     let mut log_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::WARN.into())
         .from_env_lossy();
-    if let Some(directive) = verbosity_directive(Verbosity::from_count(cli.verbose)) {
+    if let Some(directive) = verbosity_directive(verbosity) {
         log_filter = log_filter.add_directive(directive);
     }
+    // Span lifecycle events inherit the span's own level, so `new` can't be
+    // demoted below `close`; gate it on the trace tier instead. `close`
+    // alone carries the span's fields plus timing — `new` adds only the
+    // start timestamp, which earns its noise once requests may hang.
+    let span_events = match verbosity {
+        Verbosity::AllTrace => FmtSpan::NEW | FmtSpan::CLOSE,
+        _ => FmtSpan::CLOSE,
+    };
     tracing_subscriber::registry()
         .with(
             fmt_layer()
                 .with_writer(std::io::stderr)
-                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                .with_span_events(span_events)
                 .with_filter(log_filter),
         )
         .with(stats.clone())
