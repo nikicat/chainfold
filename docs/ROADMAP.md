@@ -169,9 +169,12 @@ holds them in place — only the linear-demo documentation value. Staged plan:
 - ~~`erc20_explorer`~~ — deleted (2026-07-12); the README quickstart now
   drives `evm erc20`, and the Phase 7 `--prune-after` deliverable (above)
   targets `evm erc20`.
-- `history_explorer` — listing is redundant with `evm events`; move the
-  `--measure` cold/warm/hot cache benchmark to a new `evm bench` (or
-  similar) first.
+- ~~`history_explorer`~~ — deleted (2026-07-12); listing was redundant with
+  `evm events`. Its `--measure` cold/warm/hot benchmark was dropped rather
+  than moved: tests already assert zero-RPC warm walks through the
+  observability contract, and `--stats`/traces give timing on demand. If
+  in-process perf tracking is ever wanted, it's a criterion `cargo bench`,
+  not a CLI subcommand.
 - `bridge_explorer` / `bridge_matcher` — no CLI surface exists (cross-chain
   interleave, anchored matching); absorbing them needs repeatable
   `--chain`+`--rpc-url`+`--address` group design (chainfoldd-adjacent

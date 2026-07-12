@@ -79,7 +79,8 @@ Everything in the design is in service of two measurable properties:
    node *at most once*. Concurrent readers of the same cold gap are
    *singleflighted* into one `eth_getLogs`; ranges are snapped to aligned
    chunk boundaries so slightly-different requests share cache entries. A
-   warm walk is ~98× faster than the cold one on a mainnet fork.
+   warm walk issues zero RPC and runs orders of magnitude faster than the
+   cold one.
 
 2. **Real-time delivery.** Live logs reach the consumer in single-digit ms
    end-to-end (~3 ms over WS on local anvil); chainfold's *internal* hop is
@@ -1502,7 +1503,6 @@ validation surfaces against real RPC:
 
 | Example | Demonstrates |
 |---|---|
-| `history_explorer` | raw single-filter log walker; `--measure` prints cold/warm/hot tiers |
 | `bridge_explorer` | multi-chain cross-source merge (merge by `event.timestamp`) |
 | `bridge_matcher` | cross-chain `Matcher` with anchor persistence in a separate SQLite file |
 

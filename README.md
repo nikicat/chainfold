@@ -20,8 +20,9 @@ One engine, three surfaces: an embeddable **Rust library**, a `cast`-like
 
 1. **Minimal RPC.** Any block/time range is fetched *at most once*. Later reads
    hit local SQLite; partial overlaps fetch only the gap; concurrent readers of
-   the same cold range are coalesced into one call. A warm walk is ~98× faster
-   than the cold one on a mainnet fork.
+   the same cold range are coalesced into one call. A warm walk issues zero
+   RPC and is orders of magnitude faster — compare two `--stats` runs of the
+   same query.
 2. **Real-time delivery.** Live logs reach the consumer in single-digit ms
    (~3 ms over WebSocket on local anvil); the internal hop is sub-millisecond
    because the live path never touches SQLite.

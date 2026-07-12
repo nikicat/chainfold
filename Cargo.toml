@@ -174,10 +174,6 @@ name = "bitcoin_blocks_history"
 required-features = ["bitcoin"]
 
 [[example]]
-name = "history_explorer"
-required-features = ["evm"]
-
-[[example]]
 name = "bridge_explorer"
 required-features = ["evm"]
 
