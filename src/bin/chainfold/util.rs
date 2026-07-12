@@ -65,7 +65,7 @@ const DEFAULT_FROM_BLOCK: u64 = 22_000_000;
 /// `--to` vs `--from-block` / `--num-blocks`. Domain types: clap's raw
 /// integers wrap here, once.
 pub enum WindowSel {
-    /// `--from` + `--to` (UTC dates).
+    /// `--from` (+ `--to`, defaulting to now) — UTC dates.
     Dates { from: Timestamp, to: Timestamp },
     /// `--from-block` (+ `--num-blocks`).
     Blocks {
@@ -84,16 +84,19 @@ pub fn window_sel(args: &WindowArgs) -> Result<WindowSel, Box<dyn std::error::Er
     }
     let num_blocks = BlockCount::new(args.num_blocks);
     match (&args.from, &args.to, args.from_block) {
-        (Some(from), Some(to), None) => Ok(WindowSel::Dates {
+        (Some(from), to, None) => Ok(WindowSel::Dates {
             from: parse_datetime(from)?,
-            to: parse_datetime(to)?,
+            to: match to {
+                Some(to) => parse_datetime(to)?,
+                None => Timestamp::new(chrono::Utc::now().timestamp() as u64),
+            },
         }),
         (None, None, Some(from_block)) => Ok(WindowSel::Blocks {
             from_block: BlockNumber::new(from_block),
             num_blocks,
         }),
         (None, None, None) => Ok(WindowSel::Unspecified { num_blocks }),
-        _ => Err("provide either --from + --to or --from-block, not both".into()),
+        _ => Err("provide either --from (+ optional --to) or --from-block, not both".into()),
     }
 }
 
@@ -120,11 +123,9 @@ pub async fn estimate_date_range<P: Provider<Ethereum> + Clone + Send + Sync + '
 
 /// The CLI note printed with a dates-window estimate.
 pub fn print_date_estimate(args: &WindowArgs, range: BlockRange) {
-    // The Dates arm implies both flags are present.
-    let (from_str, to_str) = (
-        args.from.as_deref().expect("Dates arm has --from"),
-        args.to.as_deref().expect("Dates arm has --to"),
-    );
+    // The Dates arm implies --from is present; --to defaults to now.
+    let from_str = args.from.as_deref().expect("Dates arm has --from");
+    let to_str = args.to.as_deref().unwrap_or("now");
     println!("  Date range: {from_str} → {to_str}");
     println!("  Estimated blocks: {range}");
 }

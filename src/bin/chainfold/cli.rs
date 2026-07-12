@@ -390,7 +390,8 @@ pub struct WindowArgs {
     #[arg(long, value_name = "DATE")]
     pub from: Option<String>,
 
-    /// End date, UTC (e.g. 2025-01-16 or 2025-01-16T12:00:00)
+    /// End date, UTC (e.g. 2025-01-16 or 2025-01-16T12:00:00).
+    /// Defaults to now when --from is given.
     #[arg(long, value_name = "DATE")]
     pub to: Option<String>,
 
