@@ -22,10 +22,11 @@
   know something source-specific to work, the abstraction boundary is in the
   wrong place — move the concern, don't parameterize around it.
 - **Prefer the native mechanism over hand-rolling.** When a dependency, the
-  stdlib, or an existing module already covers a need, use it. Example:
+  stdlib, or an existing module already covers a need, use it. Examples:
   clap's `env = "CHAINFOLD_STATS"` attribute (self-documenting in `--help`,
   flag-beats-env precedence) replaced a hand-written `std::env::var` check
-  beside the arg it duplicated.
+  beside the arg it duplicated; `Duration::from_hours(24)` over
+  `from_secs(24 * 60 * 60)`.
 
 ---
 
@@ -104,6 +105,10 @@ stdout; diagnostics go through tracing). The span contract
   `rpc`.
 - Single-call-site span helpers are local `macro_rules!` living next to their
   emitters (`sqlite_span!`, `setup_span!`), not in a central module.
+- **Diagnostics ride tracing, not return types.** Don't thread a count or
+  label through an API purely to decorate a report line (a refresh's
+  skipped-entry count is a `tracing::debug!` at the skip site, not a struct
+  field). If no caller branches on a value, it isn't a return value.
 
 ---
 
@@ -134,22 +139,38 @@ Model bounded vocabularies and domain quantities as closed enums or newtypes
   not positional.
 
 **The boundary-funnel pattern.** Raw primitives are fine *at* the boundary
-(clap fields, RPC wire structs, SQLite columns) — they're name-bound at both
-ends there. The rule's force applies at the funnel: convert **once** into
-the domain type of the joint decision, exhaustively. Examples:
+(RPC wire structs, SQLite columns) — they're name-bound at both ends there.
+The rule's force applies at the funnel: convert **once** into the domain
+type of the joint decision, exhaustively — and put the funnel at the
+**earliest seam available**.
+
+For clap that seam is the arg itself: value-taking fields carry domain
+types via `value_parser`, so the raw `String`/`u64` field never exists —
+`Option<ChainHandle>`, `Option<ChainId>`, `Vec<TokenRef>` (an
+address-or-symbol enum: the parser commits `0x…` to the address arm, so bad
+hex errors instead of leaking through as a "symbol"). Parser **error types
+are domain types too**: reuse the upstream error (`FromHexError`,
+`ParseIntError`) rather than `String` — invent a wrapper only when no
+existing error fits. A flag shared by several subtrees is one top-level
+`global = true` arg (`--db`), not per-subtree copies.
+
+Clap `bool` *presence* flags are the exception — `value_parser` never sees
+an absent flag, so they stay raw and funnel right after clap:
 `Direction::from_reverse(bool)`, `FollowMode::from_follow(bool)`, purge
 flags → `Vec<CacheSection>` via a per-section match (so a new section can't
-be silently ignored), `BtcAuth` funneling four auth flags/configs,
-`Out::stdout()`/`Out::stderr()` sniffing "is this stream a TTY?" once and
-binding the resolved `RenderMode` to its stream (no ad-hoc `is_terminal()`
-downstream), `HexDetail::from_full(bool)` for the `--full` value-detail
-flag. Clap `bool` fields stay raw — an `Enable/Disable` enum would rename
-the bool without adding swap-safety.
+be silently ignored), `HexDetail::from_full(bool)` for the `--full`
+value-detail flag; an `Enable/Disable` enum would rename the bool without
+adding swap-safety. Non-clap funnels work the same way: `BtcAuth` funneling
+four auth flags/configs, `Out::stdout()`/`Out::stderr()` sniffing "is this
+stream a TTY?" once and binding the resolved `RenderMode` to its stream (no
+ad-hoc `is_terminal()` downstream).
 
 **Low-churn tactics:** coordinate constructors keep raw params and wrap
 internally (`EvmPosition::new(u64, u32)` — position literals in tests don't
 churn); `#[serde(transparent)]` on wire-visible newtypes keeps marshals (and
-saved resume anchors) byte-identical to the pre-newtype encoding.
+saved resume anchors) byte-identical to the pre-newtype encoding; closed-enum
+`ALL` consts are `&[Self]` slices (length inferred from the value), not
+`[Self; N]` arrays that hand-count variants.
 
 ### Shared ownership is spelled `share()`
 
