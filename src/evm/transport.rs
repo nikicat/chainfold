@@ -532,7 +532,10 @@ mod tests {
         );
         let fields = dump.fields.lock().unwrap();
         for text in fields.iter() {
-            assert!(!text.contains(SECRET), "secret leaked into telemetry: {text}");
+            assert!(
+                !text.contains(SECRET),
+                "secret leaked into telemetry: {text}"
+            );
         }
         // The endpoint identity survives redaction: scheme + host + port,
         // no path.
