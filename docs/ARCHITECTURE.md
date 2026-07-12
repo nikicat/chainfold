@@ -879,6 +879,7 @@ The concrete client for EVM log streams (`feature = "evm"`).
 | **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session. Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
+| **`tokenlist`** | Symbol → address resolver over a curated [Token Lists](https://tokenlists.org) snapshot (default: Uniswap Labs'), cached in `TokenListCache` with a 24 h TTL. Case-insensitive lookup; unique exact-case match breaks collisions, otherwise a loud `Ambiguous`/`NotFound` error. Non-EVM entries (Solana mints) are dropped at ingest. Backs the CLI's `--token USDC` and `chainfold tokens`. |
 | **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Arc<LogCache>`**. Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
 | **`ChunkSize::align` / `ChunkSize::chunk_end`** | The single owner of chunk-alignment arithmetic (`chain/height.rs`). `align` widens load windows outward; `chunk_end` caps each gap fetch at its chunk boundary (`walk_step`), so concurrent consumers hit the same cache entries and no RPC request spans a chunk. |
 
@@ -951,9 +952,9 @@ unified migration list — every family's tables exist in every cache file
 concern: the cross-family `Coverage` (scanned ranges + reorg tombstones,
 `src/cache/coverage.rs`) by the shared layer, and the per-family payload
 views by `impl CacheDb` blocks in the family modules (`LogCache` /
-`Erc20Cache` / `EventSignatureCache` for EVM, `BtcBlockCache` for Bitcoin) —
-the shared layer never names a family. One DB file scopes one chain: the
-history tables carry no chain/network column.
+`Erc20Cache` / `EventSignatureCache` / `TokenListCache` for EVM,
+`BtcBlockCache` for Bitcoin) — the shared layer never names a family. One DB
+file scopes one chain: the history tables carry no chain/network column.
 
 ```mermaid
 erDiagram
@@ -1027,6 +1028,20 @@ erDiagram
         text signature
         blob topic0
         text abi_json "nullable"
+    }
+    token_list {
+        int  chain_id PK
+        blob address PK
+        text symbol "NOCASE-indexed lookup key"
+        text name
+        int  decimals
+    }
+    token_list_meta {
+        int  id PK "CHECK id = 1 — single row"
+        text url
+        text name
+        text version
+        int  fetched_at "staleness check (24 h TTL)"
     }
     cached_logs        }o--|| scanned_ranges  : "same filter_hash partition"
     cached_blocks      }o--|| scanned_ranges  : "ScanPartition::Blocks"
@@ -1372,21 +1387,24 @@ every read cached. `main` returns an `ExitCode` and renders errors via
 
 ```mermaid
 flowchart TB
-    root["chainfold"]
+    root["chainfold (global: --db, --config, --stats, -v)"]
     root --> config["config"]
     root --> chains["chains"]
-    root --> evm["evm (EvmArgs: --chain/--chain-id, --rpc-url, --db,<br/>window flags, --reverse/--follow)"]
-    root --> bitcoin["bitcoin (BitcoinArgs: --rpc-url,<br/>--rpc-cookie-file / --rpc-user+--rpc-pass, --db,<br/>window flags, --reverse/--follow)"]
-    root --> cachecmd["cache --db"]
+    root --> tokenscmd["tokens"]
+    root --> evm["evm (EvmArgs: --chain/--chain-id, --rpc-url,<br/>window flags, --reverse/--follow)"]
+    root --> bitcoin["bitcoin (BitcoinArgs: --rpc-url,<br/>--rpc-cookie-file / --rpc-user+--rpc-pass,<br/>window flags, --reverse/--follow)"]
+    root --> cachecmd["cache"]
     config --> cshow["show — print resolved config"]
     config --> ccheck["check — validate + test RPC"]
     chains --> clist["list — resolvable chain names (chainlist.org),<br/>testnets hidden unless --testnets / --alchemy-supported"]
+    tokenscmd --> tlist["list [--chain/--chain-id] — cached token list"]
+    tokenscmd --> trefresh["refresh — re-fetch the snapshot"]
     evm --> eblocks["blocks list [--full]"]
-    evm --> erc20["erc20 --address… --owner…"]
+    evm --> erc20["erc20 --token… --owner…<br/>(--token: 0x address or list symbol)"]
     evm --> events["events --address --event/--event-sig/--topic0<br/>[--decode] [--full]"]
     bitcoin --> bblocks["blocks list [--full]"]
     cachecmd --> csize["size — per-table counts + footprint"]
-    cachecmd --> cpurge["purge [--history/--erc20/--signatures]"]
+    cachecmd --> cpurge["purge [--history/--erc20/--signatures/--tokens]"]
     erc20 --> transfers["transfers"]
     erc20 --> balances["balances (running balance column)"]
 ```

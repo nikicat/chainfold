@@ -147,10 +147,12 @@ pub enum CacheSection {
     Erc20,
     /// Resolved event signatures.
     Signatures,
+    /// The curated token list (symbol → address entries + fetch metadata).
+    Tokens,
 }
 
 impl CacheSection {
-    pub const ALL: [Self; 3] = [Self::History, Self::Erc20, Self::Signatures];
+    pub const ALL: &[Self] = &[Self::History, Self::Erc20, Self::Signatures, Self::Tokens];
 
     /// Section name as surfaced by the CLI (matches the purge flag names).
     #[must_use]
@@ -159,6 +161,7 @@ impl CacheSection {
             Self::History => "history",
             Self::Erc20 => "erc20",
             Self::Signatures => "signatures",
+            Self::Tokens => "tokens",
         }
     }
 }
@@ -177,10 +180,12 @@ pub enum CacheTable {
     Erc20Metadata,
     Erc20Balances,
     EventSignatures,
+    TokenList,
+    TokenListMeta,
 }
 
 impl CacheTable {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: &[Self] = &[
         Self::CachedLogs,
         Self::ReorgedBlocks,
         Self::ScannedRanges,
@@ -190,6 +195,8 @@ impl CacheTable {
         Self::Erc20Metadata,
         Self::Erc20Balances,
         Self::EventSignatures,
+        Self::TokenList,
+        Self::TokenListMeta,
     ];
 
     /// The SQL table name. Identifiers can't be bound as parameters, so
@@ -207,6 +214,8 @@ impl CacheTable {
             Self::Erc20Metadata => "erc20_metadata",
             Self::Erc20Balances => "erc20_balances",
             Self::EventSignatures => "event_signatures",
+            Self::TokenList => "token_list",
+            Self::TokenListMeta => "token_list_meta",
         }
     }
 
@@ -222,6 +231,7 @@ impl CacheTable {
             | Self::CachedBtcBlocks => CacheSection::History,
             Self::Erc20Metadata | Self::Erc20Balances => CacheSection::Erc20,
             Self::EventSignatures => CacheSection::Signatures,
+            Self::TokenList | Self::TokenListMeta => CacheSection::Tokens,
         }
     }
 }
@@ -348,7 +358,7 @@ impl CacheDb {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
         let mut report = Vec::new();
-        for &table in &CacheTable::ALL {
+        for &table in CacheTable::ALL {
             if !sections.contains(&table.section()) {
                 continue;
             }
@@ -546,6 +556,34 @@ pub(crate) fn migrations() -> rusqlite_migration::Migrations<'static> {
             time      INTEGER NOT NULL,
             tx_count  INTEGER NOT NULL,
             bits      INTEGER NOT NULL
+        );
+        ",
+        ),
+        rusqlite_migration::M::up(
+            "
+        -- Curated token-list entries (the Token Lists standard,
+        -- tokens.uniswap.org) for symbol → address resolution. Replaced
+        -- wholesale on refresh; token_list_meta records where the entries
+        -- came from and when (the staleness check). Symbol lookups match
+        -- case-insensitively, hence the NOCASE index.
+        CREATE TABLE token_list (
+            chain_id INTEGER NOT NULL,
+            address  BLOB    NOT NULL,
+            symbol   TEXT    NOT NULL,
+            name     TEXT    NOT NULL,
+            decimals INTEGER NOT NULL,
+            PRIMARY KEY (chain_id, address)
+        );
+        CREATE INDEX idx_token_list_symbol
+            ON token_list(chain_id, symbol COLLATE NOCASE);
+
+        -- One row (id=1): provenance + freshness of the token_list snapshot.
+        CREATE TABLE token_list_meta (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            url         TEXT    NOT NULL,
+            name        TEXT    NOT NULL,
+            version     TEXT    NOT NULL,
+            fetched_at  INTEGER NOT NULL
         );
         ",
         ),

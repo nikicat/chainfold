@@ -14,8 +14,12 @@ use crate::cli::{CacheArgs, CacheCommand, CachePurgeArgs};
 use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
 use crate::util::db_base_path;
 
-pub fn run(args: &CacheArgs, out: Out) -> Result<(), Box<dyn std::error::Error>> {
-    let base = db_base_path(args.db.as_deref());
+pub fn run(
+    db: Option<&Path>,
+    args: &CacheArgs,
+    out: Out,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let base = db_base_path(db);
     let db_path = versioned_path(&base);
     match &args.command {
         CacheCommand::Size => size(&base, &db_path, out),
@@ -32,8 +36,13 @@ fn purge_sections(args: &CachePurgeArgs) -> Vec<CacheSection> {
         CacheSection::History => args.history,
         CacheSection::Erc20 => args.erc20,
         CacheSection::Signatures => args.signatures,
+        CacheSection::Tokens => args.tokens,
     };
-    let picked: Vec<_> = CacheSection::ALL.into_iter().filter(|&s| flag(s)).collect();
+    let picked: Vec<_> = CacheSection::ALL
+        .iter()
+        .copied()
+        .filter(|&s| flag(s))
+        .collect();
     if picked.is_empty() {
         CacheSection::ALL.to_vec()
     } else {
@@ -44,7 +53,7 @@ fn purge_sections(args: &CachePurgeArgs) -> Vec<CacheSection> {
 /// Whether the purge is a full wipe (no narrowing flags) — full purges also
 /// remove stale older-version cache files.
 fn is_full_purge(args: &CachePurgeArgs) -> bool {
-    !(args.history || args.erc20 || args.signatures)
+    !(args.history || args.erc20 || args.signatures || args.tokens)
 }
 
 // ============================================================
@@ -164,7 +173,7 @@ fn size(base: &Path, db_path: &Path, out: Out) -> Result<(), Box<dyn std::error:
     let stats = CacheDb::open(db_path)?.table_stats()?;
 
     println!("Cache: {}", db_path.display());
-    for section in CacheSection::ALL {
+    for &section in CacheSection::ALL {
         let mut table = section_table();
         table.title(section.name());
         for stat in stats.iter().filter(|s| s.table.section() == section) {
@@ -282,6 +291,7 @@ mod tests {
             history: false,
             erc20: false,
             signatures: false,
+            tokens: false,
         };
         assert_eq!(purge_sections(&all), CacheSection::ALL.to_vec());
 
@@ -289,10 +299,19 @@ mod tests {
             history: true,
             erc20: false,
             signatures: true,
+            tokens: false,
         };
         assert_eq!(
             purge_sections(&narrowed),
             vec![CacheSection::History, CacheSection::Signatures]
         );
+
+        let tokens_only = CachePurgeArgs {
+            history: false,
+            erc20: false,
+            signatures: false,
+            tokens: true,
+        };
+        assert_eq!(purge_sections(&tokens_only), vec![CacheSection::Tokens]);
     }
 }

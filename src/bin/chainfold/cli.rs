@@ -1,7 +1,12 @@
 use std::path::PathBuf;
 
+use alloy::primitives::Address;
+use alloy::primitives::hex::FromHexError;
+use chainfold::evm::{ChainId, TokenSymbol};
 use clap::builder::FalseyValueParser;
 use clap::{ArgAction, Parser, Subcommand};
+
+use crate::chains::ChainHandle;
 
 /// Iteration direction — funneled from the `evm` `--reverse` flag, so the two
 /// run-fn plumbing args (`Direction`, [`FollowMode`]) can't be silently swapped
@@ -73,6 +78,45 @@ impl Verbosity {
     }
 }
 
+/// One `--token` value: a contract address used as-is, or a symbol to
+/// resolve against the cached token list — funneled at the clap boundary
+/// (the [`Direction`] pattern), so downstream code matches the closed enum
+/// instead of re-sniffing strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRef {
+    /// 0x-prefixed hex — no list lookup.
+    Address(Address),
+    /// Resolved against the cached token list (chain-scoped).
+    Symbol(TokenSymbol),
+}
+
+impl TokenRef {
+    /// Clap value parser: anything 0x-prefixed must parse as a 20-byte hex
+    /// address; everything else is a symbol, resolved later against the
+    /// list (which may reject it — resolution needs the chain and cache).
+    pub fn parse(raw: &str) -> Result<Self, FromHexError> {
+        if raw.starts_with("0x") || raw.starts_with("0X") {
+            raw.parse::<Address>().map(Self::Address)
+        } else {
+            Ok(Self::Symbol(TokenSymbol::new(raw)))
+        }
+    }
+}
+
+/// Clap parser for [`ChainHandle`] values (infallible normalization).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "clap value parsers must return Result"
+)]
+fn parse_chain_handle(raw: &str) -> Result<ChainHandle, std::convert::Infallible> {
+    Ok(ChainHandle::new(raw))
+}
+
+/// Clap parser for [`ChainId`] values.
+fn parse_chain_id(raw: &str) -> Result<ChainId, std::num::ParseIntError> {
+    raw.parse::<u64>().map(ChainId::new)
+}
+
 #[derive(Parser)]
 #[command(name = "chainfold", about = "Blockchain history explorer")]
 pub struct Cli {
@@ -92,6 +136,11 @@ pub struct Cli {
     #[arg(short, long, global = true, action = ArgAction::Count)]
     pub verbose: u8,
 
+    /// `SQLite` cache path. Defaults to `$XDG_CACHE_HOME/chainfold/chainfold.db`
+    /// (typically `~/.cache/chainfold/chainfold.db`).
+    #[arg(long, global = true)]
+    pub db: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -107,6 +156,11 @@ pub enum Command {
     Chains {
         #[command(subcommand)]
         action: ChainsCommand,
+    },
+    /// Token-list queries (cached tokens.uniswap.org data)
+    Tokens {
+        #[command(subcommand)]
+        action: TokensCommand,
     },
     /// EVM chain commands
     Evm(EvmArgs),
@@ -143,14 +197,29 @@ pub struct ChainsListArgs {
     pub alchemy_supported: bool,
 }
 
+#[derive(Subcommand)]
+pub enum TokensCommand {
+    /// List the cached token-list entries (fetches the list first when
+    /// nothing is cached yet).
+    List(TokensListArgs),
+    /// Re-fetch the token list and replace the cached snapshot.
+    Refresh,
+}
+
+#[derive(Parser)]
+pub struct TokensListArgs {
+    /// Only tokens on this chain, by name (chainlist.org shortName or
+    /// chainSlug — see `chains list`).
+    #[arg(long, conflicts_with = "chain_id", value_parser = parse_chain_handle)]
+    pub chain: Option<ChainHandle>,
+
+    /// Only tokens on this chain, by numeric chain ID.
+    #[arg(long, conflicts_with = "chain", value_parser = parse_chain_id)]
+    pub chain_id: Option<ChainId>,
+}
+
 #[derive(Parser)]
 pub struct CacheArgs {
-    /// `SQLite` cache path. Defaults to `$XDG_CACHE_HOME/chainfold/chainfold.db`
-    /// (typically `~/.cache/chainfold/chainfold.db`). `global` scopes the
-    /// flag to the `cache` subtree, so it may follow the subcommand.
-    #[arg(long, global = true)]
-    pub db: Option<PathBuf>,
-
     #[command(subcommand)]
     pub command: CacheCommand,
 }
@@ -178,6 +247,10 @@ pub struct CachePurgeArgs {
     /// Purge resolved event signatures
     #[arg(long)]
     pub signatures: bool,
+
+    /// Purge the cached token list
+    #[arg(long)]
+    pub tokens: bool,
 }
 
 #[derive(Parser)]
@@ -186,22 +259,17 @@ pub struct EvmArgs {
     /// Example: --chain ethereum, --chain arbitrum, --chain bnb. When neither
     /// --chain nor --chain-id is given, falls back to `$CHAINFOLD_CHAIN`, then
     /// the config `[evm] default_chain`, then `ethereum`.
-    #[arg(long, conflicts_with = "chain_id")]
-    pub chain: Option<String>,
+    #[arg(long, conflicts_with = "chain_id", value_parser = parse_chain_handle)]
+    pub chain: Option<ChainHandle>,
 
     /// Numeric chain ID. Use for chains not listed in chainlist.org.
     /// Example: --chain-id 56
-    #[arg(long, conflicts_with = "chain")]
-    pub chain_id: Option<u64>,
+    #[arg(long, conflicts_with = "chain", value_parser = parse_chain_id)]
+    pub chain_id: Option<ChainId>,
 
     /// RPC endpoint URL (overrides config)
     #[arg(long)]
     pub rpc_url: Option<String>,
-
-    /// `SQLite` cache path. Defaults to `$XDG_CACHE_HOME/chainfold/chainfold.db`
-    /// (typically `~/.cache/chainfold/chainfold.db`).
-    #[arg(long)]
-    pub db: Option<PathBuf>,
 
     /// Block chunk size for `eth_getLogs`
     #[arg(long, default_value = "1000")]
@@ -292,9 +360,11 @@ pub struct EventsArgs {
 
 #[derive(Parser)]
 pub struct Erc20Args {
-    /// Token contract address(es) (0x-prefixed hex). Repeat for multiple tokens.
-    #[arg(long, required = true)]
-    pub address: Vec<String>,
+    /// Token: a 0x-prefixed contract address, or a symbol (e.g. USDC)
+    /// resolved via the cached token list (see `chainfold tokens`).
+    /// Repeat for multiple tokens.
+    #[arg(long, required = true, value_parser = TokenRef::parse)]
+    pub token: Vec<TokenRef>,
 
     /// Owner address to track (0x-prefixed hex)
     #[arg(long)]
@@ -359,11 +429,6 @@ pub struct BitcoinArgs {
     #[arg(long, requires = "rpc_user")]
     pub rpc_pass: Option<String>,
 
-    /// `SQLite` cache path. Defaults to `$XDG_CACHE_HOME/chainfold/chainfold.db`
-    /// (typically `~/.cache/chainfold/chainfold.db`).
-    #[arg(long)]
-    pub db: Option<PathBuf>,
-
     /// Block chunk size for gap-fill alignment
     #[arg(long, default_value = "1000")]
     pub chunk_size: u64,
@@ -411,4 +476,26 @@ pub struct BtcBlocksListArgs {
     /// Add the PARENT column and print full hashes.
     #[arg(long)]
     pub full: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_ref_parses_addresses_and_symbols() {
+        let addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+        assert_eq!(
+            TokenRef::parse(addr).expect("valid address"),
+            TokenRef::Address(addr.parse().expect("static address"))
+        );
+        assert_eq!(
+            TokenRef::parse("USDC").expect("symbol"),
+            TokenRef::Symbol(TokenSymbol::new("USDC"))
+        );
+        // A 0x/0X prefix commits to the address form — bad hex is an error,
+        // never a symbol.
+        assert!(TokenRef::parse("0xNOTHEX").is_err());
+        assert!(TokenRef::parse("0X11").is_err());
+    }
 }

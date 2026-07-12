@@ -22,19 +22,20 @@ mod chain_provider;
 pub mod erc20;
 mod log_spec;
 mod owned_erc20;
+pub mod tokenlist;
 mod transport;
 mod types;
 
 pub use types::{
     Amount, Asset, BlockHash, ChainId, Erc20, Erc20Balance, Erc20Burn, Erc20Mint, Erc20Transfer,
-    EvmBlock, EvmEvent, EvmPosition, Gas, GasPrice, LogIdx, Topic, TxHash,
+    EvmBlock, EvmEvent, EvmPosition, Gas, GasPrice, LogIdx, TokenSymbol, Topic, TxHash,
 };
 
 pub use block_pos::{BlockPos, LogPage, LogRef};
 pub use block_spec::{BlockPage, BlockSpec};
 pub use cache::{
     BlockHeader, CachedErc20Metadata, Erc20Cache, EventSignatureCache, EventSignatureRow, LogCache,
-    compute_filter_hash,
+    TokenListCache, TokenListEntry, TokenListMeta, TokenListVersion, compute_filter_hash,
 };
 pub use chain::{
     DEFAULT_BLOCK_TIME, DEFAULT_CHUNK_SIZE, EvmChain, EvmChainConfig, LogFilter, SubscribeTransport,

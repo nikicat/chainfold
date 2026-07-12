@@ -5,16 +5,16 @@ pub mod events;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
 use alloy::transports::http::reqwest::Url;
+use std::path::Path;
 use std::sync::Arc;
 
 use chainfold::cache::CacheDb;
 use chainfold::evm::{
-    ChainId, ChainProvider, EvmChain, EvmChainConfig, HttpTransport, RpcTimingLayer,
-    rpc_retry_layer,
+    ChainProvider, EvmChain, EvmChainConfig, HttpTransport, RpcTimingLayer, rpc_retry_layer,
 };
 use chainfold::observe::ConnectTimingLayer;
 
-use crate::chains::{ChainHandle, ChainResolver, ChainSelector, select_chain};
+use crate::chains::{ChainResolver, ChainSelector, select_chain};
 use crate::cli::{Direction, EvmArgs, EvmCommand, FollowMode};
 use crate::config::{ChainIdCheck, Config, ConfigError, RpcSource};
 use crate::table::Out;
@@ -27,6 +27,7 @@ const CHAIN_ENV_VAR: &str = "CHAINFOLD_CHAIN";
 
 pub async fn run(
     config: &Config,
+    db: Option<&Path>,
     args: &EvmArgs,
     direction: Direction,
     follow: FollowMode,
@@ -39,8 +40,8 @@ pub async fn run(
         .ok()
         .and_then(|s| ChainSelector::parse(&s));
     let selector = select_chain(
-        args.chain_id.map(ChainId::new),
-        args.chain.as_deref().map(ChainHandle::new),
+        args.chain_id,
+        args.chain.clone(),
         env_default,
         config.default_chain().cloned(),
     );
@@ -116,7 +117,7 @@ pub async fn run(
 
     // Open the durable cache before the provider — the ChainProvider bundles
     // the log cache (header singleflight lives behind it).
-    let db_path = resolved_db_path(args.db.as_deref());
+    let db_path = resolved_db_path(db);
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {

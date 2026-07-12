@@ -27,6 +27,7 @@ const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8332";
 
 pub async fn run(
     config: &Config,
+    db: Option<&Path>,
     args: &BitcoinArgs,
     direction: Direction,
     follow: FollowMode,
@@ -43,7 +44,7 @@ pub async fn run(
 
     let auth = resolve_auth(args, config, &url);
 
-    let db_path = resolved_db_path(args.db.as_deref());
+    let db_path = resolved_db_path(db);
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {

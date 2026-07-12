@@ -10,8 +10,10 @@
 //! - [`Erc20Cache`] — ERC20 token metadata + historical balances.
 //! - [`EventSignatureCache`] — resolved `(event name) → signature/topic0/abi`
 //!   rows for the signature resolver.
+//! - [`TokenListCache`] — the curated token-list snapshot for
+//!   symbol → address resolution.
 //! - The `SQLite` binds for the EVM domain newtypes, and the `impl CacheDb`
-//!   block vending the three views.
+//!   block vending the four views.
 //!
 //! Navigation queries (first/last log) live in the in-memory
 //! [`LogIndex`](super::LogIndex), not here.
@@ -19,33 +21,43 @@
 use alloy::primitives::{Address, B256};
 
 use crate::cache::{CacheDb, CoverageHash, sql_newtype_u32, sql_newtype_u64};
-use crate::evm::types::{BlockHash, ChainId, Gas, GasPrice, LogIdx, TxHash};
-use rusqlite::types::{ToSql, ToSqlOutput};
+use crate::evm::types::{BlockHash, ChainId, Gas, GasPrice, LogIdx, TokenSymbol, TxHash};
+use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
 mod erc20_cache;
 mod event_signature_cache;
 mod log_cache;
+mod token_list_cache;
 
 pub use erc20_cache::{CachedErc20Metadata, Erc20Cache};
 pub use event_signature_cache::{EventSignatureCache, EventSignatureRow};
 pub use log_cache::{BlockHeader, LogCache, compute_filter_hash};
-
-/// `ChainId` persists as its underlying `u64` in an `INTEGER` column. Defining
-/// `ToSql` here — in the persistence layer, not on the domain type in
-/// [`types`](crate::evm::types) — keeps `ChainId` free of any `SQLite`
-/// dependency while letting the caches bind it directly, with no `.get() as
-/// i64` cast at every call site. Read-back isn't needed (no query selects the
-/// chain id into a `ChainId`), so there's deliberately no `FromSql`.
-impl ToSql for ChainId {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::from(self.get() as i64))
-    }
-}
+pub use token_list_cache::{TokenListCache, TokenListEntry, TokenListMeta, TokenListVersion};
 
 // The EVM numeric newtypes bind/read via the shared cache macros (see
 // `crate::cache` — the checked conversion lives there, once per width).
-sql_newtype_u64!(Gas, GasPrice);
+// Defining the binds here — in the persistence layer, not on the domain
+// types in [`types`](crate::evm::types) — keeps those types free of any
+// `SQLite` dependency while letting the caches bind them directly, with no
+// `.get() as i64` cast at every call site. `ChainId` reads back too: the
+// token-list rows are chain-keyed and `tokens list` selects across chains.
+sql_newtype_u64!(Gas, GasPrice, ChainId);
 sql_newtype_u32!(LogIdx);
+
+/// `TokenSymbol` persists as its raw string in a `TEXT` column (compared
+/// under `COLLATE NOCASE` by the symbol queries). See the numeric-newtype
+/// note above for why the binds live here.
+impl ToSql for TokenSymbol {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for TokenSymbol {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        String::column_result(value).map(Self::new)
+    }
+}
 
 macro_rules! sql_newtype_b256 {
     ($($ty:ty),+ $(,)?) => {$(
@@ -110,6 +122,11 @@ impl CacheDb {
     /// Event-signature resolver cache view.
     pub fn signatures(&self) -> EventSignatureCache {
         EventSignatureCache::from_conn(self.shared_conn())
+    }
+
+    /// Token-list snapshot view (symbol → address resolution).
+    pub fn token_list(&self) -> TokenListCache {
+        TokenListCache::from_conn(self.shared_conn())
     }
 }
 
@@ -223,6 +240,28 @@ mod tests {
             )
             .unwrap();
 
+        db.token_list()
+            .replace(
+                &[TokenListEntry {
+                    chain_id: ChainId::new(1),
+                    address: addr,
+                    symbol: TokenSymbol::new("X"),
+                    name: "X Coin".to_owned(),
+                    decimals: 18,
+                }],
+                &TokenListMeta {
+                    url: "https://example.test/list".parse().expect("static URL"),
+                    name: "Test List".to_owned(),
+                    version: TokenListVersion {
+                        major: 1,
+                        minor: 0,
+                        patch: 0,
+                    },
+                    fetched_at: ts,
+                },
+            )
+            .unwrap();
+
         #[cfg(feature = "bitcoin")]
         {
             use crate::bitcoin::{BtcBlock, BtcBlockHash, CompactTarget};
@@ -280,7 +319,7 @@ mod tests {
     fn purge_all_sections_clears_everything() {
         let db = CacheDb::open_in_memory().unwrap();
         seed_all_tables(&db);
-        let report = db.purge(&CacheSection::ALL).unwrap();
+        let report = db.purge(CacheSection::ALL).unwrap();
         assert_eq!(report.len(), CacheTable::ALL.len());
         assert!(db.table_stats().unwrap().iter().all(|s| s.rows == 0));
     }
@@ -292,7 +331,7 @@ mod tests {
         // inside a transaction.
         let db = CacheDb::open_in_memory().unwrap();
         seed_all_tables(&db);
-        db.purge(&CacheSection::ALL).unwrap();
+        db.purge(CacheSection::ALL).unwrap();
         db.vacuum().unwrap();
     }
 }

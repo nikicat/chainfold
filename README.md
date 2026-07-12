@@ -48,10 +48,14 @@ balance column:
 
 ```bash
 cargo run --features cli -- evm --num-blocks 200 erc20 \
-  --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
-  --owner   0xYourAddressHere \
+  --token USDC \
+  --owner 0xYourAddressHere \
   balances                  # add --follow to stream live
 ```
+
+`--token` takes a symbol (resolved via the cached [token
+list](https://tokenlists.org) — see `chainfold tokens list`) or a raw
+`0x…` contract address.
 
 As a dependency:
 

@@ -8,6 +8,7 @@ mod fmt;
 mod signature_cache;
 mod stats;
 mod table;
+mod tokens;
 mod util;
 
 use std::process::ExitCode;
@@ -125,10 +126,12 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 print_chain_list(&resolver.list(filter), out);
             }
         },
+        Command::Tokens { action } => tokens::run(cli.db.as_deref(), action, out).await?,
         Command::Evm(evm_args) => {
             let config = Config::load_optional(cli.config.as_deref().map(std::path::Path::new))?;
             evm::run(
                 &config,
+                cli.db.as_deref(),
                 evm_args,
                 Direction::from_reverse(evm_args.reverse),
                 FollowMode::from_follow(evm_args.follow),
@@ -140,6 +143,7 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             let config = Config::load_optional(cli.config.as_deref().map(std::path::Path::new))?;
             bitcoin::run(
                 &config,
+                cli.db.as_deref(),
                 bitcoin_args,
                 Direction::from_reverse(bitcoin_args.reverse),
                 FollowMode::from_follow(bitcoin_args.follow),
@@ -147,7 +151,7 @@ async fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Command::Cache(cache_args) => cache::run(cache_args, out)?,
+        Command::Cache(cache_args) => cache::run(cli.db.as_deref(), cache_args, out)?,
     }
 
     Ok(())

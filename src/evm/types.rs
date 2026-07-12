@@ -53,6 +53,35 @@ impl From<u64> for ChainId {
 }
 
 // ============================================================
+// TokenSymbol
+// ============================================================
+
+/// An ERC20 ticker symbol (`USDC`, `WBTC`) — the user-typeable handle the
+/// token-list resolver keys on. A newtype so a symbol can't be silently
+/// swapped with the token's display *name* (`"USD Coin"`), which travels as
+/// a plain string right next to it. Case is preserved as typed/listed;
+/// lookups match case-insensitively at the query layer, with the exact-case
+/// form breaking ties among collisions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TokenSymbol(String);
+
+impl TokenSymbol {
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TokenSymbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+// ============================================================
 // BlockHash / TxHash
 // ============================================================
 

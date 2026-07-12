@@ -5,6 +5,7 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use chainfold::arch::{Positioned, watch_hist};
 use chainfold::cache::CacheDb;
+use chainfold::evm::tokenlist::{default_token_list_url, resolve_token};
 use chainfold::evm::{
     Erc20Metadata, EvmChain, EvmEvent, EvmPosition, OwnedErc20, apply_transfer,
     fetch_erc20_metadata,
@@ -13,7 +14,7 @@ use chainfold::merge::MergedItem;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 
-use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode};
+use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode, TokenRef};
 use crate::fmt::{self, FmtContext};
 use crate::table::{Cell, Out, TableBuf};
 use crate::util::{log_cut, log_end, parse_hex_address, resolve_log_range};
@@ -27,13 +28,24 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addresses: Vec<Address> = erc20_args
-        .address
-        .iter()
-        .map(|a| parse_hex_address(a))
-        .collect::<Result<_, _>>()?;
     let owner = parse_hex_address(&erc20_args.owner)?;
     let chain_id = chain.chain_id();
+
+    // Symbols go through the token-list resolver (cached; refreshes over
+    // HTTP when stale); addresses pass through untouched.
+    let token_list = cache.token_list();
+    let list_url = default_token_list_url();
+    let mut addresses: Vec<Address> = Vec::with_capacity(erc20_args.token.len());
+    for token in &erc20_args.token {
+        addresses.push(match token {
+            TokenRef::Address(address) => *address,
+            TokenRef::Symbol(symbol) => {
+                resolve_token(&token_list, chain_id, symbol, &list_url)
+                    .await?
+                    .address
+            }
+        });
+    }
 
     // ERC20-metadata view over the shared cache connection (the log cache
     // rides inside the chain's provider).
