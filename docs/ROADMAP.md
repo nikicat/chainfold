@@ -86,8 +86,8 @@ Integration (`tests/phase7_soak.rs`, new): `long_running_follow_memory_bounded`
 — `#[ignore]`-flagged ~30-min manual test: subscribe to USDC, prune every
 30 s, assert RSS plateaus after warmup.
 
-CLI deliverable: `examples/erc20_explorer.rs` gains `--prune-after <duration>`
-and `--measure-memory` (emit RSS once/min); manual 24 h soak against mainnet
+CLI deliverable: `evm erc20` gains `--prune-after <duration>` and
+`--measure-memory` (emit RSS once/min); manual 24 h soak against mainnet
 USDC with a plateauing RSS chart.
 
 ### Acceptance
@@ -166,9 +166,9 @@ touched them). The CLI bin consumes the library through the same public API,
 and `tests/` covers the `evm`-only feature combination, so nothing technical
 holds them in place — only the linear-demo documentation value. Staged plan:
 
-- `erc20_explorer` — redundant with `evm erc20 transfers/balances`; delete,
-  point the README quickstart at the real CLI, retarget the Phase 7
-  `--prune-after` deliverable (above) at `evm erc20`.
+- ~~`erc20_explorer`~~ — deleted (2026-07-12); the README quickstart now
+  drives `evm erc20`, and the Phase 7 `--prune-after` deliverable (above)
+  targets `evm erc20`.
 - `history_explorer` — listing is redundant with `evm events`; move the
   `--measure` cold/warm/hot cache benchmark to a new `evm bench` (or
   similar) first.
@@ -271,7 +271,7 @@ table command.
 ## North star (what success looks like)
 
 - Live event delivery <10 ms chainfold-internal (network is what it is).
-- Cold-start of `erc20_explorer` reads cached events from SQLite in <50 ms
+- Cold-start of `evm erc20` reads cached events from SQLite in <50 ms
   before the first frame.
 - Reorgs detected, scanned ranges invalidated automatically, no duplicate
   events delivered.

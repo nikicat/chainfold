@@ -178,10 +178,6 @@ name = "history_explorer"
 required-features = ["evm"]
 
 [[example]]
-name = "erc20_explorer"
-required-features = ["evm"]
-
-[[example]]
 name = "bridge_explorer"
 required-features = ["evm"]
 

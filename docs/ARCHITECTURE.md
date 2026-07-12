@@ -1503,7 +1503,6 @@ validation surfaces against real RPC:
 | Example | Demonstrates |
 |---|---|
 | `history_explorer` | raw single-filter log walker; `--measure` prints cold/warm/hot tiers |
-| `erc20_explorer` | ERC20 transfers + running balance; `--owner` uses `OwnedErc20` |
 | `bridge_explorer` | multi-chain cross-source merge (merge by `event.timestamp`) |
 | `bridge_matcher` | cross-chain `Matcher` with anchor persistence in a separate SQLite file |
 

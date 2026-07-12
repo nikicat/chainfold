@@ -42,13 +42,14 @@ cargo build --features evm
 cargo test  --all-features    # full suite, ~1s
 ```
 
-Walk recent USDC transfers for an owner, then follow live:
+Walk recent USDC transfers for an owner (latest 200 blocks), with a running
+balance column:
 
 ```bash
-cargo run --features evm --example erc20_explorer -- \
+cargo run --features cli -- evm --num-blocks 200 erc20 \
   --address 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
   --owner   0xYourAddressHere \
-  --num-blocks 200          # add --follow to stream live
+  balances                  # add --follow to stream live
 ```
 
 As a dependency:
