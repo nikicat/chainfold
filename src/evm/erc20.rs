@@ -2,7 +2,7 @@
 //!
 //! Reusable primitives for ERC20 tokens: Transfer event decoding,
 //! on-chain metadata fetching (Multicall3 → JSON-RPC batch fallback),
-//! and a pure balance-fold helper.
+//! cached `balanceOf`-at-a-block reads, and a pure balance-fold helper.
 //!
 //! Layer note: no `Reducer` trait dependency. Balance tracking is
 //! performed by the application layer (or, eventually, a generic
@@ -18,6 +18,7 @@ use alloy::sol;
 use alloy::sol_types::{SolCall, SolEvent};
 
 use crate::arch::HistoryError;
+use crate::chain::BlockNumber;
 
 use super::cache::Erc20Cache;
 use super::types::{ChainId, EvmEvent, Topic};
@@ -245,11 +246,15 @@ pub fn decode_transfer(event: &EvmEvent) -> Option<TransferData> {
 ///
 /// * `from == to` → balance unchanged (a self-transfer moves nothing).
 /// * `to == owner` → balance grows by `amount`.
-/// * `from == owner` → balance shrinks by `amount` (saturating at zero).
+/// * `from == owner` → balance shrinks by `amount`. An amount above the
+///   tracked balance clamps to zero with a `tracing::warn` — with a
+///   correctly seeded fold (see [`fetch_balance_before`]) an underflow
+///   means missing history or a token that moves balances outside
+///   `Transfer` events.
 /// * otherwise → balance unchanged.
 ///
-/// Non-Transfer events are returned unchanged. Pure / no I/O — fold this
-/// over a `HistStore` stream to derive a running balance.
+/// Non-Transfer events are returned unchanged. No I/O — fold this over a
+/// `HistStore` stream to derive a running balance.
 pub fn apply_transfer(owner: Address, balance: U256, event: &EvmEvent) -> U256 {
     let Some(t) = decode_transfer(event) else {
         return balance;
@@ -259,7 +264,18 @@ pub fn apply_transfer(owner: Address, balance: U256, event: &EvmEvent) -> U256 {
     } else if t.to == owner {
         balance.wrapping_add(t.amount)
     } else if t.from == owner {
-        balance.checked_sub(t.amount).unwrap_or(U256::ZERO)
+        balance.checked_sub(t.amount).unwrap_or_else(|| {
+            tracing::warn!(
+                %owner,
+                token = %event.contract_address,
+                block = %event.block_number,
+                %balance,
+                amount = %t.amount,
+                "outgoing transfer exceeds the tracked balance; clamping to zero \
+                 — missing history, or a token that moves balances outside Transfer?"
+            );
+            U256::ZERO
+        })
     } else {
         balance
     }
@@ -295,7 +311,12 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
         .call(tx)
         .block(BlockNumberOrTag::Number(block).into())
         .await
-        .map_err(|e| HistoryError::internal(format!("balanceOf call: {e}")))?;
+        .map_err(|e| {
+            HistoryError::internal(format!(
+                "balanceOf call at block {block}: {e} \
+                 (historical state reads need an archive node)"
+            ))
+        })?;
 
     let balance = balanceOfCall::abi_decode_returns(&result)
         .map_err(|e| HistoryError::internal(format!("balanceOf decode: {e}")))?;
@@ -305,6 +326,27 @@ pub async fn fetch_balance_at<P: Provider<Ethereum>>(
         .map_err(|e| HistoryError::internal(format!("balance cache write: {e}")))?;
 
     Ok(balance)
+}
+
+/// The owner's balance just before `block`: `balanceOf` at `block - 1`
+/// (the previous block's post-state), or zero at genesis — nothing is
+/// held before block 0.
+///
+/// This is the opening-balance seed for an [`apply_transfer`] fold over a
+/// window starting at `block`: seed here, then fold the window's
+/// transfers to get an absolute running balance rather than net flow.
+pub async fn fetch_balance_before<P: Provider<Ethereum>>(
+    provider: &P,
+    cache: &Erc20Cache,
+    chain_id: ChainId,
+    token: Address,
+    owner: Address,
+    block: BlockNumber,
+) -> Result<U256, HistoryError> {
+    match block.checked_sub(1) {
+        None => Ok(U256::ZERO),
+        Some(prev) => fetch_balance_at(provider, cache, chain_id, token, owner, prev.get()).await,
+    }
 }
 
 /// Look up the closest cached balance at or before `block`. No RPC.
@@ -424,6 +466,91 @@ mod tests {
         assert_eq!(
             apply_transfer(owner, U256::from(50), &event),
             U256::from(50)
+        );
+    }
+
+    /// A provider whose every RPC call fails — for paths that must not
+    /// reach the network (genesis short-circuit, cache hits).
+    fn no_rpc_provider() -> impl Provider<Ethereum> {
+        use alloy::providers::ProviderBuilder;
+        use alloy::transports::mock::Asserter;
+        ProviderBuilder::new().connect_mocked_client(Asserter::new())
+    }
+
+    #[tokio::test]
+    async fn fetch_balance_before_genesis_is_zero() {
+        let owner = Address::repeat_byte(0x01);
+        let token = Address::repeat_byte(0x42);
+        let cache = Erc20Cache::open_in_memory().unwrap();
+
+        let balance = fetch_balance_before(
+            &no_rpc_provider(),
+            &cache,
+            ChainId::new(1),
+            token,
+            owner,
+            BlockNumber::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(balance, U256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn fetch_balance_before_serves_cache_without_rpc() {
+        let owner = Address::repeat_byte(0x01);
+        let token = Address::repeat_byte(0x42);
+        let cache = Erc20Cache::open_in_memory().unwrap();
+        cache
+            .insert_erc20_balance(ChainId::new(1), &token, &owner, 99, U256::from(500))
+            .unwrap();
+
+        let balance = fetch_balance_before(
+            &no_rpc_provider(),
+            &cache,
+            ChainId::new(1),
+            token,
+            owner,
+            BlockNumber::new(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(balance, U256::from(500));
+    }
+
+    #[tokio::test]
+    async fn fetch_balance_before_fetches_and_caches() {
+        use alloy::providers::ProviderBuilder;
+        use alloy::transports::mock::Asserter;
+
+        let owner = Address::repeat_byte(0x01);
+        let token = Address::repeat_byte(0x42);
+        let cache = Erc20Cache::open_in_memory().unwrap();
+
+        // One queued eth_call response — the second read must come from
+        // the cache or it would fail on the drained queue.
+        let asserter = Asserter::new();
+        asserter.push_success(&Bytes::from(U256::from(777).to_be_bytes::<32>().to_vec()));
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+
+        for _ in 0..2 {
+            let balance = fetch_balance_before(
+                &provider,
+                &cache,
+                ChainId::new(1),
+                token,
+                owner,
+                BlockNumber::new(100),
+            )
+            .await
+            .unwrap();
+            assert_eq!(balance, U256::from(777));
+        }
+        assert_eq!(
+            cache
+                .get_erc20_balance(ChainId::new(1), &token, &owner, 99)
+                .unwrap(),
+            Some(U256::from(777))
         );
     }
 

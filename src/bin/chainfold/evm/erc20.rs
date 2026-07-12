@@ -7,8 +7,8 @@ use chainfold::arch::{Positioned, watch_hist};
 use chainfold::cache::CacheDb;
 use chainfold::evm::tokenlist::{default_token_list_url, resolve_token};
 use chainfold::evm::{
-    Erc20Metadata, EvmChain, EvmEvent, EvmPosition, OwnedErc20, apply_transfer,
-    fetch_erc20_metadata,
+    Erc20Metadata, EvmChain, EvmEvent, EvmPosition, OwnedErc20, apply_transfer, fetch_balance_at,
+    fetch_balance_before, fetch_erc20_metadata,
 };
 use chainfold::merge::MergedItem;
 use futures_util::StreamExt;
@@ -98,10 +98,35 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             .get(address)
             .map(|m| m.symbol.clone())
             .unwrap_or_default();
+        let meta_decimals = metadata
+            .get(address)
+            .map(|m| m.decimals)
+            .unwrap_or_default();
         let owned = OwnedErc20::new(chain, owner, *address);
 
         let merged_hs = owned.transfers();
+
+        // Seed the fold with the on-chain balance just before the window,
+        // so the balance column is absolute — a zero seed would silently
+        // render net flow instead. One archive eth_call per token on
+        // first run, served from erc20_balances afterwards.
         let mut balance = U256::ZERO;
+        if show_balance {
+            balance = fetch_balance_before(
+                chain.provider(),
+                &erc20_cache,
+                chain_id,
+                *address,
+                owner,
+                range.from,
+            )
+            .await?;
+            println!(
+                "  Opening balance before block {}: {} {meta_symbol}",
+                range.from,
+                fmt::format_amount_trim(balance, meta_decimals),
+            );
+        }
 
         if follow.is_follow() {
             let mut writer = out.rows(fmt::transfer_spec(&ctx, show_balance));
@@ -155,6 +180,39 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                     println!("... (limit reached, use --limit to show more)");
                 }
                 println!("\n{count} transfers shown.\n");
+            }
+
+            // Cross-check the fold against the chain: balanceOf at the
+            // window end must equal the folded balance unless the token
+            // moves balances outside Transfer events. Skipped when the
+            // limit cut the fold short of the window end. Advisory — an
+            // unavailable check (e.g. `to` beyond the tip) is a warn,
+            // not a failure, since the table is already out.
+            if show_balance && !limited {
+                match fetch_balance_at(
+                    chain.provider(),
+                    &erc20_cache,
+                    chain_id,
+                    *address,
+                    owner,
+                    range.to.get(),
+                )
+                .await
+                {
+                    Ok(onchain) if onchain != balance => println!(
+                        "warning: folded balance {} ≠ on-chain balance {} at block {} — \
+                         {meta_symbol} moves balances outside Transfer events \
+                         (mint/burn/rebase/fee-on-transfer?)",
+                        fmt::format_amount_trim(balance, meta_decimals),
+                        fmt::format_amount_trim(onchain, meta_decimals),
+                        range.to,
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        error = %e, token = %meta_symbol,
+                        "end-of-window balance cross-check skipped"
+                    ),
+                }
             }
         }
     }

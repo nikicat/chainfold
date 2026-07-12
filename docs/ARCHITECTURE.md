@@ -878,7 +878,7 @@ The concrete client for EVM log streams (`feature = "evm"`).
 | **`LogCache` / `Erc20Cache` / `EventSignatureCache`** | The EVM views over the shared `CacheDb` (§10): payload tables + the `.coverage()` accessor to the shared scanned-range/reorg bookkeeping. **Never on the live path.** |
 | **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session. Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
-| **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold). |
+| **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold), `fetch_balance_at` / `fetch_balance_before` (cached `balanceOf` reads; the latter seeds the fold with the opening balance just before a window — zero at genesis). |
 | **`tokenlist`** | Symbol → address resolver over a curated [Token Lists](https://tokenlists.org) snapshot (default: Uniswap Labs'), cached in `TokenListCache` with a 24 h TTL. Case-insensitive lookup; unique exact-case match breaks collisions, otherwise a loud `Ambiguous`/`NotFound` error. Non-EVM entries (Solana mints) are dropped at ingest. Backs the CLI's `--token USDC` and `chainfold tokens`. |
 | **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Arc<LogCache>`**. Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
 | **`ChunkSize::align` / `ChunkSize::chunk_end`** | The single owner of chunk-alignment arithmetic (`chain/height.rs`). `align` widens load windows outward; `chunk_end` caps each gap fetch at its chunk boundary (`walk_step`), so concurrent consumers hit the same cache entries and no RPC request spans a chunk. |
@@ -1406,7 +1406,7 @@ flowchart TB
     cachecmd --> csize["size — per-table counts + footprint"]
     cachecmd --> cpurge["purge [--history/--erc20/--signatures/--tokens]"]
     erc20 --> transfers["transfers"]
-    erc20 --> balances["balances (running balance column)"]
+    erc20 --> balances["balances (absolute running balance:<br/>seeded from balanceOf before the window,<br/>cross-checked against balanceOf at its end)"]
 ```
 
 The window/limit flags (`--from`/`--to`/`--from-block`/`--num-blocks`/

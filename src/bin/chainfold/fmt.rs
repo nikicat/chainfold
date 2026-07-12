@@ -168,6 +168,14 @@ pub fn format_amount(raw: U256, decimals: u8, whole_width: usize, frac_width: us
     }
 }
 
+/// Human-readable token amount with no column padding — for prose lines
+/// ("Opening balance …"), as opposed to the fixed-width table cells.
+pub fn format_amount_trim(raw: U256, decimals: u8) -> String {
+    format_amount(raw, decimals, 1, decimals as usize)
+        .trim()
+        .to_string()
+}
+
 pub struct FmtContext<'a> {
     pub owner: &'a Address,
     pub metadata: &'a HashMap<Address, Erc20Metadata>,

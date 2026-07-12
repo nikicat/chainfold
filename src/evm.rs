@@ -42,8 +42,8 @@ pub use chain::{
 };
 pub use chain_provider::ChainProvider;
 pub use erc20::{
-    Erc20Metadata, TRANSFER_TOPIC, TransferData, apply_transfer, decode_transfer,
-    fetch_erc20_metadata,
+    Erc20Metadata, TRANSFER_TOPIC, TransferData, apply_transfer, decode_transfer, fetch_balance_at,
+    fetch_balance_before, fetch_erc20_metadata,
 };
 pub use log_spec::LogSpec;
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
