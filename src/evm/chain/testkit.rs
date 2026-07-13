@@ -1,16 +1,23 @@
 //! Shared unit-test fixtures for the chain modules: a mock-provider chain
-//! over a warm in-memory cache, plus an RPC-span counter for pinning
-//! "zero RPC" guarantees.
+//! over a warm in-memory cache, an RPC-span counter for pinning
+//! "zero RPC" guarantees, and the programmable [`StubRpc`] JSON-RPC
+//! service (+ [`StubAdaptor`]) the adaptive-executor tests drive.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, Bytes, Log as LogInner, LogData, U64, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::ClientBuilder;
+use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
 use alloy::rpc::types::Log;
 use alloy::transports::mock::{Asserter, MockTransport};
+use alloy::transports::{RpcError, TransportError, TransportFut};
+use futures_util::future::BoxFuture;
+use reqwest::Url;
+use serde_json::json;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
@@ -20,12 +27,16 @@ use tracing_subscriber::registry::LookupSpan;
 use super::{EvmChain, EvmChainConfig};
 use crate::arch::Timestamp;
 use crate::cache::{FilterHash, ScanPartition};
-use crate::chain::{BlockNumber, BlockRange, ChunkSize, TxCount};
+use crate::chain::{BlockCount, BlockNumber, BlockRange, ChunkSize, TxCount};
 use crate::evm::cache::{LogCache, compute_filter_hash};
 use crate::evm::chain_provider::ChainProvider;
+use crate::evm::provider::{
+    ApiKey, Concurrency, ErrorClass, FetchSeeds, ProviderAdaptor, RpcTransport,
+};
 use crate::evm::transport::RpcTimingLayer;
 use crate::evm::types::{BlockHash, ChainId, EvmBlock, Gas, GasPrice, LogIdx, Topic};
 use crate::observe::RPC_TARGET;
+use crate::share::Share;
 
 pub(super) const ADDR: Address = Address::repeat_byte(0x42);
 pub(super) const TOPICS: [Option<Topic>; 4] = [None; 4];
@@ -194,6 +205,205 @@ pub(super) fn offline_chain(
     cache: Arc<LogCache>,
 ) -> EvmChain<impl Provider<Ethereum> + Clone + 'static> {
     chain_with_queued_heads(cache, 0)
+}
+
+// ============================================================
+// StubRpc — programmable JSON-RPC service for the executor tests
+// ============================================================
+
+/// One JSON-RPC request as the [`StubRpc`] handler sees it.
+pub(super) struct StubCall {
+    pub(super) method: String,
+    pub(super) params: serde_json::Value,
+}
+
+/// The block range of a stubbed `eth_getLogs` call.
+pub(super) fn logs_range(call: &StubCall) -> BlockRange {
+    let filter = &call.params[0];
+    let block = |v: &serde_json::Value| {
+        v.as_str()
+            .and_then(|s| s.strip_prefix("0x"))
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .expect("stub eth_getLogs filters carry hex block bounds")
+    };
+    BlockRange::from_u64(block(&filter["fromBlock"]), block(&filter["toBlock"]))
+}
+
+type StubHandler = dyn Fn(&StubCall) -> BoxFuture<'static, Result<serde_json::Value, serde_json::Value>>
+    + Send
+    + Sync;
+
+/// A programmable JSON-RPC tower service: the handler closure routes each
+/// request to a `result` or an `error` payload (returning a future, so it
+/// can await test-controlled gates). Records every `eth_getLogs` range
+/// and tracks the in-flight high-water mark — the executor tests'
+/// concurrency probe.
+#[derive(Clone)]
+pub(super) struct StubRpc {
+    state: Arc<StubState>,
+}
+
+struct StubState {
+    handler: Box<StubHandler>,
+    inflight: AtomicUsize,
+    high_water: AtomicUsize,
+    get_logs_ranges: Mutex<Vec<BlockRange>>,
+}
+
+impl StubRpc {
+    pub(super) fn new(
+        handler: impl Fn(&StubCall) -> BoxFuture<'static, Result<serde_json::Value, serde_json::Value>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            state: Arc::new(StubState {
+                handler: Box::new(handler),
+                inflight: AtomicUsize::new(0),
+                high_water: AtomicUsize::new(0),
+                get_logs_ranges: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Every `eth_getLogs` block range received, in arrival order.
+    pub(super) fn get_logs_ranges(&self) -> Vec<BlockRange> {
+        self.state.get_logs_ranges.lock().unwrap().clone()
+    }
+
+    /// Requests currently being served.
+    pub(super) fn inflight(&self) -> usize {
+        self.state.inflight.load(Ordering::Acquire)
+    }
+
+    /// The most requests ever being served at once.
+    pub(super) fn high_water(&self) -> usize {
+        self.state.high_water.load(Ordering::Acquire)
+    }
+}
+
+impl tower_service::Service<RequestPacket> for StubRpc {
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: RequestPacket) -> Self::Future {
+        let state = self.state.share();
+        Box::pin(async move {
+            let RequestPacket::Single(req) = req else {
+                panic!("StubRpc serves single requests only");
+            };
+            let raw = serde_json::to_value(&req).expect("serialized request is JSON");
+            let call = StubCall {
+                method: raw["method"].as_str().unwrap_or_default().to_owned(),
+                params: raw
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            };
+            if call.method == "eth_getLogs" {
+                state
+                    .get_logs_ranges
+                    .lock()
+                    .unwrap()
+                    .push(logs_range(&call));
+            }
+            let entered = state.inflight.fetch_add(1, Ordering::AcqRel) + 1;
+            state.high_water.fetch_max(entered, Ordering::AcqRel);
+            let reply = (state.handler)(&call).await;
+            state.inflight.fetch_sub(1, Ordering::AcqRel);
+
+            let id = raw.get("id").cloned().unwrap_or(json!(0));
+            let body = match reply {
+                Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
+            };
+            let response = serde_json::from_value(body).expect("stub response parses");
+            Ok(ResponsePacket::Single(response))
+        })
+    }
+}
+
+/// The stub's conventional error codes — what [`StubAdaptor::classify`]
+/// keys on.
+pub(super) const STUB_RANGE_TOO_LARGE: i64 = -1001;
+pub(super) const STUB_RATE_LIMITED: i64 = -1002;
+pub(super) const STUB_FATAL: i64 = -1003;
+
+/// A [`ProviderAdaptor`] speaking [`StubRpc`]'s error-code vocabulary,
+/// with seeds configurable per `static` instance (the executor takes
+/// `&'static dyn`).
+#[derive(Debug)]
+pub(super) struct StubAdaptor {
+    pub(super) max_range: Option<BlockCount>,
+    pub(super) concurrency: Concurrency,
+}
+
+impl ProviderAdaptor for StubAdaptor {
+    fn classify(&self, error: &TransportError) -> ErrorClass {
+        let RpcError::ErrorResp(payload) = error else {
+            return ErrorClass::Transient;
+        };
+        match payload.code {
+            STUB_RANGE_TOO_LARGE => ErrorClass::RangeTooLarge { suggested: None },
+            STUB_RATE_LIMITED => ErrorClass::RateLimited { retry_after: None },
+            STUB_FATAL => ErrorClass::Fatal,
+            _ => ErrorClass::Transient,
+        }
+    }
+
+    fn seeds(&self, _chain: ChainId) -> FetchSeeds {
+        FetchSeeds {
+            max_range: self.max_range,
+            max_logs: None,
+            concurrency: self.concurrency,
+        }
+    }
+
+    fn detect(&self, _url: &Url) -> Option<ApiKey> {
+        None
+    }
+
+    fn endpoint(&self, _chain: ChainId, _key: &ApiKey, _kind: RpcTransport) -> Option<Url> {
+        None
+    }
+}
+
+/// A [`ChainProvider`] over a [`StubRpc`], with the production
+/// timing layer installed (so RPC-span guards keep working) and the given
+/// adaptor's seeds driving the budget.
+pub(super) fn stub_provider(
+    stub: StubRpc,
+    cache: Arc<LogCache>,
+    adaptor: &'static dyn ProviderAdaptor,
+) -> ChainProvider<impl Provider<Ethereum> + Clone + 'static> {
+    let client = ClientBuilder::default()
+        .layer(RpcTimingLayer)
+        .transport(stub, true);
+    let provider = ProviderBuilder::default().connect_client(client);
+    ChainProvider::new(provider, TEST_CHAIN, cache).with_adaptor(adaptor)
+}
+
+/// In-memory cache with headers for every block in `0..=max` — executor
+/// tests pre-warm it so in-slice header fills are cache hits and the stub
+/// serves only `eth_getLogs` (tests exercising the header RPC path warm
+/// selectively instead).
+pub(super) fn dense_header_cache(max: BlockNumber) -> Arc<LogCache> {
+    let cache = Arc::new(LogCache::open_in_memory().unwrap());
+    for n in 0..=max.get() {
+        insert_header(
+            &cache,
+            BlockNumber::new(n),
+            BlockHash::new(B256::from(U256::from(n + 1_000))),
+            ts(n * 12),
+        );
+    }
+    cache
 }
 
 /// Tracing layer counting the rpc spans [`RpcTimingLayer`] emits for one

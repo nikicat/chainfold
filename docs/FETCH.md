@@ -119,10 +119,10 @@ jobs — `load_window` alignment, and how much one walk step claims as a
 placeholder (stream length). It becomes the *ceiling* the working size
 (§3) grows toward, and can be raised aggressively once this ships.
 
-## 3. Slicing executor (EVM source layer)
+## 3. Slicing executor (EVM source layer) — ✅ shipped
 
-The EVM `PageFetcher` impl (new `src/evm/chain/fetch.rs`, replacing the
-body of `build_fetcher`) plans and runs slices:
+The EVM `PageFetcher` impl (`LogFetcher` in `src/evm/chain/fetch.rs`,
+which replaced `build_fetcher`) plans and runs slices:
 
 - **Slice plan** — split the gap by the endpoint's current *working size*
   (a `BlockCount`). A 100k gap at a learned 2k limit is 50 slices.
@@ -168,10 +168,9 @@ after a quiet period.
 
 **Headers ride the same budget.** The fetcher's post-`get_logs` header
 fill (`ensure_block_header` per log-bearing block, plus each page's
-`end_block_hash`) is serial today (`src/evm/chain/logs.rs`) and would
-dominate large backfills on providers that omit `block_timestamp`; it runs
-bounded-parallel under the same semaphore — the existing singleflight gate
-makes that safe.
+`end_block_hash`) was serial and would have dominated large backfills on
+providers that omit `block_timestamp`; it runs bounded-parallel under the
+same semaphore — the existing singleflight gate makes that safe.
 
 **Observability:** split/halve/regrow decisions are `tracing` events at
 the decision site (diagnostics ride tracing, not return types); RPC
@@ -184,6 +183,47 @@ HTTP/2 keep-alive already amortizes transport overhead, and a
 transport-level batch failure couples many slices to one timeout — worse
 for the AIMD signal. If a target provider demonstrably rewards batches,
 the strategy drops in without touching the plan or the contract.
+
+**As-built notes (resolutions the design left open):**
+
+- **Retry ownership is settled at the transport**
+  (`NetworkBlipRetryPolicy`, replacing the rate-limit-retrying policy):
+  the retry layer touches only wire-level failures (connect/reset/
+  timeout/TLS — the `Custom` errors `HttpTransport` produces); JSON-RPC
+  error responses, HTTP statuses (429 included) and deser errors reach
+  the executor's classifier intact. `ChainProvider` grew raw-error
+  methods *below* the `HistoryError` funnel (`get_logs_raw`,
+  `ensure_block_header_raw`) because the classifier needs the structured
+  payload, not a stringified one.
+- **The budget lives on `ChainProvider`** beside the header singleflight
+  (endpoint-scoped state on the endpoint-scoped entity, shared by every
+  clone); `with_adaptor` installs a provider's intelligence and re-seeds
+  the budget from `seeds(chain_id)`. Concurrency shrinks by
+  deficit-forget — releases are swallowed, never blocked on. The working
+  size starts unlearned (a sentinel every read clamps to the caller's
+  `ChunkSize` ceiling), so an unseeded endpoint starts at the ceiling and
+  probes down.
+- **The executor spawns nothing:** the `PageStream` is a `stream::unfold`
+  over a `SliceDriver` whose slices are futures in a `FuturesUnordered` —
+  concurrent while the consumer polls, all cancelled when the stream
+  drops (the core's cancellation contract for free). The launch window is
+  the budget's *live* concurrency target and bounds in-flight slices and
+  parked pages together — with one exception: a queued retry at the
+  release frontier always launches, because a mid-flight shrink can
+  otherwise fill the window with parked pages and strand the very slice
+  release waits on (pinned by `rate_limit_shrinks_concurrency_not_size`).
+- **Header fill runs inside the slice, pre-release** — the
+  headers-present invariant requires headers cached before a page is
+  consumable — and header RPC errors classify like slice errors (a 429 on
+  a header burst shrinks concurrency too; the old fetcher silently
+  swallowed per-log header failures).
+- **`Transient` bisection is slice-local** — never the shared working
+  size; a single block still failing after the bounded retries is fatal.
+  `RateLimited` slices requeue indefinitely (a throttle is expected to
+  clear; the budget's pause paces the attempts). A terminal failure keeps
+  the **lowest-from** error: everything below it releases first; queued
+  and parked work above it is abandoned with the stream, and the suffix
+  stays a gap.
 
 ## 4. Provider adaptors — ✅ shipped (Generic + Alchemy + Infura)
 
@@ -311,6 +351,18 @@ concrete-first, not before a Bitcoin client needs it.
    working-size ceiling; it no longer bounds RPCs.
 8. **Adaptors are EVM-side until Bitcoin needs them**; the generic
    adaptor is always available.
+9. **Retry ownership: one owner per signal.** The transport retry layer
+   handles only genuine network blips (wire-level errors); every signal
+   with provider intent — JSON-RPC error responses, HTTP statuses,
+   deserialization failures — belongs to the executor's classifier. A
+   transport-level retry on a classifiable error fights the AIMD.
+10. **Header fill is part of the slice** — pre-release, under the same
+    budget, errors classified like slice errors. A page whose headers
+    aren't cached is not deliverable (the headers-present invariant), so
+    header failures must not be swallowed.
+11. **`Transient` bisection is slice-local**, never the shared working
+    size — it is discovery for the generic adaptor and fault isolation
+    for everyone else; only `RangeTooLarge` speaks about the size.
 
 ## 6. Accepted costs
 

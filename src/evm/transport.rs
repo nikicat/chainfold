@@ -15,39 +15,57 @@
 //! ```
 
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
-use alloy::transports::layers::{OrRetryPolicyFn, RateLimitRetryPolicy, RetryBackoffLayer};
+use alloy::transports::layers::{RetryBackoffLayer, RetryPolicy};
 use alloy::transports::utils::guess_local_url;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind, TransportFut};
 use tracing::{Instrument, Level};
 
-/// Number of retry attempts for transient/rate-limited RPC errors.
+/// Number of retry attempts for wire-level network blips.
 const MAX_RETRIES: u32 = 3;
 /// Initial backoff between retries, in milliseconds (grows on each attempt).
 const INITIAL_BACKOFF_MS: u64 = 500;
 /// Compute-units-per-second budget the backoff layer paces requests against.
 const COMPUTE_UNITS_PER_SECOND: u64 = 100;
 
-/// Returns a `RetryBackoffLayer` that retries transient RPC errors.
+/// Retries **only genuine network blips** — the wire-level reqwest
+/// failures (connect refused/reset, timeout, TLS) that
+/// [`HttpTransport::send`] maps to [`TransportErrorKind::Custom`].
 ///
-/// Extends alloy's default rate-limit retry policy with:
-/// - JSON-RPC `-32603` (internal error) and `-32000` (server error)
-/// - All transport-level errors (connection reset, timeout, etc.)
+/// Everything that carries provider intent passes through untouched:
+/// JSON-RPC error responses, HTTP error statuses (429 included), and
+/// deserialization errors are the adaptive executor's signal — its
+/// per-provider classifier decides between resize, backoff, retry and
+/// fail (`docs/FETCH.md` §3), and a transport-level retry would fight it
+/// (blind retries on a rate limit, refetches of a range the classifier
+/// wants resized).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NetworkBlipRetryPolicy;
+
+impl RetryPolicy for NetworkBlipRetryPolicy {
+    fn should_retry(&self, error: &TransportError) -> bool {
+        matches!(error, RpcError::Transport(TransportErrorKind::Custom(_)))
+    }
+
+    fn backoff_hint(&self, _error: &TransportError) -> Option<Duration> {
+        None
+    }
+}
+
+/// Returns a `RetryBackoffLayer` over [`NetworkBlipRetryPolicy`]: bounded
+/// retries with backoff for wire-level failures only; every classifiable
+/// error reaches the caller intact.
 ///
 /// Config: see [`MAX_RETRIES`], [`INITIAL_BACKOFF_MS`],
 /// [`COMPUTE_UNITS_PER_SECOND`].
-pub fn rpc_retry_layer() -> RetryBackoffLayer<OrRetryPolicyFn> {
-    let policy = RateLimitRetryPolicy::default().or(|e: &TransportError| match e {
-        RpcError::ErrorResp(payload) => matches!(payload.code, -32603 | -32000),
-        RpcError::Transport(_) => true,
-        _ => false,
-    });
+pub fn rpc_retry_layer() -> RetryBackoffLayer<NetworkBlipRetryPolicy> {
     RetryBackoffLayer::new_with_policy(
         MAX_RETRIES,
         INITIAL_BACKOFF_MS,
         COMPUTE_UNITS_PER_SECOND,
-        policy,
+        NetworkBlipRetryPolicy,
     )
 }
 
@@ -260,7 +278,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use alloy::rpc::json_rpc::{Id, Request, SerializedRequest};
-    use alloy::transports::layers::RetryPolicy;
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id as SpanId};
     use tracing::subscriber::{set_default, with_default};
@@ -583,11 +600,14 @@ mod tests {
 
     /// A non-2xx status with a non-JSON-RPC body maps to
     /// `TransportErrorKind::HttpError` carrying the status code — the shape
-    /// the rate-limit retry policy classifies on. The policy assertion pins
-    /// the transport↔retry contract: if the error mapping drifts, retries
-    /// silently stop firing.
+    /// the provider adaptors classify on. The policy/classifier assertions
+    /// pin the transport↔executor contract: the retry layer must NOT eat a
+    /// 429 (blind retries on a rate limit are what the classifier exists to
+    /// replace); the generic adaptor must see it as `RateLimited`.
     #[tokio::test]
-    async fn http_transport_maps_plain_error_status_for_the_retry_policy() {
+    async fn http_transport_maps_plain_error_status_for_the_classifier() {
+        use crate::evm::provider::{ErrorClass, generic_adaptor};
+
         let addr = serve_once("429 Too Many Requests", "too many requests").await;
         let (result, _) = call_http(addr).await;
         let err = result.unwrap_err();
@@ -597,7 +617,46 @@ mod tests {
             }
             other => panic!("expected HttpError, got {other:?}"),
         }
-        assert!(RateLimitRetryPolicy::default().should_retry(&err));
+        assert!(!NetworkBlipRetryPolicy.should_retry(&err));
+        assert_eq!(
+            generic_adaptor().classify(&err),
+            ErrorClass::RateLimited { retry_after: None }
+        );
+    }
+
+    /// The retry policy's whole contract: wire-level failures (the
+    /// `Custom` errors [`HttpTransport::send`] produces from reqwest) are
+    /// retried; everything with provider intent — JSON-RPC error
+    /// responses, HTTP statuses, deser errors — passes through to the
+    /// executor's classifier.
+    #[test]
+    fn network_blip_policy_retries_wire_errors_only() {
+        let policy = NetworkBlipRetryPolicy;
+
+        let wire = TransportErrorKind::custom_str("connection reset by peer");
+        assert!(policy.should_retry(&wire));
+        assert_eq!(policy.backoff_hint(&wire), None);
+
+        use alloy::rpc::json_rpc::ErrorPayload;
+
+        let rpc_error: ErrorPayload =
+            serde_json::from_str(r#"{"code":-32005,"message":"rate limited"}"#).unwrap();
+        assert!(!policy.should_retry(&RpcError::ErrorResp(rpc_error)));
+
+        assert!(!policy.should_retry(&TransportErrorKind::http_error(
+            429,
+            "too many requests".to_owned()
+        )));
+        assert!(!policy.should_retry(&TransportErrorKind::http_error(
+            503,
+            "unavailable".to_owned()
+        )));
+
+        let deser = TransportError::deser_err(
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+            "not json",
+        );
+        assert!(!policy.should_retry(&deser));
     }
 
     /// A 2xx body that isn't JSON-RPC maps to a deser error (alloy parity;

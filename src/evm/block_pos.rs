@@ -125,7 +125,7 @@ impl LogRef {
 ///
 /// `end_block_hash` lets the consumer record the matching scanned-range
 /// entry in `LogCache::record_scanned_range`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LogPage {
     pub range: BlockRange,
     pub items: Vec<Log>,

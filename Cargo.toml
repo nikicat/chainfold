@@ -89,8 +89,8 @@ tabled = { version = "0.21", default-features = false, features = [
 
 [dev-dependencies]
 # `net` for the one-shot TcpListener server the HttpTransport wire tests
-# answer from.
-tokio = { version = "1", features = ["rt", "macros", "net"] }
+# answer from; `test-util` for the paused-clock budget/executor tests.
+tokio = { version = "1", features = ["rt", "macros", "net", "test-util"] }
 futures-util = "0.3"
 tempfile = "3"
 alloy = { version = "2", features = [

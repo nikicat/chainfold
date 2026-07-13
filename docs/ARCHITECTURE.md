@@ -1196,9 +1196,12 @@ flowchart TB
    `wiring → RangeIndex → consumer` synchronously; the durable write is
    drained in the background. Warm reads and live events never wait on disk.
 
-The retry layer (`rpc_retry_layer`) wraps transient RPC failures with bounded
-backoff; the observability contract counts every call so the "warm walk = 0
-`eth_getLogs`" property is test-enforced, not aspirational.
+The retry layer (`rpc_retry_layer`) wraps wire-level network blips with
+bounded backoff — and nothing else: classifiable errors (JSON-RPC
+responses, HTTP statuses) pass through to the adaptive executor's
+per-provider classifier (`docs/FETCH.md` §3). The observability contract
+counts every call so the "warm walk = 0 `eth_getLogs`" property is
+test-enforced, not aspirational.
 
 ---
 

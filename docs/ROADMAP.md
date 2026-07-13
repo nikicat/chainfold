@@ -53,12 +53,15 @@ follows; it comes immediately after.
    Also fixed three latent gap-fill bugs the streaming shape made acute
    (lost wakeup, persist-error notify skip, cancellation orphaning a
    placeholder — each pinned by a regression test).
-2. **Slicing executor** — new `src/evm/chain/fetch.rs` + a shared
-   per-endpoint budget in `chain_provider.rs`: slice plan by AIMD working
-   size (halve once per generation, additive regrow), bounded-parallel
-   in-order release, rate-limit vs range-error separation, generic bisect
-   classifier; the fetcher's serial header fill goes bounded-parallel under
-   the same budget ([`FETCH.md` §3](./FETCH.md)).
+2. ~~**Slicing executor**~~ — ✅ shipped: `LogFetcher`/`SliceDriver` in
+   `src/evm/chain/fetch.rs` over the shared `EndpointBudget`
+   (`src/evm/budget.rs`, riding `ChainProvider`): AIMD working size
+   (halve once per generation / adopt the provider hint, additive
+   regrow), deficit-forget concurrency with pause + quiet-period
+   recovery, bounded-parallel in-order release, slice-local transient
+   bisection, in-slice header fill; transport retry narrowed to wire
+   blips (`NetworkBlipRetryPolicy`) so the classifier owns provider
+   signals (as-built notes in [`FETCH.md` §3](./FETCH.md)).
 3. ~~**Provider adaptors**~~ — ✅ shipped: `src/evm/provider/` with the
    `ProviderAdaptor` trait, the no-`Display` `ApiKey`, the `ProviderKind`
    registry, and Generic + Alchemy + Infura (as-built notes in

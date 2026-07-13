@@ -16,7 +16,7 @@ use super::{
     ApiKey, Concurrency, ErrorClass, FetchSeeds, LogCount, ProviderAdaptor, RpcTransport,
     classify_http_status, parse_bracketed_range, parse_hex_block,
 };
-use crate::chain::{BlockCount, BlockRange};
+use crate::chain::BlockRange;
 use crate::evm::types::ChainId;
 
 // The vendored chain-id → network-subdomain table (`NETWORK_SUBDOMAINS`).
@@ -96,7 +96,11 @@ impl ProviderAdaptor for InfuraAdaptor {
 
     fn seeds(&self, _chain: ChainId) -> FetchSeeds {
         FetchSeeds {
-            max_range: Some(BlockCount::new(10_000)),
+            // No width cap at all: the recorded result-window rejection
+            // (fixture above) suggested a ~453k-block window, so the only
+            // real limit is the 10k-results content cap — start at the
+            // ceiling and let suggested-range adoption converge.
+            max_range: None,
             max_logs: Some(LogCount::new(10_000)),
             concurrency: Concurrency::new(8),
         }

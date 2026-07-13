@@ -59,6 +59,7 @@ use crate::share::Share;
 
 mod blocks;
 mod config;
+mod fetch;
 mod head_clock;
 mod logs;
 #[cfg(test)]

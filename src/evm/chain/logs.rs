@@ -1,7 +1,8 @@
 //! The logs source: per-filter log histories over
-//! [`RangeIndexStore<LogSpec>`] — [`LogFilter`], the chunked `eth_getLogs`
-//! gap-fill fetcher, the reactive store ([`EvmChain::logs`]) with its ws
-//! push wiring, and the bounded hist ([`EvmChain::logs_hist`]).
+//! [`RangeIndexStore<LogSpec>`] — [`LogFilter`], the reactive store
+//! ([`EvmChain::logs`]) with its ws push wiring, and the bounded hist
+//! ([`EvmChain::logs_hist`]). The gap-fill fetcher is the adaptive
+//! slicing executor in [`fetch`](super::fetch).
 //!
 //! ## Per-source log delivery
 //!
@@ -34,6 +35,7 @@ use tokio::time::sleep;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::EvmChain;
+use super::fetch::LogFetcher;
 use crate::arch::{Hist, HistStore, HistoryError, Timestamp};
 use crate::chain::{BlockNumber, BlockRange};
 use crate::chain::{Finality, HeadEvent, INITIAL_BACKOFF, MAX_BACKOFF, TimeLocator, follow_head};
@@ -41,9 +43,7 @@ use crate::evm::cache::compute_filter_hash;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx, Topic};
 use crate::evm::{LogPage, LogSpec};
-use crate::range_index::{
-    PageFetcher, RangeIndex, RangeIndexStore, RangeSpec, SinglePageFetcher, TimePos, TipSeed,
-};
+use crate::range_index::{RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed};
 use crate::share::Share;
 
 // ============================================================
@@ -166,7 +166,11 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
     ) -> Arc<RangeIndexStore<LogSpec>> {
         let filter_hash = compute_filter_hash(&filter.address, &filter.topics);
         let spec = LogSpec::new(self.cache().share(), filter_hash);
-        let fetcher = build_fetcher(self.provider().clone(), filter.address, filter.topics);
+        let fetcher = Arc::new(LogFetcher::new(
+            self.provider().clone(),
+            filter.to_alloy(),
+            self.chunk_size,
+        ));
         let index = Arc::new(RangeIndex::with_chunk_size(spec, fetcher, self.chunk_size));
         RangeIndexStore::new(
             index,
@@ -215,7 +219,7 @@ impl TimePos<EvmPosition> for LogTimePos {
 }
 
 // ============================================================
-// Fetcher
+// Filter plumbing
 // ============================================================
 
 /// Apply `topics[0..3]` to an alloy [`Filter`] in the conventional slots
@@ -235,51 +239,6 @@ fn apply_topics(mut filter: Filter, topics: &[Option<Topic>; 4]) -> Filter {
         filter = filter.topic3(t.b256());
     }
     filter
-}
-
-/// The gap-fill fetcher for one log filter: chunked `eth_getLogs` +
-/// header pre-caching so `LogSpec::resolve`'s synchronous timestamp fill
-/// always hits the cache. Single-page for now — the adaptive slicing
-/// executor replaces this body (`docs/FETCH.md` §3).
-fn build_fetcher<P>(
-    provider: ChainProvider<P>,
-    address: Address,
-    topics: [Option<Topic>; 4],
-) -> Arc<dyn PageFetcher<LogPage>>
-where
-    P: Provider<Ethereum> + Clone + Send + Sync + 'static,
-{
-    Arc::new(SinglePageFetcher(move |range: BlockRange| {
-        let provider = provider.clone();
-        async move {
-            let filter = Filter::new()
-                .address(address)
-                .from_block(range.from.get())
-                .to_block(range.to.get());
-            let filter = apply_topics(filter, &topics);
-            tracing::debug!(%range, blocks = %range.count(), "eth_getLogs");
-            let logs = provider.get_logs(&filter).await?;
-            tracing::debug!(%range, num_logs = logs.len(), "eth_getLogs returned");
-
-            let end_header = provider.ensure_block_header(range.to).await?;
-            for log in &logs {
-                // Logs that carry their own timestamp need no header — the
-                // query path reads it straight off the persisted log.
-                if log.block_timestamp.is_some() {
-                    continue;
-                }
-                if let Some(bn) = log.block_number {
-                    let _ = provider.ensure_block_header(BlockNumber::new(bn)).await;
-                }
-            }
-
-            Ok(LogPage {
-                range,
-                items: logs,
-                end_block_hash: end_header.hash,
-            })
-        }
-    }))
 }
 
 // ============================================================
