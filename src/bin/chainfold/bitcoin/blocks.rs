@@ -11,8 +11,9 @@ use crate::cli::{
     BitcoinArgs, BtcBlocksArgs, BtcBlocksCommand, BtcBlocksListArgs, Direction, FollowMode,
     WindowArgs,
 };
-use crate::fmt::{HexDetail, block_cell, explorer_url, format_timestamp};
-use crate::table::{Cell, Column, Out, RenderMode, TableBuf, TableSpec, TermText};
+use crate::fmt::{HexDetail, explorer_url};
+use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
+use crate::theme::{Content, TermTheme};
 use crate::util::{WindowSel, block_cut, inclusive_range, print_date_estimate, window_sel};
 
 /// Which columns to render — driven by the `--full` flag.
@@ -178,16 +179,16 @@ async fn estimate_date_range(
 }
 
 /// Table title: entity, window, and chain — `blocks 100..=199 · bitcoin`;
-/// an open end (`--follow`) renders as `blocks 100.. · bitcoin`. A
-/// [`TermText`] closure, so the numbers dress per render mode.
-fn title(from: BlockNumber, to: Option<BlockNumber>) -> impl TermText {
-    move |mode: RenderMode| match to {
+/// an open end (`--follow`) renders as `blocks 100.. · bitcoin`. Composed
+/// [`Content`], so the numbers dress per theme at render time.
+fn title(from: BlockNumber, to: Option<BlockNumber>) -> Content {
+    Content::from(move |theme: &dyn TermTheme| match to {
         Some(to) => format!(
             "blocks {} · bitcoin",
-            BlockRange::new(from, to).term_text(mode)
+            theme.block_range(BlockRange::new(from, to))
         ),
-        None => format!("blocks {}.. · bitcoin", from.term_text(mode)),
-    }
+        None => format!("blocks {}.. · bitcoin", theme.block_number(from)),
+    })
 }
 
 /// The block table's columns — the one source of truth for both the
@@ -220,8 +221,8 @@ fn hash_cell(hash: &BtcBlockHash, detail: HexDetail) -> Cell {
 
 fn row(b: &BtcBlock, columns: ColumnSet) -> Vec<Cell> {
     let mut row = vec![
-        block_cell(b.height),
-        Cell::new(format_timestamp(b.time)),
+        Cell::new(b.height),
+        Cell::new(b.time),
         Cell::new(b.tx_count.to_string()),
         Cell::new(format!("{:.4e}", b.bits.difficulty())),
         hash_cell(&b.hash, columns.hex_detail()),

@@ -13,10 +13,10 @@ use url::Url;
 
 use crate::cli::{BlocksArgs, BlocksCommand, BlocksListArgs, Direction, EvmArgs, FollowMode};
 use crate::fmt::{
-    HexDetail, addr_cell, block_cell, block_hash_cell, explorer_base_url, format_base_fee,
-    format_gas, format_timestamp,
+    HexDetail, addr_cell, block_hash_cell, explorer_base_url, format_base_fee, format_gas,
 };
-use crate::table::{Cell, Column, Out, RenderMode, TableBuf, TableSpec, TermText};
+use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
+use crate::theme::{Content, TermTheme};
 use crate::util::{WindowSel, block_cut, estimate_date_range, inclusive_range, window_sel};
 use chainfold::chain::{BlockNumber, BlockRange, Finality};
 
@@ -167,16 +167,16 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 }
 
 /// Table title: entity, window, and chain — `blocks 100..=199 · chain 1`;
-/// an open end (`--follow`) renders as `blocks 100.. · chain 1`. A
-/// [`TermText`] closure, so the numbers dress per render mode.
-fn title(chain_id: ChainId, from: BlockNumber, to: Option<BlockNumber>) -> impl TermText {
-    move |mode: RenderMode| match to {
+/// an open end (`--follow`) renders as `blocks 100.. · chain 1`. Composed
+/// [`Content`], so the numbers dress per theme at render time.
+fn title(chain_id: ChainId, from: BlockNumber, to: Option<BlockNumber>) -> Content {
+    Content::from(move |theme: &dyn TermTheme| match to {
         Some(to) => format!(
             "blocks {} · chain {chain_id}",
-            BlockRange::new(from, to).term_text(mode)
+            theme.block_range(BlockRange::new(from, to))
         ),
-        None => format!("blocks {}.. · chain {chain_id}", from.term_text(mode)),
-    }
+        None => format!("blocks {}.. · chain {chain_id}", theme.block_number(from)),
+    })
 }
 
 /// The block table's columns — the one source of truth for both the
@@ -199,8 +199,8 @@ fn spec(columns: ColumnSet) -> TableSpec {
 
 fn row(b: &EvmBlock, columns: ColumnSet, base_url: &Url) -> Vec<Cell> {
     let mut row = vec![
-        block_cell(b.number),
-        Cell::new(format_timestamp(b.timestamp)),
+        Cell::new(b.number),
+        Cell::new(b.timestamp),
         Cell::new(b.tx_count.to_string()),
         Cell::new(format_gas(b.gas_used, b.gas_limit)),
         Cell::new(format_base_fee(b.base_fee)),
@@ -208,7 +208,7 @@ fn row(b: &EvmBlock, columns: ColumnSet, base_url: &Url) -> Vec<Cell> {
     ];
     if columns.is_full() {
         row.push(addr_cell(&b.miner, base_url));
-        row.push(Cell::new(format!("{:#x}", b.parent_hash)));
+        row.push(Cell::new(Content::Hex(format!("{:#x}", b.parent_hash))));
     }
     row
 }

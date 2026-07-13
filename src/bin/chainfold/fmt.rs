@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use alloy::primitives::{Address, U256};
-use chainfold::arch::{Positioned, Timestamp};
-use chainfold::chain::{BlockNumber, BlockRange};
+use chainfold::arch::Positioned;
+use chainfold::chain::BlockNumber;
 use chainfold::evm::{
     BlockHash, Erc20Metadata, EvmEvent, EvmPosition, Gas, GasPrice, TxHash, decode_transfer,
 };
 use url::Url;
 
-use crate::table::{Cell, CellStyle, Column, RenderMode, TableSpec, TermText, grouped_digits};
+use crate::table::{Cell, CellStyle, Column, TableSpec};
+use crate::theme::Content;
 
 /// How much of a hex (or otherwise long) value to render — the user's
 /// `--full` flag, funneled once. Orthogonal to [`RenderMode`]
@@ -79,7 +80,8 @@ pub fn explorer_url(url: &str) -> Url {
 
 /// Abbreviated address cell linking to the explorer's address page.
 pub fn addr_cell(addr: &Address, base_url: &Url) -> Cell {
-    Cell::new(abbrev_addr(addr)).link(explorer_join(base_url, &format!("address/{addr:#x}")))
+    Cell::new(Content::Hex(abbrev_addr(addr)))
+        .link(explorer_join(base_url, &format!("address/{addr:#x}")))
 }
 
 /// Tx hash cell linking to the explorer's tx page.
@@ -89,35 +91,7 @@ pub fn tx_cell(hash: &TxHash, base_url: &Url, detail: HexDetail) -> Cell {
     } else {
         abbrev_tx_hash(hash)
     };
-    Cell::new(text).link(explorer_join(base_url, &format!("tx/{hash:#x}")))
-}
-
-/// Block-number cell: bare digits whose alternate thousands groups render
-/// dim in `Pretty` ([`CellStyle::GroupedDigits`]); piped output stays the
-/// untouched digits. Prose goes through `Out::line` with the [`TermText`]
-/// impls below for the same look.
-pub fn block_cell(number: BlockNumber) -> Cell {
-    Cell::new(number.to_string()).style(CellStyle::GroupedDigits)
-}
-
-/// Block numbers in mode-aware text (table titles) dress exactly like
-/// [`CellStyle::GroupedDigits`] cells: bare digits in `Plain`, dim
-/// alternate thousands groups in `Pretty`.
-impl TermText for BlockNumber {
-    fn term_text(&self, mode: RenderMode) -> String {
-        grouped_digits(&self.to_string(), mode)
-    }
-}
-
-/// `from..=to` with both endpoints dressed as [`BlockNumber`]s.
-impl TermText for BlockRange {
-    fn term_text(&self, mode: RenderMode) -> String {
-        format!(
-            "{}..={}",
-            self.from.term_text(mode),
-            self.to.term_text(mode)
-        )
-    }
+    Cell::new(Content::Hex(text)).link(explorer_join(base_url, &format!("tx/{hash:#x}")))
 }
 
 /// Block hash cell linking to the explorer's block page.
@@ -132,7 +106,7 @@ pub fn block_hash_cell(
     } else {
         abbrev_hash32(hash.as_slice())
     };
-    Cell::new(text).link(explorer_join(base_url, &format!("block/{number}")))
+    Cell::new(Content::Hex(text)).link(explorer_join(base_url, &format!("block/{number}")))
 }
 
 /// `14.9M ( 50%)` — gas used with its share of the block limit.
@@ -162,13 +136,6 @@ pub fn format_base_fee(fee: Option<GasPrice>) -> String {
                 (wei % 1_000_000_000) / 10_000_000
             )
         },
-    )
-}
-
-pub fn format_timestamp(ts: Timestamp) -> String {
-    chrono::DateTime::from_timestamp(ts.get() as i64, 0).map_or_else(
-        || "----------T--:--:--Z".into(),
-        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     )
 }
 
@@ -259,8 +226,8 @@ pub fn transfer_row(
     };
     let mut row = vec![
         Cell::new(index.to_string()),
-        block_cell(e.block_number),
-        Cell::new(format_timestamp(e.timestamp)),
+        Cell::new(e.block_number),
+        Cell::new(e.timestamp),
         tx_cell(&e.tx_hash, ctx.base_url, HexDetail::Abbreviated),
         direction,
         addr_cell(counterparty, ctx.base_url),

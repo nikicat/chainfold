@@ -8,6 +8,7 @@ mod fmt;
 mod signature_cache;
 mod stats;
 mod table;
+mod theme;
 mod tokens;
 mod util;
 

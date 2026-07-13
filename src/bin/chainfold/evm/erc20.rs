@@ -16,7 +16,8 @@ use futures_util::future::join_all;
 
 use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode, TokenRef};
 use crate::fmt::{self, FmtContext};
-use crate::table::{Cell, Out, RenderMode, TableBuf, TermText};
+use crate::table::{Cell, Out, TableBuf};
+use crate::theme::TermTheme;
 use crate::util::{log_cut, log_end, parse_hex_address, resolve_log_range};
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
@@ -83,7 +84,12 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         base_url: &base_url,
     };
 
-    println!("  Owner:    0x{}", hex::encode(owner.as_slice()));
+    out.line(move |theme: &dyn TermTheme| {
+        format!(
+            "  Owner:    {}",
+            theme.hex(&format!("0x{}", hex::encode(owner.as_slice())))
+        )
+    });
     println!("  Tokens:   {}", addresses.len());
     println!();
 
@@ -121,10 +127,11 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 range.from,
             )
             .await?;
-            out.line(|mode: RenderMode| {
+            let line_symbol = meta_symbol.clone();
+            out.line(move |theme: &dyn TermTheme| {
                 format!(
-                    "  Opening balance before block {}: {} {meta_symbol}",
-                    range.from.term_text(mode),
+                    "  Opening balance before block {}: {} {line_symbol}",
+                    theme.block_number(range.from),
                     fmt::format_amount_trim(balance, meta_decimals),
                 )
             });
@@ -133,10 +140,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         if follow.is_follow() {
             let mut writer = out.rows(fmt::transfer_spec(&ctx, show_balance));
             let title_symbol = meta_symbol.clone();
-            writer.title(move |mode: RenderMode| {
+            writer.title(move |theme: &dyn TermTheme| {
                 format!(
                     "{title_symbol} transfers {} · chain {chain_id}",
-                    range.term_text(mode)
+                    theme.block_range(range)
                 )
             });
             writer.print_header();
@@ -162,10 +169,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let mut stream = window.iter();
             let mut table = TableBuf::new(fmt::transfer_spec(&ctx, show_balance));
             let title_symbol = meta_symbol.clone();
-            table.title(move |mode: RenderMode| {
+            table.title(move |theme: &dyn TermTheme| {
                 format!(
                     "{title_symbol} transfers {} · chain {chain_id}",
-                    range.term_text(mode)
+                    theme.block_range(range)
                 )
             });
             let mut count = 0;
@@ -209,16 +216,19 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 )
                 .await
                 {
-                    Ok(onchain) if onchain != balance => out.line(|mode: RenderMode| {
-                        format!(
-                            "warning: folded balance {} ≠ on-chain balance {} at block {} — \
-                             {meta_symbol} moves balances outside Transfer events \
-                             (mint/burn/rebase/fee-on-transfer?)",
-                            fmt::format_amount_trim(balance, meta_decimals),
-                            fmt::format_amount_trim(onchain, meta_decimals),
-                            range.to.term_text(mode),
-                        )
-                    }),
+                    Ok(onchain) if onchain != balance => {
+                        let line_symbol = meta_symbol.clone();
+                        out.line(move |theme: &dyn TermTheme| {
+                            format!(
+                                "warning: folded balance {} ≠ on-chain balance {} at block {} — \
+                                 {line_symbol} moves balances outside Transfer events \
+                                 (mint/burn/rebase/fee-on-transfer?)",
+                                fmt::format_amount_trim(balance, meta_decimals),
+                                fmt::format_amount_trim(onchain, meta_decimals),
+                                theme.block_number(range.to),
+                            )
+                        });
+                    }
                     Ok(_) => {}
                     Err(e) => tracing::warn!(
                         error = %e, token = %meta_symbol,

@@ -9,7 +9,8 @@ use chainfold::evm::{EvmChain, EvmPosition, LogIdx};
 use chrono::NaiveDate;
 
 use crate::cli::WindowArgs;
-use crate::table::{Out, RenderMode, TermText};
+use crate::table::Out;
+use crate::theme::TermTheme;
 use chainfold::chain::{BlockCount, BlockNumber, BlockRange};
 
 /// Setup-phase span (target `chainfold::setup`): the name is the phase's row
@@ -129,7 +130,9 @@ pub fn print_date_estimate(args: &WindowArgs, range: BlockRange, out: Out) {
     let from_str = args.from.as_deref().expect("Dates arm has --from");
     let to_str = args.to.as_deref().unwrap_or("now");
     out.line(format!("  Date range: {from_str} → {to_str}"));
-    out.line(|mode: RenderMode| format!("  Estimated blocks: {}", range.term_text(mode)));
+    out.line(move |theme: &dyn TermTheme| {
+        format!("  Estimated blocks: {}", theme.block_range(range))
+    });
 }
 
 /// Resolve the inclusive block window for the log commands (`events`,

@@ -14,9 +14,10 @@ use url::Url;
 
 use crate::cli::{Direction, EventsArgs, EvmArgs, FollowMode};
 use crate::config::Config;
-use crate::fmt::{HexDetail, block_cell, explorer_base_url, format_timestamp, tx_cell};
+use crate::fmt::{HexDetail, explorer_base_url, tx_cell};
 use crate::signature_cache::SqliteSignatureCache;
-use crate::table::{Cell, Column, Out, RenderMode, RowWriter, TableSpec, TermText};
+use crate::table::{Cell, Column, Out, RowWriter, TableSpec};
+use crate::theme::{Content, TermTheme};
 use crate::util::{log_cut, parse_hex_address, resolve_log_range};
 
 struct PrintOpts {
@@ -68,16 +69,21 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     let filter = LogFilter::new(address, topics);
     let range = resolve_log_range(chain, &evm_args.window, out).await?;
 
-    println!("  Address:  {address:#x}");
+    out.line(move |theme: &dyn TermTheme| {
+        format!("  Address:  {}", theme.hex(&format!("{address:#x}")))
+    });
     if let Some(sig) = &resolved.signature {
         println!("  Event:    {sig}");
     }
-    println!("  Topic0:   {:#x}", resolved.topic0);
+    let topic0 = resolved.topic0;
+    out.line(move |theme: &dyn TermTheme| {
+        format!("  Topic0:   {}", theme.hex(&format!("{topic0:#x}")))
+    });
     println!();
 
     let mut writer = out.rows(spec());
-    writer.title(move |mode: RenderMode| {
-        format!("events {} · chain {chain_id}", range.term_text(mode))
+    writer.title(move |theme: &dyn TermTheme| {
+        format!("events {} · chain {chain_id}", theme.block_range(range))
     });
     writer.print_header();
 
@@ -207,10 +213,10 @@ fn print_event(
     };
     writer.print_row(&[
         Cell::new(index.to_string()),
-        block_cell(e.block_number),
-        Cell::new(format_timestamp(e.timestamp)),
+        Cell::new(e.block_number),
+        Cell::new(e.timestamp),
         tx_cell(&e.tx_hash, &opts.base_url, opts.detail),
-        Cell::new(details),
+        Cell::new(Content::Hex(details)),
     ]);
     if let Some(event) = &opts.decoder {
         print_decoded(event, e, opts.detail, out);
