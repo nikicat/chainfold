@@ -88,7 +88,7 @@ matcher then work automatically.
 | Doc | What |
 |---|---|
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | As-built architecture reference — diagrams, the client/backend trait layering, data flow, storage model, observability, locked-in design decisions. |
-| [`docs/ROADMAP.md`](./docs/ROADMAP.md) | Forward plan — Phase 7, deferred features, product-surface tracks, backlog. |
+| [`docs/ROADMAP.md`](./docs/ROADMAP.md) | Forward plan — the named phases (adaptive fetch, finality), deferred features, product-surface tracks, backlog. |
 | [`docs/STYLE.md`](./docs/STYLE.md) | Coding style & design preferences — high-level architectural rules and low-level code conventions. |
 | [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) | Dev setup — test suites and their external dependencies, pre-push CI gate, coverage. |
 

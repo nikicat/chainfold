@@ -105,7 +105,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
     /// subscription); the first consumer awaiting a snapshot demand-starts
     /// the clock. All background wiring dies with the returned store.
     pub fn logs(&self, filter: &LogFilter, tier: Finality) -> HistStore<EvmEvent, EvmPosition> {
-        let _ = tier; // Latest-only until Phase 7.
+        let _ = tier; // Latest-only until the finality phase.
 
         let store = self.log_store(filter, Some(self.seeder.share() as Arc<dyn TipSeed>));
 

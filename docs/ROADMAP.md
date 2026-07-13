@@ -6,10 +6,10 @@
 > [`STYLE.md`](./STYLE.md); dev setup in [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 > Shipped work is not ledgered here — `git log` and `ARCHITECTURE.md` cover it.
 >
-> **Live agenda: Phase 8** (adaptive provider fetch — scheduled ahead of
-> Phase 7), then **Phase 7** (pruning + best/safe wiring), plus the deferrals
-> and backlog below. Run `cargo test --all-features` for the live test count —
-> this file deliberately pins no number that goes stale.
+> **Live agenda: adaptive fetch** ([`FETCH.md`](./FETCH.md)), then
+> **finality** (pruning + best/safe wiring), plus the deferrals and backlog
+> below. Run `cargo test --all-features` for the live test count — this file
+> deliberately pins no number that goes stale.
 
 ---
 
@@ -23,10 +23,13 @@
 - **A demo binary is the validation surface.** If you can't drive the change
   end-to-end via an `examples/` binary (or the real CLI) against real RPC,
   it's not done.
+- **Phases carry names, not numbers.** Scheduling lives in the agenda line
+  above and gets reshuffled; ordinals bake in an order that goes stale (the
+  adaptive-fetch phase jumped a numbered queue once already — 2026-07-13).
 
 ---
 
-## Phase 8 — Adaptive provider fetch (next up — scheduled ahead of Phase 7)
+## Adaptive fetch (next up)
 
 **Goal:** backfills complete against any provider's `eth_getLogs` limits
 (range width, log count, response size) with no per-provider tuning, at a
@@ -38,8 +41,8 @@ locked decisions): [`FETCH.md`](./FETCH.md).
 *permanently* — the gap fetch errors, the placeholder is dropped, and the
 retry refetches the same too-large range. The only lever is a global
 `--chunk-size` restart, and log-count caps are content-dependent so no one
-size works. Phase 7's memory growth only bites on indefinite follows; it
-keeps its number and follows immediately after.
+size works. The finality phase's memory growth only bites on indefinite
+follows; it comes immediately after.
 
 ### Deliverables (build order)
 
@@ -94,7 +97,7 @@ real keyed provider resolving endpoints from `--api-key`.
 
 ---
 
-## Phase 7 — Pruning + best/safe wiring (after Phase 8)
+## Finality — pruning + best/safe wiring (after adaptive fetch)
 
 **Goal:** bound long-running memory, and wire real `Best`/`Safe` producers
 into the head clock (both tiers currently mirror `Latest`).
@@ -115,7 +118,7 @@ into the head clock (both tiers currently mirror `Latest`).
   first-class concept, but no prune/compact methods exist yet. The tree is
   generic over `RangeSpec`; prune/compact land once, for every source.
 - **Trap:** `reorged_blocks` is cross-family — see
-  [family-scoped reorg tombstones](#family-scoped-reorg-tombstones--blocks-phase-7-cleanup-wiring)
+  [family-scoped reorg tombstones](#family-scoped-reorg-tombstones--blocks-finality-cleanup-wiring)
   below. Partition it before wiring finality-driven cleanup.
 
 ### Deliverables
@@ -151,7 +154,7 @@ Unit (`src/range_index/` tests, over `MockSpec`): `prune_drops_items_keeps_range
 `prune_then_iter_repopulates_from_cache`, `compact_in_memory_merges_adjacent_empty`,
 `compact_skips_above_safe_tip`.
 
-Integration (`tests/phase7_soak.rs`, new): `long_running_follow_memory_bounded`
+Integration (`tests/prune_soak.rs`, new): `long_running_follow_memory_bounded`
 — `#[ignore]`-flagged ~30-min manual test: subscribe to USDC, prune every
 30 s, assert RSS plateaus after warmup.
 
@@ -165,7 +168,7 @@ USDC with a plateauing RSS chart.
 - Long-running follow no longer grows RSS without bound.
 - `best`/`safe` stores tick on real chains; `safe` advance triggers compaction.
 
-### Phase 7 candidate — reorg-aware `lca()` / `is_equiv()`
+### Candidate — reorg-aware `lca()` / `is_equiv()`
 
 Centralize today's consumer-side reorg recovery (track `block_hash`, walk back
 on mismatch — [`ARCHITECTURE.md` §13](./ARCHITECTURE.md#13-reorg--finality-model))
@@ -216,7 +219,7 @@ shipped; these are forward tracks, not yet sized into phases:
   and inherit at-most-once fetching, singleflight dedup, reorg-aware results,
   and live `eth_subscribe` push with no code changes. EVM first; later
   blockchains' RPC dialects follow as their backends land. Sequencing leans
-  after/with Phase 7 — the daemon must serve `safe`/`finalized` views and
+  after/with the finality phase — the daemon must serve `safe`/`finalized` views and
   `eth_subscribe` correctly.
 - **More source backends** — Solana / CEX websockets fit the shared-engine
   shape (Bitcoin shipped as the pattern to copy: a `RangeSpec`, a `HeadClock`
@@ -236,7 +239,7 @@ and `tests/` covers the `evm`-only feature combination, so nothing technical
 holds them in place — only the linear-demo documentation value. Staged plan:
 
 - ~~`erc20_explorer`~~ — deleted (2026-07-12); the README quickstart now
-  drives `evm erc20`, and the Phase 7 `--prune-after` deliverable (above)
+  drives `evm erc20`, and the finality phase's `--prune-after` deliverable (above)
   targets `evm erc20`.
 - ~~`history_explorer`~~ — deleted (2026-07-12); listing was redundant with
   `evm events`. Its `--measure` cold/warm/hot benchmark was dropped rather
@@ -252,9 +255,9 @@ holds them in place — only the linear-demo documentation value. Staged plan:
   module docs on the new subcommands (or doc examples on `AnchoredMatcher`).
 - Once empty: drop the `tabled` `[dev-dependencies]` entry.
 
-### Out-of-order page carving — Phase 8 follow-up
+### Out-of-order page carving — adaptive-fetch follow-up
 
-Phase 8 ships in-order contiguous page release as the *intermediate*
+Adaptive fetch ships in-order contiguous page release as the *intermediate*
 contract (user call, 2026-07-13: fine for now, not the long-term shape).
 The long-term direction relaxes `PageFetcher` invariant 1 to out-of-order
 pages, with the gap-fill carving the in-flight placeholder around each
@@ -262,13 +265,13 @@ landed page — retains completed slices when an earlier slice fails, and
 unblocks waiters deep inside a gap as soon as their sub-range lands.
 Rationale and upgrade path: [`FETCH.md` §5 decision 1](./FETCH.md).
 
-### Family-scoped reorg tombstones — blocks Phase 7 cleanup wiring
+### Family-scoped reorg tombstones — blocks finality cleanup wiring
 
 `reorged_blocks` is shared by every family in the one cache file, and heights
 are only comparable within one family — `cleanup_reorged_before`
 (height-scoped, currently test-only) driven by one family's finality would
 also drop the other family's tombstones at numerically lower heights.
-Partition the table (or the delete) per family before Phase 7 wires
+Partition the table (or the delete) per family before the finality phase wires
 finality-driven cleanup. Flagged on the method in `src/cache/coverage.rs`.
 
 ### R6 follow-up — `loom` model of the singleflight handshake
@@ -360,8 +363,8 @@ table command.
 - `bridge_explorer`/`bridge_matcher` run against real cross-chain setups with
   no bespoke per-bridge code beyond a `MatchFn`.
 - Backfills complete against any provider's range/log caps with an API key
-  as the only config (Phase 8).
-- Memory bounded under indefinite follow (Phase 7).
+  as the only config (adaptive fetch).
+- Memory bounded under indefinite follow (finality).
 - Usable as a dependency via: `Hist`, `HistStore`, `Position`, `Signal`,
   `Matcher` (+ `Reducer` once built), `merge_hist_stores`,
   `interleave_hist_stores`, `map_hist_store`, `filter_hist_store`,

@@ -3,7 +3,7 @@
 > **This document** is the agreed design for the adaptive fetch layer:
 > the streaming page contract, the slicing executor, and provider
 > adaptors. Sequencing, test plan and acceptance criteria live in
-> [`ROADMAP.md` Phase 8](./ROADMAP.md#phase-8--adaptive-provider-fetch-next-up--scheduled-ahead-of-phase-7);
+> [the adaptive-fetch phase in `ROADMAP.md`](./ROADMAP.md#adaptive-fetch-next-up);
 > the as-built reference is [`ARCHITECTURE.md`](./ARCHITECTURE.md) (this
 > design folds into it as the pieces ship); conventions in
 > [`STYLE.md`](./STYLE.md) apply to the sketches below as much as to code.

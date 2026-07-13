@@ -10,9 +10,10 @@
 >
 > **Status:** The **library** and **CLI** surfaces are live over the shared
 > chain engine, with two concrete source families (EVM logs + blocks;
-> Bitcoin blocks); the **daemon** (`chainfoldd`) is planned. Phase 8
-> (adaptive provider fetch — [`FETCH.md`](./FETCH.md)) is the next eligible
-> chunk, then Phase 7 (memory pruning + `best`/`safe` head producers).
+> Bitcoin blocks); the **daemon** (`chainfoldd`) is planned. The
+> **adaptive-fetch** phase ([`FETCH.md`](./FETCH.md)) is the next eligible
+> chunk, then **finality** (memory pruning + `best`/`safe` head producers) —
+> see [`ROADMAP.md`](./ROADMAP.md).
 
 ---
 
@@ -556,7 +557,7 @@ exercised featureless by the synthetic `MockSpec` testkit.
 ### Client — the chain entity (concrete per source)
 
 ```rust
-enum Finality { Latest, Best, Safe }     // Best/Safe mirror Latest until Phase 7
+enum Finality { Latest, Best, Safe }     // Best/Safe mirror Latest until the finality phase
 struct LogFilter { address: Address, topics: [Option<Topic>; 4] }   // the "query" for logs
 
 EvmChain::new(provider: ChainProvider<P>, config: EvmChainConfig)  // sync, infallible: no RPC, no tasks
@@ -627,7 +628,8 @@ false-coverage soundness rule.
 ### Finality lives on the chain
 
 The store constructors take a `Finality` tier; `Best`/`Safe` mirror `Latest`
-until Phase 7 wires their producers into the head clock (per-tier channels —
+until the finality phase wires their producers into the head clock
+(per-tier channels —
 a confirmation-depth lag for `best`, a `finalized` poll for `safe`). Every
 head the **ws** clock publishes has its block header persisted *first* — the
 **headers-present invariant** — so `LogSpec::resolve` can fill
@@ -1074,7 +1076,7 @@ Key modelling decisions baked into the schema:
   exactly where a page is persisted or a reorg recorded — no per-source
   display convention leaks into shared storage. `reorged_blocks` is
   therefore cross-family; its height-scoped `cleanup_reorged_before` must be
-  partitioned per family before Phase 7 wires finality-driven cleanup
+  partitioned per family before the finality phase wires its cleanup
   (flagged in [`ROADMAP.md`](./ROADMAP.md#backlog)).
 - **The dense block tables** (`cached_blocks`, `cached_btc_blocks`) are
   height-keyed with INSERT-OR-REPLACE: a reorg refetch overwrites the stale
@@ -1200,10 +1202,10 @@ backoff; the observability contract counts every call so the "warm walk = 0
 ```mermaid
 flowchart LR
     latest["latest<br/>(every received tip)<br/>✅ wired"]
-    best["best<br/>(mined — latest − confirmations)<br/>⏳ Phase 7 stub → latest"]
-    safe["safe<br/>(finalized — eth finalized / latest−64)<br/>⏳ Phase 7 stub → latest"]
+    best["best<br/>(mined — latest − confirmations)<br/>⏳ stub → latest (finality phase)"]
+    safe["safe<br/>(finalized — eth finalized / latest−64)<br/>⏳ stub → latest (finality phase)"]
     latest --> best --> safe
-    safe -. "advance triggers" .-> compact["compact_ranges (durable)<br/>+ compact_in_memory (Phase 7)"]
+    safe -. "advance triggers" .-> compact["compact_ranges (durable)<br/>+ compact_in_memory (finality phase)"]
 ```
 
 - **Logs are append-only.** Reorged block hashes go into `reorged_blocks`;
@@ -1213,13 +1215,13 @@ flowchart LR
 - **Finality is chain-wide**: the `Finality` tier on
   `EvmChain::logs(filter, tier)` / `EvmChain::blocks(tier)`, not per-store
   accessors. `Latest` is fully wired; `Best`/`Safe` mirror `Latest` until
-  Phase 7 wires their producers (`latest − confirmation_depth`; RPC
+  the finality phase wires their producers (`latest − confirmation_depth`; RPC
   `finalized`, else `latest − 64`) into the head clock.
 - **Compaction runs only below `safe`** so a tip reorg can never invalidate a
   merged range (decision #8).
 - **Consumer-side recovery today:** track `block_hash` on the last consumed
   `EvmEvent`; if a later walk surfaces a different hash at that position, walk
-  back. Phase 7 may centralize this (reorg-aware `lca()`).
+  back. The finality phase may centralize this (reorg-aware `lca()`).
 
 ---
 
@@ -1551,7 +1553,7 @@ explicitly — do not reverse one silently; reopen it with the user first.
    ([§5](#5-core-abstractions)); items expose `.pos` via `Positioned`;
    navigation is `hist.split(p)`. No `Cursor`/`History` facade. `Signal`
    currently has no public producer (the head is the snapshot's `end()`);
-   it returns with Phase 7's per-tier producers.
+   it returns with the finality phase's per-tier producers.
 4. **Three finality tiers** — `Finality { Latest, Best, Safe }` is a
    chain-wide fact on the chain entity, not a per-store accessor. Bounded
    `*_hist(range)` windows deliberately take **no** tier (no tip, no clock —

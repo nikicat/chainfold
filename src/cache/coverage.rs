@@ -383,7 +383,7 @@ impl Coverage {
     /// family in the cache file, and heights are only comparable within one
     /// family — a cleanup driven by one family's finality would also drop
     /// the other family's tombstones at numerically lower heights. No
-    /// production caller exists yet (Phase 7 wires finality-driven cleanup);
+    /// production caller exists yet (the finality phase wires this cleanup);
     /// partition the table by family before wiring this up.
     pub fn cleanup_reorged_before(&self, block_number: BlockNumber) -> Result<usize, CacheError> {
         let conn = self.conn.lock().unwrap();

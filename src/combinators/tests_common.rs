@@ -1,6 +1,6 @@
 //! Shared in-memory mock source used by combinator unit tests.
 //!
-//! Mirrors the `MockPos`/`MockSource` shape from `tests/phase3_hist_store.rs`
+//! Mirrors the `MockPos`/`MockSource` shape from `tests/hist_store.rs`
 //! so combinator tests stay source-agnostic (no EVM reference in any
 //! generic test — see [[source-agnostic-core]]).
 

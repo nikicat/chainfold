@@ -32,8 +32,8 @@ pub const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Chain-wide finality tier (see `docs/ARCHITECTURE.md`, "three finality
-/// levels"). Until Phase 7 wires `best`/`safe` producers into the head
-/// clock, all tiers resolve to `Latest`.
+/// levels"). Until the finality phase wires `best`/`safe` producers into
+/// the head clock, all tiers resolve to `Latest`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Finality {
     /// Chain head as announced (may reorg).

@@ -25,8 +25,8 @@
 //! fully-cached walk is completely offline.
 //!
 //! Finality is a chain-wide fact: the store constructors take a
-//! [`Finality`] tier. Until Phase 7 wires real `best`/`safe` producers,
-//! all tiers mirror `Latest`.
+//! [`Finality`] tier. Until the finality phase wires real `best`/`safe`
+//! producers, all tiers mirror `Latest`.
 //!
 //! Split across submodules — one per source, plus the chain-wide plumbing:
 //! - [`logs`] — the logs source: [`LogFilter`], the `eth_getLogs` fetcher,

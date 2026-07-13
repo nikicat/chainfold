@@ -5,9 +5,9 @@
 //! cached `balanceOf`-at-a-block reads, and a pure balance-fold helper.
 //!
 //! Layer note: no `Reducer` trait dependency. Balance tracking is
-//! performed by the application layer (or, eventually, a generic
-//! `Reducer` rebuilt in Phase 6) by folding [`apply_transfer`] over a
-//! stream of [`EvmEvent`]s yielded by a `HistStore`.
+//! performed by the application layer (or, eventually, the deferred
+//! generic `Reducer` — `docs/ROADMAP.md`) by folding [`apply_transfer`]
+//! over a stream of [`EvmEvent`]s yielded by a `HistStore`.
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::Ethereum;

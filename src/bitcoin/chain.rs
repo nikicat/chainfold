@@ -128,7 +128,7 @@ impl BitcoinChain {
     /// consumer awaiting a snapshot demand-starts it. All background
     /// wiring dies with the returned store.
     pub fn blocks(&self, tier: Finality) -> HistStore<BtcBlock, BlockNumber> {
-        let _ = tier; // Latest-only until Phase 7 (same as the EVM side).
+        let _ = tier; // Latest-only until the finality phase (same as the EVM side).
 
         let store = self.block_store(Some(self.seeder.share() as Arc<dyn TipSeed>));
 

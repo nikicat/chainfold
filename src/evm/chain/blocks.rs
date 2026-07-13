@@ -38,7 +38,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
     /// snapshot demand-starts it. All background wiring dies with the
     /// returned store.
     pub fn blocks(&self, tier: Finality) -> HistStore<EvmBlock, BlockNumber> {
-        let _ = tier; // Latest-only until Phase 7.
+        let _ = tier; // Latest-only until the finality phase.
 
         let store = self.block_store(Some(self.seeder.share() as Arc<dyn TipSeed>));
 
