@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 
 use url::Url;
 
-use crate::cli::{Direction, EventsArgs, EvmArgs, FollowMode};
+use crate::cli::{EventsArgs, EvmArgs};
 use crate::config::Config;
 use crate::fmt::{HexDetail, explorer_base_url, tx_cell};
 use crate::signature_cache::SqliteSignatureCache;
@@ -46,10 +46,9 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     config: &Config,
     evm_args: &EvmArgs,
     events_args: &EventsArgs,
-    _direction: Direction,
-    follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let follow = evm_args.follow_mode();
     let address = parse_hex_address(&events_args.address)?;
     let chain_id = chain.chain_id();
     let resolved = resolve_lookup(cache, config, chain_id, address, events_args).await?;

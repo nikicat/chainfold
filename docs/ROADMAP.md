@@ -68,9 +68,17 @@ follows; it comes immediately after.
    [`FETCH.md` §4](./FETCH.md)). Fixtures are drafted-and-flagged until
    the `#[ignore]` smoke records real payloads (Infura needs an
    `INFURA_KEY`); dRPC, GetBlock, Tenderly, … follow as recordings land.
-4. **CLI autoconfig** — `--api-key <provider>:<KEY>` (+ env vars),
-   chain-name resolution, http **and ws** endpoints from one key;
-   `--rpc-url` + generic adaptor stays first-class.
+4. ~~**CLI autoconfig**~~ — ✅ shipped: provider keys from `ALCHEMY_KEY` /
+   `INFURA_KEY` (via the config template) or `[provider.*]` sections —
+   deliberately no `--api-key` flag (secrets stay out of argv);
+   precedence `--rpc-url` (recognized provider URLs adopt their adaptor
+   and ws sibling) > configured keys (first provider hosting the chain
+   wins) > chainlist public (loaded lazily — a keyed run never touches
+   chainlist). `--follow` opens a dedicated **subscriptions-only** ws
+   connection (all fetching stays on http; `--no-ws` opts out; connect
+   failure falls back to HTTP polling); every URL echo is redacted;
+   `chains list --provider <name>` filters by the vendored tables
+   (as-built notes in [`FETCH.md` §4](./FETCH.md)).
 
 ### Test plan
 
@@ -88,7 +96,7 @@ enforcing a range cap and a log-count cap — backfill completes; the
 RPC-count guard asserts a retry after a mid-gap failure fetches only the
 suffix; the first `items()` yield lands before the last slice completes.
 CLI: `evm events` against the capped mock; an `#[ignore]` smoke against a
-real keyed provider resolving endpoints from `--api-key`.
+real keyed provider resolving endpoints from a configured key.
 
 ### Acceptance
 
@@ -99,8 +107,8 @@ real keyed provider resolving endpoints from `--api-key`.
 - Cold `items()` over a large gap yields its first item after one slice,
   not after the whole gap.
 - API keys never render in logs or errors.
-- `--api-key <provider>:<KEY>` alone (no URL) reaches both http and ws
-  endpoints on a supported chain.
+- A configured provider key alone (env var or `[provider.*]` section, no
+  URL) reaches both http and ws endpoints on a supported chain.
 
 ---
 

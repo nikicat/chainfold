@@ -27,7 +27,7 @@ use std::sync::{Arc, Weak};
 
 use alloy::network::Ethereum;
 use alloy::primitives::Address;
-use alloy::providers::Provider;
+use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::Filter;
 use futures_util::StreamExt;
 use tokio::sync::watch;
@@ -116,12 +116,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
             super::SubscribeTransport::Poll { .. } => {
                 tokio::spawn(follow_head(head_rx, Arc::downgrade(&store)))
             }
-            super::SubscribeTransport::Ws => {
+            super::SubscribeTransport::Ws { subscriber } => {
                 // Live pages persist via the async drain (never SQLite on
                 // the delivery path).
                 store.index().attach_drain();
                 tokio::spawn(ws_follow(
                     self.provider().clone(),
+                    subscriber.clone(),
                     filter.to_alloy(),
                     head_rx,
                     Arc::downgrade(&store),
@@ -250,9 +251,12 @@ type WeakLogStore = Weak<RangeIndexStore<LogSpec>>;
 /// Ws log wiring: run [`ws_log_session`]s forever, gap-filling after
 /// every disconnect *before* re-entering push delivery, with exponential
 /// backoff on transport errors. Holds only a [`Weak`] store reference
-/// (the store owns the task via `AbortOnDropHandle`).
+/// (the store owns the task via `AbortOnDropHandle`). The `subscriber`
+/// connection carries only the `eth_subscribe` traffic; fetches (the
+/// reconnect gap-fill, header ensures) ride the main `provider`.
 async fn ws_follow<P>(
     provider: ChainProvider<P>,
+    subscriber: RootProvider<Ethereum>,
     filter: Filter,
     head: watch::Receiver<Option<HeadEvent>>,
     store: WeakLogStore,
@@ -292,7 +296,16 @@ async fn ws_follow<P>(
         }
         first = false;
 
-        match ws_log_session(&provider, &filter, head.clone(), &store, &mut last_tip).await {
+        match ws_log_session(
+            &provider,
+            &subscriber,
+            &filter,
+            head.clone(),
+            &store,
+            &mut last_tip,
+        )
+        .await
+        {
             Ok(()) => return, // store or chain dropped
             Err(e) => {
                 tracing::warn!(
@@ -309,9 +322,11 @@ async fn ws_follow<P>(
 
 /// One ws session: narrow log pushes interleaved with head-driven empty
 /// coverage. `Ok(())` = orderly shutdown (store/chain gone); `Err` =
-/// transport failure, the caller gap-fills and reconnects.
+/// transport failure, the caller gap-fills and reconnects. Subscribes on
+/// the dedicated `subscriber`; header ensures ride the main `provider`.
 async fn ws_log_session<P>(
     provider: &ChainProvider<P>,
+    subscriber: &RootProvider<Ethereum>,
     filter: &Filter,
     mut head: watch::Receiver<Option<HeadEvent>>,
     store: &WeakLogStore,
@@ -320,7 +335,7 @@ async fn ws_log_session<P>(
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
-    let sub = provider
+    let sub = subscriber
         .subscribe_logs(filter)
         .await
         .map_err(|e| HistoryError::internal(format!("subscribe_logs: {e}")))?;

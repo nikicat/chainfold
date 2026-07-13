@@ -270,12 +270,15 @@ pub enum ErrorClass {
   rendering in logs/errors redacts it — today a key embedded in
   `--rpc-url` leaks into any span that carries the URL.
 
-**Config surface:** `--api-key <provider>:<KEY>` (plus per-provider env
-vars) with chains resolved by id or name; explicit `--rpc-url` + generic
-adaptor stays first-class and is the escape hatch when a provider's URL
-scheme drifts. Per-provider network-name tables are kept small and
-data-driven — they *will* drift; the fallback must never be more than one
-flag away.
+**Config surface:** per-provider API keys ride the environment
+(`ALCHEMY_KEY`, `INFURA_KEY`, read by the config template) or explicit
+`[provider.*]` config sections — deliberately **no `--api-key` flag**
+(user call 2026-07-13): secrets don't belong in argv, where shell history
+and process lists see them. Chains resolve by id or name; explicit
+`--rpc-url` + generic adaptor stays first-class and is the escape hatch
+when a provider's URL scheme drifts. Per-provider network-name tables are
+kept small and data-driven — they *will* drift; the fallback must never
+be more than one flag away.
 
 **Placement:** EVM-side (`src/evm/provider/`) for now. GetBlock and dRPC
 serve Bitcoin too, so the concept may move up a layer — but per
@@ -295,9 +298,9 @@ concrete-first, not before a Bitcoin client needs it.
   splices a *detected* key out of a URL; unknown shapes degrade to the
   transport's scheme+host+port rule.
 - **Keyed providers are the closed `ProviderKind` vocabulary** (the
-  `--api-key` prefix); the generic adaptor is deliberately not a variant —
-  no key, no URL shape. Adaptors are stateless unit structs behind
-  `&'static dyn`, no `Arc` ceremony. Infura's dual-use `-32005` is
+  config's `[provider.*]` section names); the generic adaptor is
+  deliberately not a variant — no key, no URL shape. Adaptors are
+  stateless unit structs behind `&'static dyn`, no `Arc` ceremony. Infura's dual-use `-32005` is
   disambiguated by payload: `data.backoff_seconds` → rate limit,
   `data.from`/`to` (or the bracketed message hint) → result window.
 - **Fixture provenance:** `infura_32005_result_window.json` and
@@ -309,6 +312,25 @@ concrete-first, not before a Bitcoin client needs it.
   drafted-from-docs (recorded when provokable): `alchemy_429.json`,
   `infura_32005_rate_limit.json`, and the documented `-32602` shape in
   `alchemy_range_error.json`.
+- **CLI autoconfig, as shipped:** the bin's `resolve_rpc` funnel orders
+  the sources `--rpc-url` (a recognized provider URL adopts its adaptor
+  and derives the ws sibling — a pasted Alchemy URL behaves like
+  autoconfig) > configured provider keys in `ProviderKind::ALL` order
+  (first provider hosting the chain wins) > chainlist public RPCs.
+  Chainlist loads lazily — a keyed/`--chain-id` run never touches it.
+  Every user-facing URL echo goes through `redact_url`, keyless public
+  URLs included. `chains list --provider <name>` filters by the vendored
+  tables (`ProviderKind::supports`).
+- **Ws is subscriptions-only, and fully optional** (user call
+  2026-07-13): hosted providers load-balance http and recommend it for
+  archival work, and ws-routed queries can bill higher — so
+  `SubscribeTransport::Ws` carries a *dedicated* pubsub connection used
+  exclusively for `eth_subscribe` (`newHeads` + per-filter log pushes),
+  while every fetch (backfills, header fills, the reconnect gap-fill)
+  stays on the main http provider. With `--follow`, the resolved ws
+  sibling is attempted automatically; `--no-ws` opts out entirely, and a
+  connect failure warns and falls back to HTTP polling — `--follow`
+  never *requires* ws.
 - **Network tables are generated and vendored** (user call 2026-07-13):
   no upstream publishes a complete chain-id↔subdomain pairing, so
   `just refresh-provider-networks` regenerates

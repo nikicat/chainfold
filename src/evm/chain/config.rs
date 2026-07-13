@@ -1,5 +1,8 @@
 //! Construction options for [`EvmChain`](super::EvmChain).
 
+use alloy::network::Ethereum;
+use alloy::providers::RootProvider;
+
 use crate::chain::ChunkSize;
 use std::time::Duration;
 
@@ -13,10 +16,17 @@ pub const DEFAULT_BLOCK_TIME: Duration = Duration::from_secs(12);
 /// Choice of head-tracking transport.
 #[derive(Clone, Debug)]
 pub enum SubscribeTransport {
-    /// Native `eth_subscribe` via a pubsub-capable provider (websocket /
-    /// ipc). Sub-second latency. Provider must be built with `connect_ws`
-    /// or similar.
-    Ws,
+    /// Native `eth_subscribe` over a dedicated pubsub connection
+    /// (websocket / ipc) that carries **subscriptions only** — `newHeads`
+    /// and the per-filter log pushes. Every fetch (backfills, header
+    /// fills, archival queries) stays on the chain's main provider:
+    /// hosted providers route http through load balancers and recommend
+    /// it for archival work, and ws-routed queries can bill higher — so
+    /// the subscriber never serves a request the http side could.
+    Ws {
+        /// The pubsub-capable connection `eth_subscribe` rides.
+        subscriber: RootProvider<Ethereum>,
+    },
     /// HTTP poll fallback. `interval` controls the head-poll cadence.
     Poll { interval: Duration },
 }

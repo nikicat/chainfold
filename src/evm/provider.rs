@@ -12,10 +12,10 @@
 //! degrades unknown providers to bisection discovery, never to failure.
 //!
 //! Keyed providers form the closed [`ProviderKind`] vocabulary (the
-//! `--api-key <provider>:<KEY>` prefix); the generic adaptor is deliberately
-//! not a variant — it has no key and no URL shape. API keys travel as the
-//! redacting [`ApiKey`] newtype, which has no `Display` at all: the secret
-//! leaves only through [`ApiKey::expose`].
+//! config's `[provider.*]` section names); the generic adaptor is
+//! deliberately not a variant — it has no key and no URL shape. API keys
+//! travel as the redacting [`ApiKey`] newtype, which has no `Display` at
+//! all: the secret leaves only through [`ApiKey::expose`].
 
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -34,8 +34,7 @@ mod generic;
 mod infura;
 mod key;
 
-pub use alchemy::alchemy_supported;
-pub use key::{ApiKey, ParseProviderKeyError, ProviderKey, UnknownProvider};
+pub use key::{ApiKey, UnknownProvider};
 
 // ============================================================
 // The adaptor contract
@@ -165,9 +164,9 @@ impl fmt::Display for Concurrency {
 // The registry
 // ============================================================
 
-/// The closed vocabulary of keyed providers — the `--api-key` prefix.
-/// The generic adaptor is deliberately not a variant (no key, no URL
-/// shape); reach it via [`generic_adaptor`].
+/// The closed vocabulary of keyed providers — the config's `[provider.*]`
+/// section names. The generic adaptor is deliberately not a variant (no
+/// key, no URL shape); reach it via [`generic_adaptor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Alchemy,
@@ -184,6 +183,17 @@ impl ProviderKind {
         match self {
             Self::Alchemy => &alchemy::AlchemyAdaptor,
             Self::Infura => &infura::InfuraAdaptor,
+        }
+    }
+
+    /// Whether this provider hosts `chain`, per its vendored network
+    /// table — the `chains list --provider` filter. The exhaustive match
+    /// keeps the vocabulary closed: a new provider can't ship without
+    /// answering.
+    pub fn supports(self, chain: ChainId) -> bool {
+        match self {
+            Self::Alchemy => alchemy::supported(chain),
+            Self::Infura => infura::supported(chain),
         }
     }
 }
@@ -422,6 +432,17 @@ mod tests {
             ProviderKind::Alchemy
         );
         assert!("quicknode".parse::<ProviderKind>().is_err());
+    }
+
+    #[test]
+    fn provider_kind_supports_consults_the_vendored_tables() {
+        assert!(ProviderKind::Alchemy.supports(ChainId::new(1)));
+        assert!(ProviderKind::Infura.supports(ChainId::new(1)));
+        // 324 (zksync era) is in the Infura table only.
+        assert!(ProviderKind::Infura.supports(ChainId::new(324)));
+        assert!(!ProviderKind::Alchemy.supports(ChainId::new(324)));
+        assert!(!ProviderKind::Alchemy.supports(ChainId::new(99_999)));
+        assert!(!ProviderKind::Infura.supports(ChainId::new(99_999)));
     }
 
     #[test]

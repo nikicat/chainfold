@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use alloy::network::Ethereum;
-use alloy::providers::Provider;
+use alloy::providers::{Provider, RootProvider};
 use tokio::time::sleep;
 
 use super::config::SubscribeTransport;
@@ -44,7 +44,9 @@ where
 {
     async fn session(&self, head: &HeadCell) -> HistoryError {
         match &self.transport {
-            SubscribeTransport::Ws => ws_heads(&self.provider, head).await,
+            SubscribeTransport::Ws { subscriber } => {
+                ws_heads(&self.provider, subscriber, head).await
+            }
             SubscribeTransport::Poll { interval } => {
                 poll_heads(&self.provider, *interval, head).await
             }
@@ -74,15 +76,20 @@ where
     }
 }
 
-/// `eth_subscribe(newHeads)`: persist each header (free — the payload
-/// carries it) and publish. Only returns on error.
-async fn ws_heads<P>(provider: &ChainProvider<P>, head: &HeadCell) -> HistoryError
+/// `eth_subscribe(newHeads)` on the dedicated `subscriber` connection:
+/// persist each header (free — the payload carries it; a cache write, no
+/// RPC) and publish. Only returns on error.
+async fn ws_heads<P>(
+    provider: &ChainProvider<P>,
+    subscriber: &RootProvider<Ethereum>,
+    head: &HeadCell,
+) -> HistoryError
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
     use futures_util::StreamExt;
 
-    let sub = match provider.subscribe_blocks().await {
+    let sub = match subscriber.subscribe_blocks().await {
         Ok(s) => s,
         Err(e) => return HistoryError::internal(format!("subscribe_blocks: {}", error_chain(&e))),
     };

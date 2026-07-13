@@ -16,7 +16,7 @@ use chainfold::chain::ChunkSize;
 use chainfold::observe::ConnectTimingLayer;
 use url::Host;
 
-use crate::cli::{BitcoinArgs, BitcoinCommand, Direction, FollowMode};
+use crate::cli::{BitcoinArgs, BitcoinCommand};
 use crate::config::Config;
 use crate::table::Out;
 use crate::util::{resolved_db_path, setup_span};
@@ -29,8 +29,6 @@ pub async fn run(
     config: &Config,
     db: Option<&Path>,
     args: &BitcoinArgs,
-    direction: Direction,
-    follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Endpoint: --rpc-url > [bitcoin] rpc_url > the local-node default.
@@ -76,9 +74,7 @@ pub async fn run(
     );
 
     match &args.command {
-        BitcoinCommand::Blocks(blocks_args) => {
-            blocks::run(&chain, args, blocks_args, direction, follow, out).await
-        }
+        BitcoinCommand::Blocks(blocks_args) => blocks::run(&chain, args, blocks_args, out).await,
     }
 }
 

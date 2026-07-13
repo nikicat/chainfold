@@ -50,7 +50,7 @@ pub use erc20::{
 pub use log_spec::LogSpec;
 pub use owned_erc20::{IN_KEY, OUT_KEY, OwnedErc20, TransferDirection};
 pub use provider::{
-    ApiKey, Concurrency, ErrorClass, FetchSeeds, LogCount, ParseProviderKeyError, ProviderAdaptor,
-    ProviderKey, ProviderKind, RpcTransport, detect_provider, generic_adaptor, redact_url,
+    ApiKey, Concurrency, ErrorClass, FetchSeeds, LogCount, ProviderAdaptor, ProviderKind,
+    RpcTransport, UnknownProvider, detect_provider, generic_adaptor, redact_url,
 };
 pub use transport::{HttpTransport, RpcTimingLayer, rpc_retry_layer};

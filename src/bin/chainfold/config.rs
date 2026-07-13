@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use alloy::transports::http::reqwest::Url;
-use chainfold::evm::ChainId;
+use chainfold::evm::{ApiKey, ChainId, ProviderKind};
 use toml::de::Error as TomlError;
 
 use crate::chains::{self, ChainSelector};
@@ -10,7 +9,7 @@ use crate::chains::{self, ChainSelector};
 /// fields missing from a partial user config. Env-interpolated on load via
 /// the same `${VAR:-fallback}` rules as a real config file, so unset env
 /// vars yield empty strings (which downstream getters like
-/// `Config::alchemy_url` treat as "not configured").
+/// `Config::provider_key` treat as "not configured").
 ///
 /// Carries every schema default explicitly, so the resolved config (what
 /// `config show` prints) states each field's effective value. The typed
@@ -24,6 +23,9 @@ fn default_config_toml() -> String {
         r#"
 [provider.alchemy]
 api_key = "${{ALCHEMY_KEY:-}}"
+
+[provider.infura]
+api_key = "${{INFURA_KEY:-}}"
 
 [evm]
 chain_id_check = "verify"
@@ -51,8 +53,9 @@ pub enum ConfigError {
     MissingEnvVar { var: String },
     #[error(
         "no RPC URL available for chain {chain_id} (tried: {}). \
-         Pass --rpc-url <url>, set ALCHEMY_KEY in the environment for a supported \
-         chain, or add chainlist.org data for this chain id.",
+         Pass --rpc-url <url>, set ALCHEMY_KEY or INFURA_KEY in the \
+         environment for a supported chain, or add chainlist.org data for \
+         this chain id.",
         .tried.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
     )]
     NoRpcAvailable {
@@ -68,19 +71,19 @@ pub enum ConfigError {
 pub enum RpcSource {
     /// The explicit `--rpc-url` flag.
     CliFlag,
-    /// An Alchemy endpoint built from a configured API key.
-    Alchemy,
+    /// An endpoint built from this provider's configured API key.
+    ConfiguredProvider(ProviderKind),
     /// A public endpoint from chainlist.org.
     ChainlistPublic,
 }
 
 impl std::fmt::Display for RpcSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            RpcSource::CliFlag => "--rpc-url",
-            RpcSource::Alchemy => "Alchemy",
-            RpcSource::ChainlistPublic => "chainlist.org public RPCs",
-        })
+        match self {
+            RpcSource::CliFlag => f.write_str("--rpc-url"),
+            RpcSource::ConfiguredProvider(kind) => write!(f, "configured {kind} key"),
+            RpcSource::ChainlistPublic => f.write_str("chainlist.org public RPCs"),
+        }
     }
 }
 
@@ -142,13 +145,17 @@ pub enum ChainIdCheck {
     Trust,
 }
 
+/// The `[provider.*]` sections — one entry per [`ProviderKind`], all the
+/// same shape. Raw strings at this boundary; [`Config::provider_key`] is
+/// the typed funnel (empty means unset).
 #[derive(Debug, serde::Deserialize)]
 pub struct ProviderConfig {
-    pub alchemy: Option<AlchemyConfig>,
+    pub alchemy: Option<ProviderKeyEntry>,
+    pub infura: Option<ProviderKeyEntry>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct AlchemyConfig {
+pub struct ProviderKeyEntry {
     pub api_key: String,
 }
 
@@ -213,24 +220,17 @@ impl Config {
         paths
     }
 
-    /// The configured Alchemy API key, if any. An empty `api_key` (e.g.
-    /// from the default config when `ALCHEMY_KEY` env var is unset, via
-    /// `${ALCHEMY_KEY:-}`) counts as "no Alchemy configured".
-    pub fn alchemy_api_key(&self) -> Option<&str> {
-        let alchemy = self.provider.as_ref()?.alchemy.as_ref()?;
-        if alchemy.api_key.is_empty() {
-            None
-        } else {
-            Some(&alchemy.api_key)
-        }
-    }
-
-    /// Build the Alchemy RPC URL for `chain_id` if both an Alchemy API key
-    /// is configured and the chain has an Alchemy slug. Returns `None`
-    /// otherwise (caller decides on fallback). URL shape lives in
-    /// [`chains::alchemy_url`].
-    pub fn alchemy_url(&self, chain_id: ChainId) -> Option<Url> {
-        chains::alchemy_url(chain_id, self.alchemy_api_key()?)
+    /// The configured API key for `kind`, if any — the empty→unset funnel:
+    /// an empty `api_key` (the default config's `${ALCHEMY_KEY:-}` /
+    /// `${INFURA_KEY:-}` with the env var unset) counts as "not
+    /// configured", which [`ApiKey::new`] encodes as `None`.
+    pub fn provider_key(&self, kind: ProviderKind) -> Option<ApiKey> {
+        let provider = self.provider.as_ref()?;
+        let entry = match kind {
+            ProviderKind::Alchemy => provider.alchemy.as_ref(),
+            ProviderKind::Infura => provider.infura.as_ref(),
+        }?;
+        ApiKey::new(entry.api_key.as_str())
     }
 
     /// Etherscan API key, if configured. Used by the signature resolver to
@@ -279,10 +279,16 @@ impl Config {
     /// effective values. Unset optionals are omitted (TOML has no null);
     /// API keys are masked.
     fn effective(&self) -> EffectiveConfig {
+        let masked_key = |kind| {
+            self.provider_key(kind).map(|key| EffectiveApiKey {
+                api_key: mask(key.expose()),
+            })
+        };
+        let alchemy = masked_key(ProviderKind::Alchemy);
+        let infura = masked_key(ProviderKind::Infura);
         EffectiveConfig {
-            provider: self.alchemy_api_key().map(|key| EffectiveProvider {
-                alchemy: EffectiveApiKey { api_key: mask(key) },
-            }),
+            provider: (alchemy.is_some() || infura.is_some())
+                .then_some(EffectiveProvider { alchemy, infura }),
             etherscan: self
                 .etherscan_api_key()
                 .filter(|key| !key.is_empty())
@@ -330,7 +336,10 @@ struct EffectiveBitcoin {
 
 #[derive(serde::Serialize)]
 struct EffectiveProvider {
-    alchemy: EffectiveApiKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alchemy: Option<EffectiveApiKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    infura: Option<EffectiveApiKey>,
 }
 
 #[derive(serde::Serialize)]
@@ -505,12 +514,17 @@ mod tests {
         move |k| map.get(k).cloned()
     }
 
-    fn alchemy_config(key: &str) -> Config {
+    /// A `Config` whose `[provider]` table carries the given raw keys.
+    fn provider_config(alchemy: Option<&str>, infura: Option<&str>) -> Config {
+        let entry = |raw: Option<&str>| {
+            raw.map(|api_key| ProviderKeyEntry {
+                api_key: api_key.to_owned(),
+            })
+        };
         Config {
             provider: Some(ProviderConfig {
-                alchemy: Some(AlchemyConfig {
-                    api_key: key.to_string(),
-                }),
+                alchemy: entry(alchemy),
+                infura: entry(infura),
             }),
             etherscan: None,
             evm: None,
@@ -519,52 +533,45 @@ mod tests {
     }
 
     #[test]
-    fn alchemy_url_returns_some_for_supported_chain_with_key() {
-        let c = alchemy_config("test-key-123");
+    fn provider_key_returns_the_configured_key_per_kind() {
+        let c = provider_config(Some("alch-key"), Some("inf-key"));
         assert_eq!(
-            c.alchemy_url(ChainId::new(1)).as_ref().map(Url::as_str),
-            Some("https://eth-mainnet.g.alchemy.com/v2/test-key-123")
+            c.provider_key(ProviderKind::Alchemy)
+                .as_ref()
+                .map(ApiKey::expose),
+            Some("alch-key")
         );
         assert_eq!(
-            c.alchemy_url(ChainId::new(56)).as_ref().map(Url::as_str),
-            Some("https://bnb-mainnet.g.alchemy.com/v2/test-key-123")
+            c.provider_key(ProviderKind::Infura)
+                .as_ref()
+                .map(ApiKey::expose),
+            Some("inf-key")
         );
     }
 
     #[test]
-    fn alchemy_url_returns_none_for_unsupported_chain() {
-        let c = alchemy_config("test-key");
-        assert!(c.alchemy_url(ChainId::new(99_999)).is_none());
+    fn provider_key_empty_means_unset() {
+        // The default-config path: `${ALCHEMY_KEY:-}` with the env var
+        // unset interpolates to an empty string, which must read as "not
+        // configured" and fall through to the next RPC source.
+        let c = provider_config(Some(""), Some(""));
+        assert!(c.provider_key(ProviderKind::Alchemy).is_none());
+        assert!(c.provider_key(ProviderKind::Infura).is_none());
     }
 
     #[test]
-    fn alchemy_url_returns_none_when_no_provider() {
-        let c = Config {
+    fn provider_key_absent_sections_mean_unset() {
+        let none = Config {
             provider: None,
             etherscan: None,
             evm: None,
             bitcoin: None,
         };
-        assert!(c.alchemy_url(ChainId::new(1)).is_none());
-    }
+        assert!(none.provider_key(ProviderKind::Alchemy).is_none());
 
-    #[test]
-    fn alchemy_url_returns_none_when_no_alchemy_in_provider() {
-        let c = Config {
-            provider: Some(ProviderConfig { alchemy: None }),
-            etherscan: None,
-            evm: None,
-            bitcoin: None,
-        };
-        assert!(c.alchemy_url(ChainId::new(1)).is_none());
-    }
-
-    #[test]
-    fn alchemy_url_returns_none_when_api_key_is_empty() {
-        // Important for the `${ALCHEMY_KEY:-}` default config path:
-        // empty key means "no Alchemy effectively", fall through to public RPC.
-        let c = alchemy_config("");
-        assert!(c.alchemy_url(ChainId::new(1)).is_none());
+        let partial = provider_config(None, Some("inf-key"));
+        assert!(partial.provider_key(ProviderKind::Alchemy).is_none());
+        assert!(partial.provider_key(ProviderKind::Infura).is_some());
     }
 
     #[test]
@@ -692,7 +699,14 @@ mod tests {
     #[test]
     fn rpc_source_display_is_human_readable() {
         assert_eq!(RpcSource::CliFlag.to_string(), "--rpc-url");
-        assert_eq!(RpcSource::Alchemy.to_string(), "Alchemy");
+        assert_eq!(
+            RpcSource::ConfiguredProvider(ProviderKind::Alchemy).to_string(),
+            "configured alchemy key"
+        );
+        assert_eq!(
+            RpcSource::ConfiguredProvider(ProviderKind::Infura).to_string(),
+            "configured infura key"
+        );
         assert_eq!(
             RpcSource::ChainlistPublic.to_string(),
             "chainlist.org public RPCs"
@@ -749,10 +763,41 @@ mod tests {
             config.default_chain().map(ToString::to_string).as_deref(),
             Some(chains::DEFAULT_CHAIN)
         );
-        assert_eq!(
-            config.alchemy_api_key(),
-            None,
+        assert!(
+            config.provider_key(ProviderKind::Alchemy).is_none(),
             "unset ALCHEMY_KEY yields no alchemy provider"
+        );
+        assert!(
+            config.provider_key(ProviderKind::Infura).is_none(),
+            "unset INFURA_KEY yields no infura provider"
+        );
+    }
+
+    /// The default template reads both provider env vars.
+    #[test]
+    fn default_config_reads_both_provider_env_vars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("write empty user config");
+
+        let (config, _) = Config::load_resolved_with(
+            Some(&path),
+            &env_map(&[("ALCHEMY_KEY", "alch-env"), ("INFURA_KEY", "inf-env")]),
+        )
+        .expect("load");
+        assert_eq!(
+            config
+                .provider_key(ProviderKind::Alchemy)
+                .as_ref()
+                .map(ApiKey::expose),
+            Some("alch-env")
+        );
+        assert_eq!(
+            config
+                .provider_key(ProviderKind::Infura)
+                .as_ref()
+                .map(ApiKey::expose),
+            Some("inf-env")
         );
     }
 
@@ -762,17 +807,26 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "").expect("write empty user config");
 
-        let (config, _) =
-            Config::load_resolved_with(Some(&path), &env_map(&[("ALCHEMY_KEY", "secret-key-123")]))
-                .expect("load");
+        let (config, _) = Config::load_resolved_with(
+            Some(&path),
+            &env_map(&[
+                ("ALCHEMY_KEY", "secret-key-123"),
+                ("INFURA_KEY", "infura-secret-456"),
+            ]),
+        )
+        .expect("load");
         let dump = toml::to_string_pretty(&config.effective()).expect("serialize");
         assert!(
             dump.contains("api_key = \"sec...123\""),
-            "api key must print masked: {dump}"
+            "alchemy key must print masked: {dump}"
         );
         assert!(
-            !dump.contains("secret-key-123"),
-            "raw key must not leak: {dump}"
+            dump.contains("api_key = \"inf...456\""),
+            "infura key must print masked: {dump}"
+        );
+        assert!(
+            !dump.contains("secret-key-123") && !dump.contains("infura-secret-456"),
+            "raw keys must not leak: {dump}"
         );
         assert!(!dump.contains("[etherscan]"), "unset section omitted");
         assert!(dump.contains("chain_id_check = \"verify\""), "{dump}");

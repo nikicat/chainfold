@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::{Provider, ProviderBuilder, WsConnect};
+use alloy::providers::{Provider, ProviderBuilder, RootProvider, WsConnect};
+use alloy::rpc::client::ClientBuilder;
 use futures_util::StreamExt;
 use tokio::time::{sleep, timeout};
 
@@ -73,21 +74,28 @@ async fn live_event_latency_ws() {
         return;
     };
 
+    // The production split: fetches ride HTTP; the ws connection carries
+    // only the subscriptions.
     let ws_url = anvil.ws_endpoint_url();
-    let provider = ProviderBuilder::new()
-        .connect_ws(WsConnect::new(ws_url.as_str()))
-        .await
-        .expect("ws connect");
+    let subscriber = RootProvider::new(
+        ClientBuilder::default()
+            .ws(WsConnect::new(ws_url.as_str()))
+            .await
+            .expect("ws connect"),
+    );
     let (_tmp, db_path) = temp_db();
     let cache = Arc::new(LogCache::open(&db_path).expect("LogCache::open"));
-    let provider = ChainProvider::discover(provider, cache)
-        .await
-        .expect("discover chain id");
+    let provider = ChainProvider::discover(
+        ProviderBuilder::new().connect_http(anvil.endpoint_url()),
+        cache,
+    )
+    .await
+    .expect("discover chain id");
 
     let chain = EvmChain::new(
         provider.clone(),
         EvmChainConfig {
-            transport: SubscribeTransport::Ws,
+            transport: SubscribeTransport::Ws { subscriber },
             ..Default::default()
         },
     );

@@ -2,15 +2,16 @@ use std::path::PathBuf;
 
 use alloy::primitives::Address;
 use alloy::primitives::hex::FromHexError;
-use chainfold::evm::{ChainId, TokenSymbol};
+use alloy::transports::http::reqwest::Url;
+use chainfold::evm::{ChainId, ProviderKind, TokenSymbol};
 use clap::builder::FalseyValueParser;
 use clap::{ArgAction, Parser, Subcommand};
 
 use crate::chains::ChainHandle;
 
-/// Iteration direction — funneled from the `evm` `--reverse` flag, so the two
-/// run-fn plumbing args (`Direction`, [`FollowMode`]) can't be silently swapped
-/// the way two adjacent `bool`s could.
+/// Iteration direction — the `--reverse` flag funneled once at the clap
+/// boundary ([`EvmArgs::direction`] / [`BitcoinArgs::direction`]), so
+/// downstream code matches a closed enum instead of a bare `bool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// Oldest → newest (default).
@@ -30,8 +31,9 @@ impl Direction {
     }
 }
 
-/// Whether to block at the tip for live events — funneled from the `evm`
-/// `--follow` flag.
+/// Whether to block at the tip for live events — the `--follow` flag
+/// funneled once at the clap boundary ([`EvmArgs::follow_mode`] /
+/// [`BitcoinArgs::follow_mode`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowMode {
     /// Walk the requested range once and stop (default).
@@ -192,9 +194,10 @@ pub struct ChainsListArgs {
     #[arg(long)]
     pub testnets: bool,
 
-    /// Show only chains Alchemy hosts (those with an Alchemy URL slug).
+    /// Show only chains this provider hosts, per the vendored network
+    /// tables. Example: --provider alchemy, --provider infura.
     #[arg(long)]
-    pub alchemy_supported: bool,
+    pub provider: Option<ProviderKind>,
 }
 
 #[derive(Subcommand)]
@@ -267,9 +270,13 @@ pub struct EvmArgs {
     #[arg(long, conflicts_with = "chain", value_parser = parse_chain_id)]
     pub chain_id: Option<ChainId>,
 
-    /// RPC endpoint URL (overrides config)
+    /// RPC endpoint URL (outranks configured provider keys). A recognized
+    /// provider URL behaves like autoconfig: its adaptor is adopted and
+    /// the ws sibling derived for --follow. Without it, endpoints resolve
+    /// from configured keys (`ALCHEMY_KEY` / `INFURA_KEY` env vars via the
+    /// config template, or `[provider.*]` sections), then chainlist.
     #[arg(long)]
-    pub rpc_url: Option<String>,
+    pub rpc_url: Option<Url>,
 
     /// Block chunk size for `eth_getLogs`
     #[arg(long, default_value = "1000")]
@@ -288,8 +295,26 @@ pub struct EvmArgs {
     #[arg(long, global = true)]
     pub follow: bool,
 
+    /// Keep --follow on HTTP polling: never open the WebSocket
+    /// subscription connection (ws carries only `eth_subscribe` traffic;
+    /// all fetching is HTTP regardless).
+    #[arg(long, global = true)]
+    pub no_ws: bool,
+
     #[command(subcommand)]
     pub command: EvmCommand,
+}
+
+impl EvmArgs {
+    /// The `--reverse` flag as its typed funnel.
+    pub fn direction(&self) -> Direction {
+        Direction::from_reverse(self.reverse)
+    }
+
+    /// The `--follow` flag as its typed funnel.
+    pub fn follow_mode(&self) -> FollowMode {
+        FollowMode::from_follow(self.follow)
+    }
 }
 
 #[derive(Subcommand)]
@@ -449,6 +474,18 @@ pub struct BitcoinArgs {
 
     #[command(subcommand)]
     pub command: BitcoinCommand,
+}
+
+impl BitcoinArgs {
+    /// The `--reverse` flag as its typed funnel.
+    pub fn direction(&self) -> Direction {
+        Direction::from_reverse(self.reverse)
+    }
+
+    /// The `--follow` flag as its typed funnel.
+    pub fn follow_mode(&self) -> FollowMode {
+        FollowMode::from_follow(self.follow)
+    }
 }
 
 #[derive(Subcommand)]

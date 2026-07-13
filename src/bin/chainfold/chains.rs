@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use alloy::transports::http::reqwest::Url;
-use chainfold::evm::ChainId;
+use chainfold::evm::{ChainId, ProviderKind};
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -21,33 +21,6 @@ use crate::util::setup_span;
 
 const CHAINLIST_URL: &str = "https://chainlist.org/rpcs.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Map a chain ID to Alchemy's subdomain slug, e.g. `1 → "eth-mainnet"`.
-/// `None` means Alchemy doesn't host that chain. Matches on the raw id at the
-/// literal table — the one place `ChainId` unwraps to `u64`.
-pub fn alchemy_chain_slug(chain_id: ChainId) -> Option<&'static str> {
-    match chain_id.get() {
-        1 => Some("eth-mainnet"),
-        10 => Some("opt-mainnet"),
-        56 => Some("bnb-mainnet"),
-        137 => Some("polygon-mainnet"),
-        8453 => Some("base-mainnet"),
-        11_155_111 => Some("eth-sepolia"),
-        42161 => Some("arb-mainnet"),
-        43114 => Some("avax-mainnet"),
-        _ => None,
-    }
-}
-
-/// Build the Alchemy RPC URL for `chain_id`. `None` if Alchemy doesn't
-/// support the chain, or the formatted URL doesn't parse (e.g. an `api_key`
-/// with stray characters) — either way there's no usable Alchemy endpoint.
-pub fn alchemy_url(chain_id: ChainId, api_key: &str) -> Option<Url> {
-    let slug = alchemy_chain_slug(chain_id)?;
-    format!("https://{slug}.g.alchemy.com/v2/{api_key}")
-        .parse()
-        .ok()
-}
 
 fn default_cache_path() -> PathBuf {
     dirs::cache_dir()
@@ -176,13 +149,14 @@ pub enum ChainResolveError {
 
 /// Filters for [`ChainResolver::list`] (the `chains list` subcommand). The
 /// default lists every mainnet: testnets are excluded until asked for, and
-/// `alchemy_only` is off.
+/// no provider filter applies.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListFilter {
     /// Also keep chains flagged `isTestnet: true` (excluded by default).
     pub include_testnets: bool,
-    /// Keep only chains Alchemy hosts (an [`alchemy_chain_slug`] exists).
-    pub alchemy_only: bool,
+    /// Keep only chains this provider hosts, per the lib's vendored
+    /// network tables ([`ProviderKind::supports`]).
+    pub provider: Option<ProviderKind>,
 }
 
 /// A user-typeable handle for a chain — a chainlist `shortName` *or*
@@ -315,7 +289,7 @@ impl ChainResolver {
             .entries
             .iter()
             .filter(|e| filter.include_testnets || !e.is_testnet())
-            .filter(|e| !filter.alchemy_only || alchemy_chain_slug(e.chain_id).is_some())
+            .filter(|e| filter.provider.is_none_or(|p| p.supports(e.chain_id)))
             .collect();
         out.sort_by_key(|e| e.chain_id);
         out
@@ -414,35 +388,6 @@ impl ChainResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- alchemy slug / url --
-
-    #[test]
-    fn alchemy_chain_slug_returns_some_for_known_chains() {
-        assert_eq!(alchemy_chain_slug(ChainId::new(1)), Some("eth-mainnet"));
-        assert_eq!(alchemy_chain_slug(ChainId::new(56)), Some("bnb-mainnet"));
-        assert_eq!(alchemy_chain_slug(ChainId::new(42161)), Some("arb-mainnet"));
-    }
-
-    #[test]
-    fn alchemy_chain_slug_returns_none_for_unknown_chains() {
-        assert!(alchemy_chain_slug(ChainId::new(99_999)).is_none());
-    }
-
-    #[test]
-    fn alchemy_url_known_chain() {
-        assert_eq!(
-            alchemy_url(ChainId::new(1), "abc")
-                .as_ref()
-                .map(Url::as_str),
-            Some("https://eth-mainnet.g.alchemy.com/v2/abc"),
-        );
-    }
-
-    #[test]
-    fn alchemy_url_unknown_chain_is_none() {
-        assert!(alchemy_url(ChainId::new(99_999), "abc").is_none());
-    }
 
     const ETH_ENTRY: &str = r#"{
         "name": "Ethereum Mainnet",
@@ -915,11 +860,24 @@ mod tests {
         "nativeCurrency": { "name": "S", "symbol": "S", "decimals": 18 }
     }"#;
 
-    // 1 (eth, alchemy-hosted, mainnet), 11155111 (sepolia testnet, alchemy-hosted),
-    // 99999 (test, not alchemy-hosted, no testnet flag).
+    /// Chain 324 (zksync era) — in the Infura network table but not the
+    /// Alchemy one, so the provider filters differentiate.
+    const ZKSYNC_ENTRY: &str = r#"{
+        "name": "zkSync Era Mainnet",
+        "chain": "ETH",
+        "chainId": 324,
+        "shortName": "zksync",
+        "nativeCurrency": { "name": "Ether", "symbol": "ETH", "decimals": 18 }
+    }"#;
+
+    // 1 (eth, hosted by both providers, mainnet), 11155111 (sepolia
+    // testnet, hosted by both), 324 (zksync, Infura-only), 99999 (test,
+    // hosted by neither, no testnet flag).
     fn list_fixture() -> Vec<ChainlistEntry> {
-        serde_json::from_str(&format!("[{ETH_ENTRY},{TESTNET_ENTRY},{RPC_HEAVY_ENTRY}]"))
-            .expect("fixture parse")
+        serde_json::from_str(&format!(
+            "[{ETH_ENTRY},{TESTNET_ENTRY},{ZKSYNC_ENTRY},{RPC_HEAVY_ENTRY}]"
+        ))
+        .expect("fixture parse")
     }
 
     fn ids(entries: &[&ChainlistEntry]) -> Vec<ChainId> {
@@ -932,7 +890,7 @@ mod tests {
         // sepolia (11155111) is a testnet and stays hidden by default.
         assert_eq!(
             ids(&r.list(ListFilter::default())),
-            [1, 99999].map(ChainId::new)
+            [1, 324, 99999].map(ChainId::new)
         );
     }
 
@@ -941,30 +899,41 @@ mod tests {
         let r = ChainResolver::from_entries(list_fixture());
         let filter = ListFilter {
             include_testnets: true,
-            alchemy_only: false,
+            provider: None,
         };
         assert_eq!(
             ids(&r.list(filter)),
-            [1, 99999, 11_155_111].map(ChainId::new)
+            [1, 324, 99999, 11_155_111].map(ChainId::new)
         );
     }
 
     #[test]
-    fn list_alchemy_only_keeps_alchemy_hosted_chains() {
+    fn list_provider_filter_keeps_hosted_chains() {
         let r = ChainResolver::from_entries(list_fixture());
-        let filter = ListFilter {
+        // Alchemy hosts 1 and 11155111 (a testnet, dropped by default) —
+        // not 324 or 99999.
+        let alchemy = ListFilter {
             include_testnets: false,
-            alchemy_only: true,
+            provider: Some(ProviderKind::Alchemy),
         };
-        // eth (1) and sepolia (11155111) have Alchemy slugs; 99999 does not.
-        // sepolia is additionally dropped as a testnet.
-        assert_eq!(ids(&r.list(filter)), [ChainId::new(1)]);
+        assert_eq!(ids(&r.list(alchemy)), [ChainId::new(1)]);
 
-        let filter = ListFilter {
-            include_testnets: true,
-            alchemy_only: true,
+        // Infura additionally hosts 324.
+        let infura = ListFilter {
+            include_testnets: false,
+            provider: Some(ProviderKind::Infura),
         };
-        assert_eq!(ids(&r.list(filter)), [1, 11_155_111].map(ChainId::new));
+        assert_eq!(ids(&r.list(infura)), [1, 324].map(ChainId::new));
+
+        // The testnet toggle composes with the provider filter.
+        let with_testnets = ListFilter {
+            include_testnets: true,
+            provider: Some(ProviderKind::Alchemy),
+        };
+        assert_eq!(
+            ids(&r.list(with_testnets)),
+            [1, 11_155_111].map(ChainId::new)
+        );
     }
 
     #[test]

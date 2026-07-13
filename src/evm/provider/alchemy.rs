@@ -39,9 +39,10 @@ fn chain_slug(chain: ChainId) -> Option<&'static str> {
         .map(|(_, slug)| *slug)
 }
 
-/// Whether Alchemy hosts `chain` — the `chains list --alchemy-supported`
-/// filter, kept beside the slug table it mirrors.
-pub fn alchemy_supported(chain: ChainId) -> bool {
+/// Whether Alchemy hosts `chain` — behind
+/// [`ProviderKind::supports`](super::ProviderKind::supports), kept beside
+/// the slug table it mirrors.
+pub(super) fn supported(chain: ChainId) -> bool {
     chain_slug(chain).is_some()
 }
 

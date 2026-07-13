@@ -40,6 +40,13 @@ fn network_subdomain(chain: ChainId) -> Option<&'static str> {
         .map(|(_, net)| *net)
 }
 
+/// Whether Infura hosts `chain` — behind
+/// [`ProviderKind::supports`](super::ProviderKind::supports), kept beside
+/// the subdomain table it mirrors.
+pub(super) fn supported(chain: ChainId) -> bool {
+    network_subdomain(chain).is_some()
+}
+
 /// The disambiguating payload of a `-32005` error. Both faces carry
 /// `data`; the fields tell them apart. Fixtures:
 /// `infura_32005_result_window.json`, `infura_32005_rate_limit.json`.

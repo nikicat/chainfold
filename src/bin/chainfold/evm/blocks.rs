@@ -11,7 +11,7 @@ use futures_util::{StreamExt, TryStreamExt};
 
 use url::Url;
 
-use crate::cli::{BlocksArgs, BlocksCommand, BlocksListArgs, Direction, EvmArgs, FollowMode};
+use crate::cli::{BlocksArgs, BlocksCommand, BlocksListArgs, Direction, EvmArgs};
 use crate::fmt::{
     HexDetail, addr_cell, block_hash_cell, explorer_base_url, format_base_fee, format_gas,
 };
@@ -49,14 +49,10 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
     evm_args: &EvmArgs,
     args: &BlocksArgs,
-    direction: Direction,
-    follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match &args.command {
-        BlocksCommand::List(list_args) => {
-            list(chain, evm_args, list_args, direction, follow, out).await
-        }
+        BlocksCommand::List(list_args) => list(chain, evm_args, list_args, out).await,
     }
 }
 
@@ -64,10 +60,10 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
     evm_args: &EvmArgs,
     args: &BlocksListArgs,
-    direction: Direction,
-    follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let direction = evm_args.direction();
+    let follow = evm_args.follow_mode();
     let columns = ColumnSet::from_full(args.full);
     let base_url = explorer_base_url(chain.chain_id().get());
 

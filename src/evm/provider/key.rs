@@ -1,5 +1,5 @@
-//! The redacting [`ApiKey`] newtype and the `--api-key <provider>:<KEY>`
-//! funnel ([`ProviderKey`]).
+//! The redacting [`ApiKey`] newtype (and the [`ProviderKind`] name-parse
+//! error, kept beside the vocabulary helper it renders).
 
 use std::fmt;
 
@@ -43,45 +43,12 @@ impl fmt::Debug for ApiKey {
     }
 }
 
-/// One `--api-key` value, funneled at the clap boundary:
-/// `<provider>:<key>` → `{ provider, key }`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderKey {
-    pub provider: ProviderKind,
-    pub key: ApiKey,
-}
-
-impl ProviderKey {
-    /// The clap `value_parser`. Errors never echo the key — only the
-    /// provider token before the colon.
-    pub fn parse(raw: &str) -> Result<Self, ParseProviderKeyError> {
-        let (provider, key) = raw
-            .split_once(':')
-            .ok_or(ParseProviderKeyError::MissingSeparator)?;
-        let provider: ProviderKind = provider.parse()?;
-        let key = ApiKey::new(key).ok_or(ParseProviderKeyError::EmptyKey(provider))?;
-        Ok(Self { provider, key })
-    }
-}
-
-/// A provider name outside the [`ProviderKind`] vocabulary.
+/// A provider name outside the [`ProviderKind`] vocabulary — the
+/// `FromStr` error behind `chains list --provider` and any other place a
+/// provider is named by string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown provider '{name}' (known: {known})", name = .0, known = known_providers())]
 pub struct UnknownProvider(pub(super) String);
-
-/// A malformed `--api-key` value.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ParseProviderKeyError {
-    #[error(
-        "expected <provider>:<KEY>, e.g. alchemy:YOURKEY (known: {})",
-        known_providers()
-    )]
-    MissingSeparator,
-    #[error(transparent)]
-    UnknownProvider(#[from] UnknownProvider),
-    #[error("empty key for provider '{0}'")]
-    EmptyKey(ProviderKind),
-}
 
 /// The vocabulary, derived from [`ProviderKind::ALL`] so error messages
 /// can't drift from the enum.
@@ -98,11 +65,6 @@ mod tests {
     fn debug_never_prints_secret() {
         let key = ApiKey::new("sekrit123").unwrap();
         assert_eq!(format!("{key:?}"), "ApiKey(…)");
-        let pk = ProviderKey {
-            provider: ProviderKind::Alchemy,
-            key,
-        };
-        assert!(!format!("{pk:?}").contains("sekrit123"));
         // No Display impl exists to test — that absence is the guarantee.
     }
 
@@ -113,33 +75,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_key_parses_the_funnel_shape() {
-        let pk = ProviderKey::parse("alchemy:abc123").unwrap();
-        assert_eq!(pk.provider, ProviderKind::Alchemy);
-        assert_eq!(pk.key.expose(), "abc123");
-        // Keys may themselves contain colons — only the first splits.
-        let pk = ProviderKey::parse("infura:a:b").unwrap();
-        assert_eq!(pk.key.expose(), "a:b");
-    }
-
-    #[test]
-    fn provider_key_parse_errors_do_not_echo_key() {
-        let e = ProviderKey::parse("no-separator-sekrit").unwrap_err();
-        assert!(matches!(e, ParseProviderKeyError::MissingSeparator));
-
-        let e = ProviderKey::parse("quicknode:sekrit").unwrap_err();
+    fn unknown_provider_error_carries_the_vocabulary() {
+        let e = "quicknode".parse::<ProviderKind>().unwrap_err();
         let rendered = e.to_string();
         assert!(rendered.contains("quicknode"), "{rendered}");
-        assert!(!rendered.contains("sekrit"), "{rendered}");
         assert!(
             rendered.contains("alchemy, infura"),
             "the vocabulary rides the error: {rendered}"
         );
-
-        let e = ProviderKey::parse("alchemy:").unwrap_err();
-        assert!(matches!(
-            e,
-            ParseProviderKeyError::EmptyKey(ProviderKind::Alchemy)
-        ));
     }
 }

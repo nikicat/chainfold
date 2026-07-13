@@ -14,7 +14,7 @@ use chainfold::merge::MergedItem;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 
-use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode, TokenRef};
+use crate::cli::{Erc20Args, Erc20Command, EvmArgs, TokenRef};
 use crate::fmt::{self, FmtContext};
 use crate::table::{Cell, Out, TableBuf};
 use crate::theme::TermTheme;
@@ -25,10 +25,9 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     cache: &CacheDb,
     evm_args: &EvmArgs,
     erc20_args: &Erc20Args,
-    _direction: Direction,
-    follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let follow = evm_args.follow_mode();
     let owner = parse_hex_address(&erc20_args.owner)?;
     let chain_id = chain.chain_id();
 

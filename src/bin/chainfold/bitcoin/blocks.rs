@@ -8,8 +8,7 @@ use chainfold::chain::{BlockNumber, BlockRange, Finality};
 use futures_util::{StreamExt, TryStreamExt};
 
 use crate::cli::{
-    BitcoinArgs, BtcBlocksArgs, BtcBlocksCommand, BtcBlocksListArgs, Direction, FollowMode,
-    WindowArgs,
+    BitcoinArgs, BtcBlocksArgs, BtcBlocksCommand, BtcBlocksListArgs, Direction, WindowArgs,
 };
 use crate::fmt::{HexDetail, explorer_url};
 use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
@@ -45,14 +44,10 @@ pub async fn run(
     chain: &BitcoinChain,
     btc_args: &BitcoinArgs,
     args: &BtcBlocksArgs,
-    direction: Direction,
-    follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match &args.command {
-        BtcBlocksCommand::List(list_args) => {
-            list(chain, btc_args, list_args, direction, follow, out).await
-        }
+        BtcBlocksCommand::List(list_args) => list(chain, btc_args, list_args, out).await,
     }
 }
 
@@ -60,10 +55,10 @@ async fn list(
     chain: &BitcoinChain,
     btc_args: &BitcoinArgs,
     args: &BtcBlocksListArgs,
-    direction: Direction,
-    follow: FollowMode,
     out: Out,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let direction = btc_args.direction();
+    let follow = btc_args.follow_mode();
     let columns = ColumnSet::from_full(args.full);
 
     if follow.is_follow() {
