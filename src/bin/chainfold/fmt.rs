@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use alloy::primitives::{Address, U256};
 use chainfold::arch::{Positioned, Timestamp};
-use chainfold::chain::BlockNumber;
+use chainfold::chain::{BlockNumber, BlockRange};
 use chainfold::evm::{
     BlockHash, Erc20Metadata, EvmEvent, EvmPosition, Gas, GasPrice, TxHash, decode_transfer,
 };
 use url::Url;
 
-use crate::table::{Cell, CellStyle, Column, TableSpec};
+use crate::table::{Cell, CellStyle, Column, RenderMode, TableSpec, TermText, grouped_digits};
 
 /// How much of a hex (or otherwise long) value to render — the user's
 /// `--full` flag, funneled once. Orthogonal to [`RenderMode`]
@@ -94,9 +94,30 @@ pub fn tx_cell(hash: &TxHash, base_url: &Url, detail: HexDetail) -> Cell {
 
 /// Block-number cell: bare digits whose alternate thousands groups render
 /// dim in `Pretty` ([`CellStyle::GroupedDigits`]); piped output stays the
-/// untouched digits. Titles and prose keep the `{:#}` U+202F-grouped form.
+/// untouched digits. Prose goes through `Out::line` with the [`TermText`]
+/// impls below for the same look.
 pub fn block_cell(number: BlockNumber) -> Cell {
     Cell::new(number.to_string()).style(CellStyle::GroupedDigits)
+}
+
+/// Block numbers in mode-aware text (table titles) dress exactly like
+/// [`CellStyle::GroupedDigits`] cells: bare digits in `Plain`, dim
+/// alternate thousands groups in `Pretty`.
+impl TermText for BlockNumber {
+    fn term_text(&self, mode: RenderMode) -> String {
+        grouped_digits(&self.to_string(), mode)
+    }
+}
+
+/// `from..=to` with both endpoints dressed as [`BlockNumber`]s.
+impl TermText for BlockRange {
+    fn term_text(&self, mode: RenderMode) -> String {
+        format!(
+            "{}..={}",
+            self.from.term_text(mode),
+            self.to.term_text(mode)
+        )
+    }
 }
 
 /// Block hash cell linking to the explorer's block page.

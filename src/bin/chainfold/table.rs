@@ -94,6 +94,16 @@ impl Out {
         }
     }
 
+    /// Print a prose line on this stream, resolving mode-dependent content
+    /// ([`TermText`] — e.g. block numbers in "Opening balance…" notes) for
+    /// the stream's mode. The prose sibling of [`Out::table`]/[`Out::rows`].
+    // By value for call-site ergonomics: `line(|mode| …)` / `line(format!(…))`
+    // rather than `line(&|mode| …)`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn line(self, text: impl TermText) {
+        self.write_line(&text.term_text(self.mode));
+    }
+
     /// Print free-form meta text (lines interleaved with rows, e.g. decoded
     /// event params) — dimmed in `Pretty`, bare in `Plain`.
     pub fn dim_line(self, text: &str) {
@@ -228,6 +238,34 @@ impl TableSpec {
     }
 }
 
+/// Mode-aware text — the seam for content that renders differently on a
+/// TTY and in a pipe, resolved when the [`RenderMode`] is known (render
+/// time), not when the text is built. Plain strings pass through unchanged;
+/// domain types implement it in `fmt` (block numbers dress their thousands
+/// groups); closures defer whole-line composition, so a title embedding a
+/// number stays typed until it is drawn.
+pub trait TermText {
+    fn term_text(&self, mode: RenderMode) -> String;
+}
+
+impl TermText for String {
+    fn term_text(&self, _mode: RenderMode) -> String {
+        self.clone()
+    }
+}
+
+impl TermText for &str {
+    fn term_text(&self, _mode: RenderMode) -> String {
+        (*self).to_string()
+    }
+}
+
+impl<F: Fn(RenderMode) -> String> TermText for F {
+    fn term_text(&self, mode: RenderMode) -> String {
+        self(mode)
+    }
+}
+
 /// Semantic cell styling; mapped to SGR only in [`RenderMode::Pretty`].
 /// (Free-form dim text goes through [`Out::dim_line`], not a cell style.)
 #[derive(Clone, Copy, Default)]
@@ -272,7 +310,7 @@ impl Cell {
 /// One-shot buffered table, rendered through `tabled`.
 pub struct TableBuf {
     spec: TableSpec,
-    title: Option<String>,
+    title: Option<Box<dyn TermText>>,
     rows: Vec<Vec<Cell>>,
 }
 
@@ -287,8 +325,10 @@ impl TableBuf {
 
     /// Table title: drawn inline in the table's top rule
     /// (`── title ────`) — italic and colored in `Pretty`, bare in `Plain`.
-    pub fn title(&mut self, title: impl Into<String>) {
-        self.title = Some(title.into());
+    /// Takes [`TermText`], so mode-dependent content (block numbers) stays
+    /// unresolved until [`render`](Self::render) supplies the mode.
+    pub fn title(&mut self, title: impl TermText + 'static) {
+        self.title = Some(Box::new(title));
     }
 
     pub fn push(&mut self, row: Vec<Cell>) {
@@ -329,7 +369,8 @@ impl TableBuf {
         let rendered = table.to_string();
         let lines: Vec<&str> = rendered.lines().map(str::trim_end).collect();
         let width = lines.iter().copied().map(visible_width).max().unwrap_or(0);
-        let mut out = top_rule(self.title.as_deref(), width, mode);
+        let title = self.title.as_ref().map(|t| t.term_text(mode));
+        let mut out = top_rule(title.as_deref(), width, mode);
         for line in lines {
             out.push('\n');
             out.push_str(line);
@@ -346,15 +387,15 @@ impl TableBuf {
 /// fd.
 pub struct RowWriter {
     spec: TableSpec,
-    title: Option<String>,
+    title: Option<Box<dyn TermText>>,
     out: Out,
 }
 
 impl RowWriter {
     /// Stream title: drawn inline in the top rule, like
     /// [`TableBuf::title`]. Set before [`print_header`](Self::print_header).
-    pub fn title(&mut self, title: impl Into<String>) {
-        self.title = Some(title.into());
+    pub fn title(&mut self, title: impl TermText + 'static) {
+        self.title = Some(Box::new(title));
     }
 
     pub fn print_header(&self) {
@@ -365,8 +406,9 @@ impl RowWriter {
     /// The stream's top border: a rule as wide as the header, carrying the
     /// title when one is set.
     fn rule(&self) -> String {
+        let title = self.title.as_ref().map(|t| t.term_text(self.out.mode));
         top_rule(
-            self.title.as_deref(),
+            title.as_deref(),
             visible_width(&self.header()),
             self.out.mode,
         )
@@ -410,7 +452,9 @@ fn top_rule(title: Option<&str>, width: usize, mode: RenderMode) -> String {
     let Some(title) = title else {
         return dim(&"─".repeat(width), mode);
     };
-    let fill = width.saturating_sub(title.chars().count() + 4).max(2);
+    // visible_width, not chars().count(): a TermText title may carry SGR
+    // spans (dim-grouped numbers) that must not eat into the rule.
+    let fill = width.saturating_sub(visible_width(title) + 4).max(2);
     format!(
         "{}{}{}",
         dim("── ", mode),
@@ -437,6 +481,9 @@ fn dim(text: &str, mode: RenderMode) -> String {
 
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
+/// Normal intensity — ends a [`DIM`] span without clobbering enclosing SGR
+/// state, so dim digit groups survive inside an italic + cyan title.
+const DIM_OFF: &str = "\x1b[22m";
 const ITALIC: &str = "\x1b[3m";
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
@@ -553,10 +600,22 @@ fn styled(text: &str, style: CellStyle, mode: RenderMode, extra: &str) -> String
     }
 }
 
+/// Thousands grouping for one bare-digits integer — the shared dressing
+/// behind [`CellStyle::GroupedDigits`] cells and `fmt`'s [`TermText`]
+/// numbers, so cells and titles read identically. `Plain` passes the
+/// digits through untouched.
+pub(crate) fn grouped_digits(digits: &str, mode: RenderMode) -> String {
+    match mode {
+        RenderMode::Pretty => dim_alt_groups(digits),
+        RenderMode::Plain => digits.to_string(),
+    }
+}
+
 /// Dim every other 3-digit group, counted from the right, so the digits
 /// read as grouped without separator characters: `22123456` renders as
 /// `22` dim(`123`) `456`. The rightmost group is always normal, anchoring
-/// the pattern as numbers grow.
+/// the pattern as numbers grow. Spans end with [`DIM_OFF`] rather than a
+/// full reset so enclosing dressing (a title's italic + cyan) survives.
 fn dim_alt_groups(digits: &str) -> String {
     let chars: Vec<char> = digits.chars().collect();
     let mut out = String::new();
@@ -566,7 +625,9 @@ fn dim_alt_groups(digits: &str) -> String {
         let len = if rem.is_multiple_of(3) { 3 } else { rem % 3 };
         let group: String = chars[start..start + len].iter().collect();
         if ((rem - 1) / 3) % 2 == 1 {
-            out.push_str(&sgr(&group, DIM));
+            out.push_str(DIM);
+            out.push_str(&group);
+            out.push_str(DIM_OFF);
         } else {
             out.push_str(&group);
         }
@@ -736,22 +797,41 @@ mod tests {
         // group stays normal.
         assert_eq!(
             materialize(&cell("22123456"), RenderMode::Pretty),
-            format!("22{DIM}123{RESET}456")
+            format!("22{DIM}123{DIM_OFF}456")
         );
         assert_eq!(materialize(&cell("999"), RenderMode::Pretty), "999");
         assert_eq!(
             materialize(&cell("1000"), RenderMode::Pretty),
-            format!("{DIM}1{RESET}000")
+            format!("{DIM}1{DIM_OFF}000")
         );
         assert_eq!(
             materialize(&cell("18446744073709551615"), RenderMode::Pretty),
-            format!("18{DIM}446{RESET}744{DIM}073{RESET}709{DIM}551{RESET}615")
+            format!("18{DIM}446{DIM_OFF}744{DIM}073{DIM_OFF}709{DIM}551{DIM_OFF}615")
         );
         // The mode-parity invariant: Pretty strips back to Plain exactly.
         assert_eq!(
             strip_ansi(&materialize(&cell("22123456"), RenderMode::Pretty)),
             "22123456"
         );
+    }
+
+    /// A closure title defers mode-dependent content (grouped numbers) to
+    /// render time: Plain gets bare digits, Pretty gets dim groups inside
+    /// the italic + cyan dressing, and mode parity holds throughout.
+    #[test]
+    fn term_text_titles_render_per_mode() {
+        let mut t =
+            TableBuf::new(TableSpec::new(vec![Column::left("a"), Column::right("b")]).no_header());
+        t.push(vec![Cell::new("x"), Cell::new("1")]);
+        t.title(|mode: RenderMode| format!("blocks {}", grouped_digits("22123456", mode)));
+        let plain = t.render(RenderMode::Plain);
+        assert_eq!(plain, "── blocks 22123456 ──\nx  1");
+        let pretty = t.render(RenderMode::Pretty);
+        assert!(
+            pretty.contains(&format!("22{DIM}123{DIM_OFF}456")),
+            "expected dim-grouped digits in title: {pretty:?}"
+        );
+        assert_eq!(strip_ansi(&pretty), plain);
     }
 
     #[test]

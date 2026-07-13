@@ -16,7 +16,7 @@ use crate::fmt::{
     HexDetail, addr_cell, block_cell, block_hash_cell, explorer_base_url, format_base_fee,
     format_gas, format_timestamp,
 };
-use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
+use crate::table::{Cell, Column, Out, RenderMode, TableBuf, TableSpec, TermText};
 use crate::util::{WindowSel, block_cut, estimate_date_range, inclusive_range, window_sel};
 use chainfold::chain::{BlockNumber, BlockRange, Finality};
 
@@ -80,7 +80,7 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         let from = match window_sel(&evm_args.window)? {
             WindowSel::Blocks { from_block, .. } => from_block,
             WindowSel::Dates { from, to } => {
-                estimate_date_range(chain, &evm_args.window, from, to)
+                estimate_date_range(chain, &evm_args.window, from, to, out)
                     .await?
                     .from
             }
@@ -115,7 +115,7 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             num_blocks,
         } => chain.blocks_hist(inclusive_range(from_block, num_blocks)),
         WindowSel::Dates { from, to } => {
-            chain.blocks_hist(estimate_date_range(chain, &evm_args.window, from, to).await?)
+            chain.blocks_hist(estimate_date_range(chain, &evm_args.window, from, to, out).await?)
         }
         WindowSel::Unspecified { num_blocks } => {
             let hist = chain.blocks(Finality::Latest).next().await;
@@ -167,11 +167,15 @@ async fn list<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 }
 
 /// Table title: entity, window, and chain — `blocks 100..=199 · chain 1`;
-/// an open end (`--follow`) renders as `blocks 100.. · chain 1`.
-fn title(chain_id: ChainId, from: BlockNumber, to: Option<BlockNumber>) -> String {
-    match to {
-        Some(to) => format!("blocks {:#} · chain {chain_id}", BlockRange::new(from, to)),
-        None => format!("blocks {from:#}.. · chain {chain_id}"),
+/// an open end (`--follow`) renders as `blocks 100.. · chain 1`. A
+/// [`TermText`] closure, so the numbers dress per render mode.
+fn title(chain_id: ChainId, from: BlockNumber, to: Option<BlockNumber>) -> impl TermText {
+    move |mode: RenderMode| match to {
+        Some(to) => format!(
+            "blocks {} · chain {chain_id}",
+            BlockRange::new(from, to).term_text(mode)
+        ),
+        None => format!("blocks {}.. · chain {chain_id}", from.term_text(mode)),
     }
 }
 

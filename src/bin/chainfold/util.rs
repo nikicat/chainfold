@@ -9,6 +9,7 @@ use chainfold::evm::{EvmChain, EvmPosition, LogIdx};
 use chrono::NaiveDate;
 
 use crate::cli::WindowArgs;
+use crate::table::{Out, RenderMode, TermText};
 use chainfold::chain::{BlockCount, BlockNumber, BlockRange};
 
 /// Setup-phase span (target `chainfold::setup`): the name is the phase's row
@@ -112,22 +113,23 @@ pub async fn estimate_date_range<P: Provider<Ethereum> + Clone + Send + Sync + '
     args: &WindowArgs,
     from: Timestamp,
     to: Timestamp,
+    out: Out,
 ) -> Result<BlockRange, Box<dyn std::error::Error>> {
     let range = BlockRange::new(
         chain.estimate_block(from).await?,
         chain.estimate_block(to).await?,
     );
-    print_date_estimate(args, range);
+    print_date_estimate(args, range, out);
     Ok(range)
 }
 
 /// The CLI note printed with a dates-window estimate.
-pub fn print_date_estimate(args: &WindowArgs, range: BlockRange) {
+pub fn print_date_estimate(args: &WindowArgs, range: BlockRange, out: Out) {
     // The Dates arm implies --from is present; --to defaults to now.
     let from_str = args.from.as_deref().expect("Dates arm has --from");
     let to_str = args.to.as_deref().unwrap_or("now");
-    println!("  Date range: {from_str} → {to_str}");
-    println!("  Estimated blocks: {range:#}");
+    out.line(format!("  Date range: {from_str} → {to_str}"));
+    out.line(|mode: RenderMode| format!("  Estimated blocks: {}", range.term_text(mode)));
 }
 
 /// Resolve the inclusive block window for the log commands (`events`,
@@ -136,9 +138,10 @@ pub fn print_date_estimate(args: &WindowArgs, range: BlockRange) {
 pub async fn resolve_log_range<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     chain: &EvmChain<P>,
     args: &WindowArgs,
+    out: Out,
 ) -> Result<BlockRange, Box<dyn std::error::Error>> {
     match window_sel(args)? {
-        WindowSel::Dates { from, to } => estimate_date_range(chain, args, from, to).await,
+        WindowSel::Dates { from, to } => estimate_date_range(chain, args, from, to, out).await,
         WindowSel::Blocks {
             from_block,
             num_blocks,

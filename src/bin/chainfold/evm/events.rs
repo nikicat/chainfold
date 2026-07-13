@@ -16,7 +16,7 @@ use crate::cli::{Direction, EventsArgs, EvmArgs, FollowMode};
 use crate::config::Config;
 use crate::fmt::{HexDetail, block_cell, explorer_base_url, format_timestamp, tx_cell};
 use crate::signature_cache::SqliteSignatureCache;
-use crate::table::{Cell, Column, Out, RowWriter, TableSpec};
+use crate::table::{Cell, Column, Out, RenderMode, RowWriter, TableSpec, TermText};
 use crate::util::{log_cut, parse_hex_address, resolve_log_range};
 
 struct PrintOpts {
@@ -66,7 +66,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     let topics: [Option<Topic>; 4] = [Some(Topic::from(resolved.topic0)), None, None, None];
     let filter = LogFilter::new(address, topics);
-    let range = resolve_log_range(chain, &evm_args.window).await?;
+    let range = resolve_log_range(chain, &evm_args.window, out).await?;
 
     println!("  Address:  {address:#x}");
     if let Some(sig) = &resolved.signature {
@@ -76,7 +76,9 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     println!();
 
     let mut writer = out.rows(spec());
-    writer.title(format!("events {range:#} · chain {chain_id}"));
+    writer.title(move |mode: RenderMode| {
+        format!("events {} · chain {chain_id}", range.term_text(mode))
+    });
     writer.print_header();
 
     if follow.is_follow() {

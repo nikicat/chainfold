@@ -12,7 +12,7 @@ use crate::cli::{
     WindowArgs,
 };
 use crate::fmt::{HexDetail, block_cell, explorer_url, format_timestamp};
-use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
+use crate::table::{Cell, Column, Out, RenderMode, TableBuf, TableSpec, TermText};
 use crate::util::{WindowSel, block_cut, inclusive_range, print_date_estimate, window_sel};
 
 /// Which columns to render — driven by the `--full` flag.
@@ -74,7 +74,7 @@ async fn list(
         let from = match window_sel(&btc_args.window)? {
             WindowSel::Blocks { from_block, .. } => from_block,
             WindowSel::Dates { from, to } => {
-                estimate_date_range(chain, &btc_args.window, from, to)
+                estimate_date_range(chain, &btc_args.window, from, to, out)
                     .await?
                     .from
             }
@@ -109,7 +109,7 @@ async fn list(
             num_blocks,
         } => chain.blocks_hist(inclusive_range(from_block, num_blocks)),
         WindowSel::Dates { from, to } => {
-            chain.blocks_hist(estimate_date_range(chain, &btc_args.window, from, to).await?)
+            chain.blocks_hist(estimate_date_range(chain, &btc_args.window, from, to, out).await?)
         }
         WindowSel::Unspecified { num_blocks } => {
             let hist = chain.blocks(Finality::Latest).next().await;
@@ -167,21 +167,26 @@ async fn estimate_date_range(
     args: &WindowArgs,
     from: Timestamp,
     to: Timestamp,
+    out: Out,
 ) -> Result<BlockRange, Box<dyn std::error::Error>> {
     let range = BlockRange::new(
         chain.estimate_block(from).await?,
         chain.estimate_block(to).await?,
     );
-    print_date_estimate(args, range);
+    print_date_estimate(args, range, out);
     Ok(range)
 }
 
 /// Table title: entity, window, and chain — `blocks 100..=199 · bitcoin`;
-/// an open end (`--follow`) renders as `blocks 100.. · bitcoin`.
-fn title(from: BlockNumber, to: Option<BlockNumber>) -> String {
-    match to {
-        Some(to) => format!("blocks {:#} · bitcoin", BlockRange::new(from, to)),
-        None => format!("blocks {from:#}.. · bitcoin"),
+/// an open end (`--follow`) renders as `blocks 100.. · bitcoin`. A
+/// [`TermText`] closure, so the numbers dress per render mode.
+fn title(from: BlockNumber, to: Option<BlockNumber>) -> impl TermText {
+    move |mode: RenderMode| match to {
+        Some(to) => format!(
+            "blocks {} · bitcoin",
+            BlockRange::new(from, to).term_text(mode)
+        ),
+        None => format!("blocks {}.. · bitcoin", from.term_text(mode)),
     }
 }
 

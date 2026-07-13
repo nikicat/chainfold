@@ -16,7 +16,7 @@ use futures_util::future::join_all;
 
 use crate::cli::{Direction, Erc20Args, Erc20Command, EvmArgs, FollowMode, TokenRef};
 use crate::fmt::{self, FmtContext};
-use crate::table::{Cell, Out, TableBuf};
+use crate::table::{Cell, Out, RenderMode, TableBuf, TermText};
 use crate::util::{log_cut, log_end, parse_hex_address, resolve_log_range};
 
 pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
@@ -91,7 +91,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
 
     // One window for every token (the merge is per token, the window is
     // not).
-    let range = resolve_log_range(chain, &evm_args.window).await?;
+    let range = resolve_log_range(chain, &evm_args.window, out).await?;
 
     for address in &addresses {
         let meta_symbol = metadata
@@ -121,18 +121,24 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 range.from,
             )
             .await?;
-            println!(
-                "  Opening balance before block {:#}: {} {meta_symbol}",
-                range.from,
-                fmt::format_amount_trim(balance, meta_decimals),
-            );
+            out.line(|mode: RenderMode| {
+                format!(
+                    "  Opening balance before block {}: {} {meta_symbol}",
+                    range.from.term_text(mode),
+                    fmt::format_amount_trim(balance, meta_decimals),
+                )
+            });
         }
 
         if follow.is_follow() {
             let mut writer = out.rows(fmt::transfer_spec(&ctx, show_balance));
-            writer.title(format!(
-                "{meta_symbol} transfers {range:#} · chain {chain_id}"
-            ));
+            let title_symbol = meta_symbol.clone();
+            writer.title(move |mode: RenderMode| {
+                format!(
+                    "{title_symbol} transfers {} · chain {chain_id}",
+                    range.term_text(mode)
+                )
+            });
             writer.print_header();
             // Awaiting the merged stream demand-starts the head clock,
             // which drives both inner stores' tips.
@@ -155,9 +161,13 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let (window, _) = after_start.split(log_end(range.to));
             let mut stream = window.iter();
             let mut table = TableBuf::new(fmt::transfer_spec(&ctx, show_balance));
-            table.title(format!(
-                "{meta_symbol} transfers {range:#} · chain {chain_id}"
-            ));
+            let title_symbol = meta_symbol.clone();
+            table.title(move |mode: RenderMode| {
+                format!(
+                    "{title_symbol} transfers {} · chain {chain_id}",
+                    range.term_text(mode)
+                )
+            });
             let mut count = 0;
             let mut limited = false;
             while let Some(item) = stream.next().await {
@@ -199,14 +209,16 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 )
                 .await
                 {
-                    Ok(onchain) if onchain != balance => println!(
-                        "warning: folded balance {} ≠ on-chain balance {} at block {:#} — \
-                         {meta_symbol} moves balances outside Transfer events \
-                         (mint/burn/rebase/fee-on-transfer?)",
-                        fmt::format_amount_trim(balance, meta_decimals),
-                        fmt::format_amount_trim(onchain, meta_decimals),
-                        range.to,
-                    ),
+                    Ok(onchain) if onchain != balance => out.line(|mode: RenderMode| {
+                        format!(
+                            "warning: folded balance {} ≠ on-chain balance {} at block {} — \
+                             {meta_symbol} moves balances outside Transfer events \
+                             (mint/burn/rebase/fee-on-transfer?)",
+                            fmt::format_amount_trim(balance, meta_decimals),
+                            fmt::format_amount_trim(onchain, meta_decimals),
+                            range.to.term_text(mode),
+                        )
+                    }),
                     Ok(_) => {}
                     Err(e) => tracing::warn!(
                         error = %e, token = %meta_symbol,
