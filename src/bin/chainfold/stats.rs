@@ -12,9 +12,13 @@
 //! row label is the span's static name, except on `chainfold::rpc` where it
 //! is the `method` field (the method is dynamic wire data; span names can't
 //! carry it). RPC spans also carry a `reqs` field — one wire request may
-//! batch many JSON-RPC calls — so where batching makes them differ, the
-//! report shows the logical call count as the headline and annotates the
-//! wire round-trips.
+//! batch many JSON-RPC calls — so when batching made them differ anywhere, a
+//! WIRE column appears, blank on rows where nothing was batched.
+//!
+//! The report is one tree table: a rollup row per span group (its summed
+//! calls and time), each distinct span label indented beneath it, and the
+//! session duration riding in the title. Cache hit/miss counts keep their
+//! own table — different columns, different question.
 //!
 //! Per the contract's summing rule, wall-time reconciliation counts *root*
 //! spans only: a nested span (the connect handshake inside its first RPC)
@@ -38,49 +42,53 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
+use crate::theme::TermTheme;
 
 /// Everything the library emits lives under this prefix; the layer tracks
 /// all of it and abstains from everything else.
 const TARGET_PREFIX: &str = "chainfold::";
 
-/// Presentation of one known span target: its summary-section header and
-/// what a row label *means* there (the row-label column's header).
+/// Presentation of one known span target: its group-row label in the
+/// summary tree.
 struct Section {
     target: &'static str,
     header: &'static str,
-    /// An RPC row is labeled by method, a setup row by phase, …
-    label: &'static str,
+    /// The target's only expected span name, for targets that emit exactly
+    /// one kind. When the group's rows are just this label, the child row
+    /// would only repeat the group row (`connections` / `connect`), so it
+    /// collapses away. Any other name expands the group in full — the
+    /// vocabulary stays open.
+    singleton: Option<&'static str>,
 }
 
-/// Section order for the targets we know today. Spans under any other
-/// `chainfold::*` target still print — appended after these, headed by the
-/// target's suffix with a generic `span` label column — so a new span kind
-/// can't silently vanish.
+/// Group order for the targets we know today. Spans under any other
+/// `chainfold::*` target still print — appended as their own groups, headed
+/// by the target's suffix — so a new span kind can't silently vanish.
 const SECTIONS: &[Section] = &[
     Section {
         target: SETUP_TARGET,
         header: "setup",
-        label: "phase",
+        singleton: None,
     },
     Section {
         target: RPC_TARGET,
         header: "rpc calls",
-        label: "method",
+        singleton: None,
     },
     Section {
         target: ATTEMPT_TARGET,
         header: "rpc attempts",
-        label: "span",
+        singleton: Some("attempt"),
     },
     Section {
         target: CONNECT_TARGET,
         header: "connections",
-        label: "connection",
+        singleton: Some("connect"),
     },
     Section {
         target: SQLITE_TARGET,
         header: "sqlite reads",
-        label: "query",
+        singleton: None,
     },
 ];
 
@@ -290,27 +298,7 @@ impl Stats {
     pub fn print_summary(&self, wall: Duration, out: Out) {
         let inner = self.inner.lock().unwrap();
         out.blank_line();
-        let mut head = TableBuf::new(kv_spec());
-        head.title("chainfold session summary");
-        head.push(kv_row("duration", wall, ""));
-        out.table(&head);
-
-        for section in SECTIONS {
-            let rows = inner.spans.get(section.target);
-            // A zero on "rpc calls" is the headline warm-cache number —
-            // always print it. Other absent sections just don't apply.
-            if rows.is_none() && section.target != RPC_TARGET {
-                continue;
-            }
-            print_section(out, section.header, section.label, rows);
-        }
-        for (target, rows) in &inner.spans {
-            if SECTIONS.iter().any(|known| known.target == *target) {
-                continue;
-            }
-            let header = target.strip_prefix(TARGET_PREFIX).unwrap_or(target);
-            print_section(out, header, "span", Some(rows));
-        }
+        out.table(&summary_table(&inner, wall));
 
         if !inner.cache_by_layer.is_empty() {
             let mut table = TableBuf::new(TableSpec::new(vec![
@@ -355,8 +343,8 @@ impl Stats {
     }
 }
 
-/// Label / time / note rows for the flat summary lines (`duration`,
-/// `untracked`) — self-labeled, so headerless (and thus content-width).
+/// Label / time / note rows for the flat summary lines (`untracked`) —
+/// self-labeled, so headerless (and thus content-width).
 fn kv_spec() -> TableSpec {
     TableSpec::new(vec![
         Column::left("label"),
@@ -370,52 +358,94 @@ fn kv_row(label: &str, time: Duration, note: &str) -> Vec<Cell> {
     vec![Cell::new(label), Cell::new(fmt_dur(time)), Cell::new(note)]
 }
 
-/// One section as its own table: the title carries the section's total
-/// logical-call count (plus the wire total where batching made them
-/// differ), and each row labels its numbers — CALLS is logical calls, WIRE
-/// (present only in batched sections) the wire round-trips they rode in,
+/// The whole span report as one tree table: CALLS is logical calls, WIRE
+/// (present only when some row batched) the wire round-trips they rode in,
 /// TIME the summed wall-time.
-fn print_section(out: Out, header: &str, label_header: &'static str, rows: Option<&Rows>) {
-    let (count, reqs) = rows
-        .into_iter()
-        .flatten()
-        .fold((0u64, 0u64), |(c, r), (_, t)| (c + t.count, r + t.reqs));
-    let title = format!("{header}: {reqs}{}", wire_note(count, reqs));
-    out.blank_line();
-    let Some(rows) = rows else {
-        // The rpc-zero headline (warm cache) — nothing to tabulate.
-        out.heading(&title);
-        return;
-    };
-    let batched = count != reqs;
-    let mut cols = vec![
-        Column::left(label_header).min(22),
-        Column::right("calls").min(5),
-    ];
+fn summary_table(inner: &Inner, wall: Duration) -> TableBuf {
+    let batched = inner
+        .spans
+        .values()
+        .flat_map(BTreeMap::values)
+        .any(|t| t.count != t.reqs);
+    let mut cols = vec![Column::left("span").min(22), Column::right("calls").min(5)];
     if batched {
         cols.push(Column::right("wire"));
     }
     cols.push(Column::right("time").min(9));
     let mut table = TableBuf::new(TableSpec::new(cols));
-    table.title(title);
+    table.title(format!("chainfold session summary: {}", fmt_dur(wall)));
+
+    for section in SECTIONS {
+        let rows = inner.spans.get(section.target);
+        // A zero on "rpc calls" is the headline warm-cache number — always
+        // print it. Other absent groups just don't apply.
+        if rows.is_none() && section.target != RPC_TARGET {
+            continue;
+        }
+        push_group(&mut table, batched, section.header, section.singleton, rows);
+    }
+    for (&target, rows) in &inner.spans {
+        if SECTIONS.iter().any(|known| known.target == target) {
+            continue;
+        }
+        let header = target.strip_prefix(TARGET_PREFIX).unwrap_or(target);
+        push_group(&mut table, batched, header, None, Some(rows));
+    }
+    table
+}
+
+/// One target's rows: a rollup row labeled by the group header
+/// (title-tinted in `Pretty`), then one indented row per distinct label.
+/// A group whose rows are exactly its [`Section::singleton`] name collapses
+/// to the rollup alone; `rows: None` is the warm-cache RPC headline — a
+/// zero rollup with no time.
+fn push_group(
+    table: &mut TableBuf,
+    batched: bool,
+    header: &'static str,
+    singleton: Option<&'static str>,
+    rows: Option<&Rows>,
+) {
+    let (count, reqs, total) = rows
+        .into_iter()
+        .flatten()
+        .fold((0u64, 0u64, Duration::ZERO), |(c, r, d), (_, t)| {
+            (c + t.count, r + t.reqs, d + t.total)
+        });
+    let mut group = vec![
+        Cell::new(move |theme: &dyn TermTheme| theme.title(header)),
+        Cell::new(reqs.to_string()),
+    ];
+    if batched {
+        group.push(Cell::new(wire_cell(count, reqs)));
+    }
+    group.push(Cell::new(rows.map_or_else(String::new, |_| fmt_dur(total))));
+    table.push(group);
+
+    let Some(rows) = rows else { return };
+    if singleton.is_some_and(|name| rows.len() == 1 && rows.contains_key(name)) {
+        return;
+    }
     for (label, tally) in rows {
-        let mut row = vec![Cell::new(label.as_ref()), Cell::new(tally.reqs.to_string())];
+        let mut row = vec![
+            Cell::new(format!("  {label}")),
+            Cell::new(tally.reqs.to_string()),
+        ];
         if batched {
-            row.push(Cell::new(tally.count.to_string()));
+            row.push(Cell::new(wire_cell(tally.count, tally.reqs)));
         }
         row.push(Cell::new(fmt_dur(tally.total)));
         table.push(row);
     }
-    out.table(&table);
 }
 
-/// ` (N wire requests)` when batching packed several JSON-RPC calls into
-/// fewer wire round-trips; empty when the counts match (the unbatched case).
-fn wire_note(count: u64, reqs: u64) -> String {
+/// Wire round-trips where batching made them differ from logical calls;
+/// blank where the counts match, so the column only speaks on batched rows.
+fn wire_cell(count: u64, reqs: u64) -> String {
     if reqs == count {
         String::new()
     } else {
-        format!(" ({count} wire requests)")
+        count.to_string()
     }
 }
 
@@ -438,6 +468,8 @@ fn fmt_dur(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table::{RenderMode, strip_ansi};
+    use crate::theme::{CYAN, ITALIC, RESET};
     use chainfold::observe::{cache_event, connect_span};
     use tracing::Level;
     use tracing::subscriber::with_default;
@@ -457,6 +489,100 @@ mod tests {
                 method = $method, reqs = $reqs
             )
         };
+    }
+
+    /// A tally whose spans were all roots, `us` microseconds of wall-time.
+    fn tally(count: u64, reqs: u64, us: u64) -> Tally {
+        Tally {
+            count,
+            reqs,
+            total: Duration::from_micros(us),
+            root_total: Duration::from_micros(us),
+        }
+    }
+
+    const WALL: Duration = Duration::from_micros(518_300);
+
+    /// The report is one tree: rollup rows per group (calls + time summed),
+    /// children indented, the WIRE column speaking only on batched rows,
+    /// and a singleton group (`rpc attempts` / `attempt`) collapsing to its
+    /// rollup. Pretty adds the title tint to group labels over the
+    /// identical layout.
+    #[test]
+    fn summary_table_renders_tree_with_rollups() {
+        let mut inner = Inner::default();
+        inner.spans.insert(
+            SETUP_TARGET,
+            Rows::from([(Cow::Borrowed("db_open"), tally(1, 1, 634))]),
+        );
+        inner.spans.insert(
+            RPC_TARGET,
+            Rows::from([
+                (Cow::Borrowed("eth_getBlockByNumber"), tally(2, 200, 96_200)),
+                (Cow::Borrowed("eth_getLogs"), tally(2, 2, 73_700)),
+            ]),
+        );
+        inner.spans.insert(
+            ATTEMPT_TARGET,
+            Rows::from([(Cow::Borrowed("attempt"), tally(4, 4, 169_000))]),
+        );
+
+        let table = summary_table(&inner, WALL);
+        let plain = table.render(RenderMode::Plain);
+        assert_eq!(
+            plain,
+            "── chainfold session summary: 518.3ms ────────\n\
+             Span                    Calls  Wire       Time\n\
+             setup                       1            634µs\n\
+             \x20 db_open                   1            634µs\n\
+             rpc calls                 202     4    169.9ms\n\
+             \x20 eth_getBlockByNumber    200     2     96.2ms\n\
+             \x20 eth_getLogs               2           73.7ms\n\
+             rpc attempts                4          169.0ms"
+        );
+        let pretty = table.render(RenderMode::Pretty);
+        assert!(
+            pretty.contains(&format!("{ITALIC}{CYAN}rpc calls{RESET}")),
+            "group labels carry the title tint: {pretty:?}"
+        );
+        assert_eq!(strip_ansi(&pretty), plain);
+    }
+
+    /// A run that made no RPC calls still headlines `rpc calls` — a zero
+    /// rollup with no time — and absent groups don't print at all.
+    #[test]
+    fn summary_table_warm_cache_keeps_zero_rpc_headline() {
+        let inner = Inner::default();
+        assert_eq!(
+            summary_table(&inner, WALL).render(RenderMode::Plain),
+            "── chainfold session summary: 518.3ms ──\n\
+             Span                    Calls       Time\n\
+             rpc calls                   0"
+        );
+    }
+
+    /// The singleton collapse stays vocabulary-open: a second span name
+    /// under a singleton target expands the group in full, so a new span
+    /// kind can't hide behind the rollup.
+    #[test]
+    fn summary_table_expands_singleton_group_on_new_span_name() {
+        let mut inner = Inner::default();
+        inner.spans.insert(
+            ATTEMPT_TARGET,
+            Rows::from([
+                (Cow::Borrowed("attempt"), tally(1, 1, 1_000)),
+                (Cow::Borrowed("retry_wait"), tally(2, 2, 2_000)),
+            ]),
+        );
+        assert_eq!(
+            summary_table(&inner, WALL).render(RenderMode::Plain),
+            "── chainfold session summary: 518.3ms ──\n\
+             Span                    Calls       Time\n\
+             rpc calls                   0\n\
+             rpc attempts                3      3.0ms\n\
+             \x20 attempt                   1      1.0ms\n\
+             \x20 retry_wait                2      2.0ms"
+        );
     }
 
     #[test]

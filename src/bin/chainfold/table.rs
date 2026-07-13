@@ -110,13 +110,6 @@ impl Out {
         self.write_line(&theme_for(self.mode).muted(text));
     }
 
-    /// A standalone heading — the same dressing table titles get (a short
-    /// rule with the text inline, `── text ──`); for headlines whose table
-    /// has no rows.
-    pub fn heading(self, text: &str) {
-        self.write_line(&top_rule(Some(text), 0, self.mode));
-    }
-
     /// A blank separator line on this stream.
     pub fn blank_line(self) {
         self.write_line("");
@@ -421,10 +414,10 @@ impl RowWriter {
 
 /// A table's single border: the top rule, with the title (when present)
 /// drawn inline — `── title ────`. `width` is the table's visible width;
-/// the trailing run never drops below two dashes, so a title wider than its
-/// table (or a bare [`Out::heading`], which passes 0) still reads as a
-/// rule. In `Pretty` the dashes are dimmed and the title italic + colored;
-/// `Plain` is the same text bare, keeping the strip-ANSI parity.
+/// the trailing run never drops below two dashes, so a title wider than
+/// its table still reads as a rule. In `Pretty` the dashes are dimmed and
+/// the title italic + colored; `Plain` is the same text bare, keeping the
+/// strip-ANSI parity.
 fn top_rule(title: Option<&str>, width: usize, mode: RenderMode) -> String {
     let theme = theme_for(mode);
     let Some(title) = title else {
@@ -656,8 +649,7 @@ mod tests {
     }
 
     /// The rule's trailing run tracks the table width but never drops below
-    /// two dashes — a title wider than its table (and the width-0 heading
-    /// path) still reads as a rule.
+    /// two dashes — a title wider than its table still reads as a rule.
     #[test]
     fn top_rule_fill_floors_at_two() {
         assert_eq!(
@@ -665,8 +657,8 @@ mod tests {
             "── Things ────────"
         );
         assert_eq!(
-            top_rule(Some("rpc calls: 0"), 0, RenderMode::Plain),
-            "── rpc calls: 0 ──"
+            top_rule(Some("a title wider than its table"), 0, RenderMode::Plain),
+            "── a title wider than its table ──"
         );
     }
 
