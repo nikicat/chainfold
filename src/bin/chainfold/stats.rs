@@ -16,9 +16,10 @@
 //! WIRE column appears, blank on rows where nothing was batched.
 //!
 //! The report is one tree table: a rollup row per span group (its summed
-//! calls and time), each distinct span label indented beneath it, and the
-//! session duration riding in the title. Cache hit/miss counts keep their
-//! own table — different columns, different question.
+//! calls and time), each distinct span label indented beneath it, and two
+//! call-less rollups closing the tree — `untracked` (wall-clock no root
+//! span covered) and `total` (the whole invocation). Cache hit/miss counts
+//! keep their own table — different columns, different question.
 //!
 //! Per the contract's summing rule, wall-time reconciliation counts *root*
 //! spans only: a nested span (the connect handshake inside its first RPC)
@@ -322,45 +323,15 @@ impl Stats {
             out.blank_line();
             out.table(&table);
         }
-
-        // Root spans only — the contract's summing rule (a nested connect
-        // already sits inside its RPC span's duration).
-        let tracked: Duration = inner
-            .spans
-            .values()
-            .flat_map(BTreeMap::values)
-            .map(|t| t.root_total)
-            .sum();
-        let mut tail = TableBuf::new(kv_spec());
-        tail.push(kv_row(
-            "untracked",
-            wall.saturating_sub(tracked),
-            "(process init, gaps)",
-        ));
-        out.blank_line();
-        out.table(&tail);
         out.blank_line();
     }
 }
 
-/// Label / time / note rows for the flat summary lines (`untracked`) —
-/// self-labeled, so headerless (and thus content-width).
-fn kv_spec() -> TableSpec {
-    TableSpec::new(vec![
-        Column::left("label"),
-        Column::right("time"),
-        Column::left("note"),
-    ])
-    .no_header()
-}
-
-fn kv_row(label: &str, time: Duration, note: &str) -> Vec<Cell> {
-    vec![Cell::new(label), Cell::new(fmt_dur(time)), Cell::new(note)]
-}
-
 /// The whole span report as one tree table: CALLS is logical calls, WIRE
 /// (present only when some row batched) the wire round-trips they rode in,
-/// TIME the summed wall-time.
+/// TIME the summed wall-time. Two call-less rollups close the tree:
+/// `untracked` — the wall-clock remainder no root span covered (process
+/// init, gaps) — and `total`, the whole invocation.
 fn summary_table(inner: &Inner, wall: Duration) -> TableBuf {
     let batched = inner
         .spans
@@ -373,7 +344,7 @@ fn summary_table(inner: &Inner, wall: Duration) -> TableBuf {
     }
     cols.push(Column::right("time").min(9));
     let mut table = TableBuf::new(TableSpec::new(cols));
-    table.title(format!("chainfold session summary: {}", fmt_dur(wall)));
+    table.title("spans");
 
     for section in SECTIONS {
         let rows = inner.spans.get(section.target);
@@ -391,7 +362,36 @@ fn summary_table(inner: &Inner, wall: Duration) -> TableBuf {
         let header = target.strip_prefix(TARGET_PREFIX).unwrap_or(target);
         push_group(&mut table, batched, header, None, Some(rows));
     }
+
+    // Root spans only — the contract's summing rule (a nested connect
+    // already sits inside its RPC span's duration).
+    let tracked: Duration = inner
+        .spans
+        .values()
+        .flat_map(BTreeMap::values)
+        .map(|t| t.root_total)
+        .sum();
+    table.push(time_only_row(
+        batched,
+        "untracked",
+        wall.saturating_sub(tracked),
+    ));
+    table.push(time_only_row(batched, "total", wall));
     table
+}
+
+/// A call-less rollup row (the `untracked` / `total` closers): the
+/// group-tinted label, blank CALLS (and WIRE) cells, and a time.
+fn time_only_row(batched: bool, label: &'static str, time: Duration) -> Vec<Cell> {
+    let mut row = vec![
+        Cell::new(move |theme: &dyn TermTheme| theme.title(label)),
+        Cell::new(String::new()),
+    ];
+    if batched {
+        row.push(Cell::new(String::new()));
+    }
+    row.push(Cell::new(fmt_dur(time)));
+    row
 }
 
 /// One target's rows: a rollup row labeled by the group header
@@ -504,10 +504,11 @@ mod tests {
     const WALL: Duration = Duration::from_micros(518_300);
 
     /// The report is one tree: rollup rows per group (calls + time summed),
-    /// children indented, the WIRE column speaking only on batched rows,
-    /// and a singleton group (`rpc attempts` / `attempt`) collapsing to its
-    /// rollup. Pretty adds the title tint to group labels over the
-    /// identical layout.
+    /// children indented, the WIRE column speaking only on batched rows, a
+    /// singleton group (`rpc attempts` / `attempt`) collapsing to its
+    /// rollup, and the call-less `untracked` / `total` rollups closing the
+    /// tree. Pretty adds the title tint to group labels over the identical
+    /// layout.
     #[test]
     fn summary_table_renders_tree_with_rollups() {
         let mut inner = Inner::default();
@@ -531,14 +532,16 @@ mod tests {
         let plain = table.render(RenderMode::Plain);
         assert_eq!(
             plain,
-            "── chainfold session summary: 518.3ms ────────\n\
+            "── spans ─────────────────────────────────────\n\
              Span                    Calls  Wire       Time\n\
              setup                       1            634µs\n\
              \x20 db_open                   1            634µs\n\
              rpc calls                 202     4    169.9ms\n\
              \x20 eth_getBlockByNumber    200     2     96.2ms\n\
              \x20 eth_getLogs               2           73.7ms\n\
-             rpc attempts                4          169.0ms"
+             rpc attempts                4          169.0ms\n\
+             untracked                              178.8ms\n\
+             total                                  518.3ms"
         );
         let pretty = table.render(RenderMode::Pretty);
         assert!(
@@ -549,15 +552,18 @@ mod tests {
     }
 
     /// A run that made no RPC calls still headlines `rpc calls` — a zero
-    /// rollup with no time — and absent groups don't print at all.
+    /// rollup with no time — absent groups don't print at all, and the
+    /// whole wall-clock lands in `untracked`.
     #[test]
     fn summary_table_warm_cache_keeps_zero_rpc_headline() {
         let inner = Inner::default();
         assert_eq!(
             summary_table(&inner, WALL).render(RenderMode::Plain),
-            "── chainfold session summary: 518.3ms ──\n\
+            "── spans ───────────────────────────────\n\
              Span                    Calls       Time\n\
-             rpc calls                   0"
+             rpc calls                   0\n\
+             untracked                        518.3ms\n\
+             total                            518.3ms"
         );
     }
 
@@ -576,12 +582,14 @@ mod tests {
         );
         assert_eq!(
             summary_table(&inner, WALL).render(RenderMode::Plain),
-            "── chainfold session summary: 518.3ms ──\n\
+            "── spans ───────────────────────────────\n\
              Span                    Calls       Time\n\
              rpc calls                   0\n\
              rpc attempts                3      3.0ms\n\
              \x20 attempt                   1      1.0ms\n\
-             \x20 retry_wait                2      2.0ms"
+             \x20 retry_wait                2      2.0ms\n\
+             untracked                        515.3ms\n\
+             total                            518.3ms"
         );
     }
 

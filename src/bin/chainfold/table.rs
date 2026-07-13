@@ -205,7 +205,6 @@ impl Column {
 pub struct TableSpec {
     columns: Vec<Column>,
     header_case: HeaderCase,
-    header: bool,
 }
 
 impl TableSpec {
@@ -213,20 +212,11 @@ impl TableSpec {
         Self {
             columns,
             header_case: HeaderCase::default(),
-            header: true,
         }
     }
 
     pub fn header_case(mut self, case: HeaderCase) -> Self {
         self.header_case = case;
-        self
-    }
-
-    /// Skip the header row — for label/value summaries where column names
-    /// would be noise. `Min` width hints are enforced by padding the header
-    /// cell, so a headerless [`TableBuf`] ignores them (content width).
-    pub fn no_header(mut self) -> Self {
-        self.header = false;
         self
     }
 }
@@ -305,14 +295,12 @@ impl TableBuf {
     pub fn render(&self, mode: RenderMode) -> String {
         let theme = theme_for(mode);
         let mut builder = Builder::default();
-        if self.spec.header {
-            builder.push_record(
-                self.spec
-                    .columns
-                    .iter()
-                    .map(|c| theme.header(&c.header_text(self.spec.header_case))),
-            );
-        }
+        builder.push_record(
+            self.spec
+                .columns
+                .iter()
+                .map(|c| theme.header(&c.header_text(self.spec.header_case))),
+        );
         for row in &self.rows {
             builder.push_record(row.iter().map(|c| materialize(c, mode)));
         }
@@ -634,20 +622,6 @@ mod tests {
         assert_eq!(strip_ansi(&pretty.rule()), plain.rule());
     }
 
-    #[test]
-    fn no_header_renders_rule_and_rows() {
-        let mut t =
-            TableBuf::new(TableSpec::new(vec![Column::left("a"), Column::right("b")]).no_header());
-        t.push(vec![Cell::new("x"), Cell::new("1")]);
-        assert_eq!(t.render(RenderMode::Plain), "────\nx  1");
-        // No header, no title, no styled cells → the dimmed rule is Pretty's
-        // only dressing.
-        assert_eq!(
-            t.render(RenderMode::Pretty),
-            format!("{DIM}────{RESET}\nx  1")
-        );
-    }
-
     /// The rule's trailing run tracks the table width but never drops below
     /// two dashes — a title wider than its table still reads as a rule.
     #[test]
@@ -705,8 +679,7 @@ mod tests {
     /// italic + cyan dressing, and mode parity holds throughout.
     #[test]
     fn composed_titles_render_per_theme() {
-        let mut t =
-            TableBuf::new(TableSpec::new(vec![Column::left("a"), Column::right("b")]).no_header());
+        let mut t = TableBuf::new(TableSpec::new(vec![Column::left("a"), Column::right("b")]));
         t.push(vec![Cell::new("x"), Cell::new("1")]);
         t.title(|theme: &dyn TermTheme| {
             format!(
@@ -715,7 +688,7 @@ mod tests {
             )
         });
         let plain = t.render(RenderMode::Plain);
-        assert_eq!(plain, "── blocks 22123456 ──\nx  1");
+        assert_eq!(plain, "── blocks 22123456 ──\nA  B\nx  1");
         let pretty = t.render(RenderMode::Pretty);
         assert!(
             pretty.contains(&format!("22{DIM}123{DIM_OFF}456")),
