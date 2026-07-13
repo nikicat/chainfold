@@ -118,8 +118,13 @@ pub async fn resolve_event_topic(
     Ok((r.signature, r.topic0))
 }
 
+/// The canonical ERC20 `Transfer` event signature — spelled once, here
+/// (feature-independent), and pinned to the sol!-derived
+/// `evm::TRANSFER_TOPIC` by a test beside that constant.
+pub const TRANSFER_SIGNATURE: &str = "Transfer(address,address,uint256)";
+
 /// Compute topic0 from a canonical event signature like
-/// `"Transfer(address,address,uint256)"`. No I/O, no cache.
+/// [`TRANSFER_SIGNATURE`]. No I/O, no cache.
 pub fn topic_from_signature(signature: &str) -> [u8; 32] {
     keccak256(signature.as_bytes())
 }
@@ -323,7 +328,7 @@ mod tests {
 
     #[test]
     fn topic_from_known_signatures() {
-        let t = topic_from_signature("Transfer(address,address,uint256)");
+        let t = topic_from_signature(TRANSFER_SIGNATURE);
         assert_eq!(
             hex::encode(t),
             "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -346,7 +351,7 @@ mod tests {
             ],"anonymous":false}
         ]"#;
         let (sig, topic) = event_topic_from_abi(abi, "Transfer").unwrap();
-        assert_eq!(sig, "Transfer(address,address,uint256)");
+        assert_eq!(sig, TRANSFER_SIGNATURE);
         assert_eq!(
             hex::encode(topic),
             "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -407,7 +412,7 @@ mod tests {
             ],"anonymous":false}
         ]"#;
         let (sig, _, item_json) = event_from_abi(abi, "Transfer").unwrap();
-        assert_eq!(sig, "Transfer(address,address,uint256)");
+        assert_eq!(sig, TRANSFER_SIGNATURE);
         let v: serde_json::Value = serde_json::from_str(&item_json).unwrap();
         assert_eq!(v["name"], "Transfer");
         assert_eq!(v["type"], "event");

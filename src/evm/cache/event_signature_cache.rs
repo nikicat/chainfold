@@ -112,6 +112,7 @@ impl EventSignatureCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signatures::TRANSFER_SIGNATURE;
 
     const ADDR: Address = Address::repeat_byte(0x42);
     const TOPIC0: B256 = B256::repeat_byte(0xDD);
@@ -124,7 +125,7 @@ mod tests {
                 ChainId::new(1),
                 &ADDR,
                 "Transfer",
-                "Transfer(address,address,uint256)",
+                TRANSFER_SIGNATURE,
                 Topic::from(TOPIC0),
                 Some("{\"type\":\"event\"}"),
             )
@@ -133,7 +134,7 @@ mod tests {
             .get_event_signature(ChainId::new(1), &ADDR, "Transfer")
             .unwrap()
             .unwrap();
-        assert_eq!(row.signature, "Transfer(address,address,uint256)");
+        assert_eq!(row.signature, TRANSFER_SIGNATURE);
         assert_eq!(row.topic0, Topic::from(TOPIC0));
         assert_eq!(row.abi_json.as_deref(), Some("{\"type\":\"event\"}"));
     }

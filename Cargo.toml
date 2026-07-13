@@ -89,8 +89,16 @@ tabled = { version = "0.21", default-features = false, features = [
 
 [dev-dependencies]
 # `net` for the one-shot TcpListener server the HttpTransport wire tests
-# answer from; `test-util` for the paused-clock budget/executor tests.
-tokio = { version = "1", features = ["rt", "macros", "net", "test-util"] }
+# answer from; `test-util` for the paused-clock budget/executor tests;
+# `process`/`io-util` for the CLI subprocess runs in `adaptive_fetch`.
+tokio = { version = "1", features = [
+  "rt",
+  "macros",
+  "net",
+  "test-util",
+  "process",
+  "io-util",
+] }
 futures-util = "0.3"
 tempfile = "3"
 alloy = { version = "2", features = [
@@ -103,6 +111,9 @@ alloy = { version = "2", features = [
   "json-abi",
 ] }
 alloy-node-bindings = "2"
+# The capped mock JSON-RPC server the adaptive-fetch integration scenarios
+# run against (tests/common/rpc_server.rs).
+axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 tracing = "0.1"
@@ -172,6 +183,12 @@ required-features = ["evm"]
 [[test]]
 name = "bitcoin_blocks_history"
 required-features = ["bitcoin"]
+
+# `cli` (not just `evm`): the harness also drives the built binary as a
+# subprocess via CARGO_BIN_EXE_chainfold.
+[[test]]
+name = "adaptive_fetch"
+required-features = ["cli"]
 
 [[example]]
 name = "bridge_explorer"

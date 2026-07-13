@@ -8,3 +8,4 @@ pub mod anvil;
 pub mod bitcoind;
 pub mod fixtures;
 pub mod mock_provider;
+pub mod rpc_server;

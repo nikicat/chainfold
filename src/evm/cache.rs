@@ -137,6 +137,7 @@ mod tests {
     use crate::cache::{CacheSection, CacheTable, FilterHash, ScanPartition, TableCount};
     use crate::chain::{BlockNumber, BlockRange, TxCount};
     use crate::evm::types::{EvmBlock, Topic};
+    use crate::signatures::TRANSFER_SIGNATURE;
     use alloy::primitives::U256;
 
     #[test]
@@ -234,7 +235,7 @@ mod tests {
                 ChainId::new(1),
                 &addr,
                 "Transfer",
-                "Transfer(address,address,uint256)",
+                TRANSFER_SIGNATURE,
                 Topic::new(B256::repeat_byte(0xDD)),
                 None,
             )

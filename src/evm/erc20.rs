@@ -33,7 +33,8 @@ sol! {
     function balanceOf(address account) external view returns (uint256);
 }
 
-/// Keccak256 of `Transfer(address,address,uint256)`.
+/// Keccak256 of [`TRANSFER_SIGNATURE`](crate::signatures::TRANSFER_SIGNATURE)
+/// (sol!-derived; the equality is pinned by a test below).
 pub const TRANSFER_TOPIC: Topic = Topic::new(Transfer::SIGNATURE_HASH);
 
 /// On-chain ERC20 metadata.
@@ -375,6 +376,20 @@ mod tests {
     use crate::evm::types::{BlockHash, LogIdx, TxHash};
     use alloy::primitives::B256;
     use std::sync::Arc;
+
+    /// The sol!-derived `Transfer` identity and the crate's canonical
+    /// signature spelling (`signatures::TRANSFER_SIGNATURE`) are the same
+    /// event — neither source can drift from the other.
+    #[test]
+    fn transfer_topic_matches_the_canonical_signature() {
+        use crate::signatures::{TRANSFER_SIGNATURE, topic_from_signature};
+
+        assert_eq!(Transfer::SIGNATURE, TRANSFER_SIGNATURE);
+        assert_eq!(
+            TRANSFER_TOPIC,
+            Topic::new(B256::from(topic_from_signature(TRANSFER_SIGNATURE)))
+        );
+    }
 
     fn make_transfer_event(from: Address, to: Address, amount: U256) -> EvmEvent {
         let mut data = vec![0u8; 32];
