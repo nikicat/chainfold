@@ -545,14 +545,19 @@ trait RangeSpec: Clone + Send + Sync + 'static {
 }
 ```
 
-Fetching is a separately injected closure — `Fetcher<Page>`, wrapping the
-source's RPC (`eth_getLogs` for logs) — so tests pass a pure-Rust stub and the
-provider-capturing fetch stays out of the persistence spec. Three instances
-exist: `LogSpec` (a cache handle + `FilterHash`; sparse, `LogRef`-indirect
-resolution) and `BlockSpec` (dense EVM blocks) in `src/evm/`, and
-`BtcBlockSpec` (dense Bitcoin blocks) in `src/bitcoin/`. The dense specs
-share the `HeightPos` tree key from `src/range_index/`; the seam itself is
-exercised featureless by the synthetic `MockSpec` testkit.
+Fetching is a separately injected **`PageFetcher`** — a streaming trait
+(`fetch(range) -> PageStream<Page>`, contract in [`FETCH.md` §2](./FETCH.md))
+wrapping the source's RPC (`eth_getLogs` for logs) — so tests pass a
+pure-Rust stub and the provider-capturing fetch stays out of the persistence
+spec. Pages finalize incrementally: each delivered page inserts its items,
+persists, shrinks the in-flight placeholder from the left, and wakes
+waiters, so consumers stream the delivered prefix while later pages are in
+flight; single-shot sources adapt via the `SinglePageFetcher` shim. Three
+instances exist: `LogSpec` (a cache handle + `FilterHash`; sparse,
+`LogRef`-indirect resolution) and `BlockSpec` (dense EVM blocks) in
+`src/evm/`, and `BtcBlockSpec` (dense Bitcoin blocks) in `src/bitcoin/`. The
+dense specs share the `HeightPos` tree key from `src/range_index/`; the seam
+itself is exercised featureless by the synthetic `MockSpec` testkit.
 
 ### Client — the chain entity (concrete per source)
 

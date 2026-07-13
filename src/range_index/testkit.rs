@@ -10,6 +10,7 @@
 //! modules in their source trees.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::spec::{IndexPos, LoadedSpan, RangeSpec};
@@ -117,11 +118,10 @@ impl Position for MockPubPos {
     }
 }
 
-/// A page of mock items covering `[from_block, to_block]`.
+/// A page of mock items covering the inclusive `range`.
 #[derive(Clone)]
 pub(super) struct MockPage {
-    pub from_block: BlockNumber,
-    pub to_block: BlockNumber,
+    pub range: BlockRange,
     pub items: Vec<MockItem>,
 }
 
@@ -131,9 +131,16 @@ pub(super) struct MockPage {
 pub(super) struct MockStore {
     items: Mutex<BTreeSet<MockItem>>,
     scanned: Mutex<Vec<BlockRange>>,
+    fail_next_persist: AtomicBool,
 }
 
 impl MockStore {
+    /// Make the next `persist` call fail once (self-clearing) — for the
+    /// persist-error paths of the gap fill.
+    pub(super) fn fail_next_persist(&self) {
+        self.fail_next_persist.store(true, Ordering::SeqCst);
+    }
+
     /// Pre-populate items as if a previous process had persisted them.
     pub(super) fn insert_items(&self, items: &[MockItem]) {
         self.items.lock().unwrap().extend(items.iter().copied());
@@ -189,11 +196,7 @@ impl RangeSpec for MockSpec {
     }
 
     fn page_bounds(page: &MockPage) -> BlockRange {
-        BlockRange::new(page.from_block, page.to_block)
-    }
-
-    fn page_tip(page: &MockPage) -> MockPubPos {
-        MockPubPos::new(page.to_block, u32::MAX)
+        page.range
     }
 
     fn resolve(&self, item: &MockItem) -> Result<Positioned<MockItem, MockPubPos>, HistoryError> {
@@ -204,9 +207,11 @@ impl RangeSpec for MockSpec {
     }
 
     fn persist(&self, page: &MockPage) -> Result<(), HistoryError> {
+        if self.store.fail_next_persist.swap(false, Ordering::SeqCst) {
+            return Err(HistoryError::internal("scripted persist failure"));
+        }
         self.store.insert_items(&page.items);
-        self.store
-            .record_scanned(BlockRange::new(page.from_block, page.to_block));
+        self.store.record_scanned(page.range);
         Ok(())
     }
 

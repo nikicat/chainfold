@@ -37,7 +37,7 @@ Three layers fix this, each at its own seam: a **streaming page contract**
 in the source-agnostic core (§2), a **slicing executor** in the EVM source
 layer (§3), and **provider adaptors** at the endpoint boundary (§4).
 
-## 2. Streaming page contract (range-index core)
+## 2. Streaming page contract (range-index core) — ✅ shipped
 
 The `Fetcher<Page>` closure alias (`src/range_index/spec.rs`) becomes a
 named trait per [`STYLE.md`](./STYLE.md#reactive-not-poll) (traits over
@@ -92,6 +92,27 @@ the seam stays source-agnostic.
 item as soon as the first page lands, while later slices are still in
 flight — time-to-first-item ≈ one slice latency, which is what frees
 `chunk_size` to grow.
+
+**As-built notes (resolutions the design left open):**
+
+- **The walker that installs the placeholder owns and drives the stream**
+  (`ActiveFill` in `gap_fill.rs`) — no core-spawned tasks (decision 2's
+  spirit: fan-out lives inside the `PageFetcher`). `ensure_cached` drives a
+  fill to completion; `items()` drives it one page per walk step, so page
+  items yield between pages. Single-shot sources adapt via the
+  `SinglePageFetcher` shim.
+- **Cancellation cannot orphan a gap:** dropping a mid-fill walker releases
+  the placeholder remainder and wakes waiters (`ActiveFill`'s drop guard,
+  identity-checked against the placeholder's `Notify`).
+- **A stream that ends cleanly *before* covering the gap is a loud error**
+  (invariant 2 sharpened): silently keeping the suffix a gap would make
+  `ensure_cached` re-fetch forever against a deterministic short-streaming
+  fetcher. The delivered prefix stands.
+- **The placeholder keeps the same `Notify` across shrinks**, and waiters
+  register interest *before* re-checking coverage (`Notify::notify_waiters`
+  stores no permit — the old wait was vulnerable to a lost wakeup). Every
+  placeholder mutation notifies, including the persist-failure path, which
+  previously returned before waking waiters.
 
 **`ChunkSize`'s role shifts:** it no longer bounds any RPC. It keeps two
 jobs — `load_window` alignment, and how much one walk step claims as a

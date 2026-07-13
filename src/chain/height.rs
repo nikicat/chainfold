@@ -193,6 +193,11 @@ impl BlockRange {
     pub const fn as_u64(self) -> (u64, u64) {
         (self.from.get(), self.to.get())
     }
+
+    /// The number of blocks the inclusive range covers (`to − from + 1`).
+    pub const fn count(self) -> BlockCount {
+        BlockCount::new(self.to.get().saturating_sub(self.from.get()) + 1)
+    }
 }
 
 impl std::fmt::Display for BlockRange {
@@ -365,6 +370,13 @@ mod tests {
             chunk.align(BlockRange::from_u64(0, 0)),
             BlockRange::from_u64(0, 999)
         );
+    }
+
+    #[test]
+    fn count_covers_inclusive_range() {
+        assert_eq!(BlockRange::from_u64(100, 104).count(), BlockCount::new(5));
+        assert_eq!(BlockRange::from_u64(7, 7).count(), BlockCount::new(1));
+        assert_eq!(BlockRange::from_u64(0, 0).count(), BlockCount::new(1));
     }
 
     #[test]

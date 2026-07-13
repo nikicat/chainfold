@@ -119,17 +119,15 @@ impl LogRef {
 // LogPage — input to insert_page
 // ============================================================
 
-/// A page of logs covering the inclusive block range
-/// `[from_block, to_block]` from one `eth_getLogs` call (or a subscription
-/// delivery). In position space that is `(before_block(from_block),
-/// end_of_block(to_block)]`.
+/// A page of logs covering the inclusive block `range` from one
+/// `eth_getLogs` call (or a subscription delivery). In position space that
+/// is `(before_block(range.from), end_of_block(range.to)]`.
 ///
 /// `end_block_hash` lets the consumer record the matching scanned-range
 /// entry in `LogCache::record_scanned_range`.
 #[derive(Clone)]
 pub struct LogPage {
-    pub from_block: BlockNumber,
-    pub to_block: BlockNumber,
+    pub range: BlockRange,
     pub items: Vec<Log>,
     pub end_block_hash: BlockHash,
 }

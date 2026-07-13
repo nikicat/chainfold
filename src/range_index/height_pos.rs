@@ -83,12 +83,12 @@ mod tests {
                 HeightPos::end_of_block(bn(99)),
                 HeightPos::end_of_block(bn(104)),
             ),
-            BlockRange::new(bn(100), bn(104))
+            BlockRange::from_u64(100, 104)
         );
         // From Bottom the fetch starts at genesis.
         assert_eq!(
             HeightPos::fetch_bounds(HeightPos::Bottom, HeightPos::end_of_block(bn(3))),
-            BlockRange::new(bn(0), bn(3))
+            BlockRange::from_u64(0, 3)
         );
     }
 }

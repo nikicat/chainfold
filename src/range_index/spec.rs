@@ -25,7 +25,9 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
 use std::pin::Pin;
-use std::sync::Arc;
+
+use futures_core::Stream;
+use futures_util::stream;
 
 use crate::arch::{HistoryError, Position, Positioned};
 use crate::chain::{BlockNumber, BlockRange};
@@ -62,19 +64,45 @@ pub struct LoadedSpan<I> {
     pub items: Vec<I>,
 }
 
-/// A gap filler. Wraps the source's RPC (`eth_getLogs`,
-/// `eth_getBlockByNumber`, …); returns the [`Page`](RangeSpec::Page) for the
-/// requested inclusive block range. Injected as a closure so tests can pass
-/// a pure-Rust stub and so the provider-capturing fetch stays separate from
+/// A streaming gap filler. Wraps the source's RPC (`eth_getLogs`,
+/// `eth_getBlockByNumber`, …); yields the [`Page`](RangeSpec::Page)s covering
+/// the requested inclusive block range. Injected so tests can pass a
+/// pure-Rust stub and so the provider-capturing fetch stays separate from
 /// the persistence/interpretation in [`RangeSpec`].
-pub type Fetcher<Page> = Arc<
-    dyn Fn(
-            BlockNumber,
-            BlockNumber,
-        ) -> Pin<Box<dyn Future<Output = Result<Page, HistoryError>> + Send>>
-        + Send
-        + Sync,
->;
+///
+/// Contract (`docs/FETCH.md` §2 owns the full text):
+///
+/// 1. Pages arrive **in ascending order, contiguous from `range.from`** —
+///    each page's [`page_bounds`](RangeSpec::page_bounds) starts one block
+///    after the previous page ended; the first starts at `range.from`. No
+///    page extends past `range.to`.
+/// 2. A stream that ends after a page reaching `range.to` is a success.
+///    Ending cleanly *before* that is a contract violation the gap fill
+///    surfaces as an error (the delivered prefix stands either way).
+/// 3. An `Err` item ends the stream: the delivered prefix is a valid
+///    coverage claim; the suffix past the last delivered page stays a gap.
+pub trait PageFetcher<Page>: Send + Sync + 'static {
+    fn fetch(&self, range: BlockRange) -> PageStream<Page>;
+}
+
+/// The page stream a [`PageFetcher`] returns.
+pub type PageStream<Page> = Pin<Box<dyn Stream<Item = Result<Page, HistoryError>> + Send>>;
+
+/// Adapts a one-page async closure to the streaming contract: the whole
+/// range answered in a single page. The shim for single-shot sources
+/// (EVM blocks, Bitcoin blocks) and test stubs.
+pub struct SinglePageFetcher<F>(pub F);
+
+impl<Page, F, Fut> PageFetcher<Page> for SinglePageFetcher<F>
+where
+    Page: Send + Sync + 'static,
+    F: Fn(BlockRange) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Page, HistoryError>> + Send + 'static,
+{
+    fn fetch(&self, range: BlockRange) -> PageStream<Page> {
+        Box::pin(stream::once((self.0)(range)))
+    }
+}
 
 /// The source-specific behavior the generic [`RangeIndex`](super::RangeIndex)
 /// delegates to. One impl per source (EVM logs, EVM blocks, …).
@@ -106,13 +134,10 @@ pub trait RangeSpec: Clone + Send + Sync + 'static {
     fn page_items(page: &Self::Page) -> Vec<Self::Item>;
 
     /// The inclusive block range a page covers (its scanned-range bounds).
+    /// A delivered page advances the store's `end` to
+    /// [`head_pos`](Self::head_pos)`(bounds.to)` — pages end at block
+    /// boundaries, so no separate page-tip mapping exists.
     fn page_bounds(page: &Self::Page) -> BlockRange;
-
-    /// The public position a delivered page advances the store's `end` to —
-    /// the upper bound of the page's last block (EVM logs: `(to_block,
-    /// LogIdx::MAX)`). Mirrors the reference's `onEvents` calling
-    /// `onBump(page.to)`.
-    fn page_tip(page: &Self::Page) -> Self::PubPos;
 
     /// Resolve a stored [`Item`](Self::Item) to the public positioned value
     /// yielded to consumers, reading the durable store synchronously (never

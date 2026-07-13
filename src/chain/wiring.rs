@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use crate::chain::head::HeadEvent;
 use crate::chain::{BlockNumber, BlockRange};
 use crate::range_index::{RangeIndexStore, RangeSpec};
+use crate::share::Share;
 
 /// Follow the head channel: eagerly gap-fill `(last_tip, head]` through
 /// the store's own fetcher (singleflight, chunked, persisted inline), then
@@ -32,13 +33,11 @@ pub async fn follow_head<S: RangeSpec>(
             && last_tip.is_none_or(|tip| h.number > tip)
         {
             let Some(store) = store.upgrade() else { return };
-            if let Some(tip) = last_tip
-                && let Err(e) = store
-                    .index()
-                    .ensure_cached(BlockRange::new(tip + 1, h.number))
-                    .await
-            {
-                tracing::warn!(from = %(tip + 1), to = %h.number, error = %e, "head gap-fill");
+            if let Some(tip) = last_tip {
+                let range = BlockRange::new(tip + 1, h.number);
+                if let Err(e) = store.index().share().ensure_cached(range).await {
+                    tracing::warn!(%range, error = %e, "head gap-fill");
+                }
             }
             store.on_bump(S::head_pos(h.number));
             last_tip = Some(h.number);

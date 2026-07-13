@@ -30,7 +30,9 @@ use crate::chain::{
     HeadSeeder, TimeAnchor, TimeLocator, follow_head,
 };
 use crate::observe::{CacheLayer, CacheOutcome, cache_event};
-use crate::range_index::{Fetcher, RangeIndex, RangeIndexStore, TimePos, TipSeed};
+use crate::range_index::{
+    PageFetcher, RangeIndex, RangeIndexStore, SinglePageFetcher, TimePos, TipSeed,
+};
 use crate::share::Share;
 
 /// Default gap-fill / alignment chunk size.
@@ -152,7 +154,7 @@ impl BitcoinChain {
     pub fn blocks_hist(&self, range: BlockRange) -> Hist<BtcBlock, BlockNumber> {
         let store = self.block_store(None);
 
-        tracing::debug!(from = %range.from, to = %range.to, "bounded bitcoin block hist opened");
+        tracing::debug!(%range, "bounded bitcoin block hist opened");
 
         Hist::new(store, block_cut_before(range.from), range.to)
     }
@@ -306,23 +308,23 @@ const MAX_BLOCK_FETCH: BlockCount = BlockCount::new(10_000);
 /// `getblockhash(height)` resolving to batched `getblockheader(hash)` over
 /// the inclusive range — one verbose header carries every [`BtcBlock`]
 /// field including `nTx`.
-fn build_btc_block_fetcher(rpc: BtcRpcClient) -> Fetcher<BtcBlockPage> {
-    Arc::new(move |from: BlockNumber, to: BlockNumber| {
+fn build_btc_block_fetcher(rpc: BtcRpcClient) -> Arc<dyn PageFetcher<BtcBlockPage>> {
+    Arc::new(SinglePageFetcher(move |range: BlockRange| {
         let rpc = rpc.clone();
-        Box::pin(async move {
-            let span = to.get().saturating_sub(from.get()) + 1;
-            if span > MAX_BLOCK_FETCH.get() {
+        async move {
+            let span = range.count();
+            if span > MAX_BLOCK_FETCH {
                 return Err(HistoryError::internal(format!(
-                    "blocks gap-fill span {span} exceeds {MAX_BLOCK_FETCH} \
-                     ({from}..={to}) — bound the walk with split() before iterating"
+                    "blocks gap-fill span {span} exceeds {MAX_BLOCK_FETCH} ({range}) \
+                     — bound the walk with split() before iterating"
                 )));
             }
-            tracing::debug!(from = %from, to = %to, blocks = span, "filling block gap");
+            tracing::debug!(%range, blocks = %span, "filling block gap");
 
-            let mut items: Vec<BtcBlock> = Vec::with_capacity(span as usize);
-            let mut n = from;
-            while n <= to {
-                let batch_to = to.min(n + (BLOCKS_PER_BATCH.get() - 1));
+            let mut items: Vec<BtcBlock> = Vec::with_capacity(span.get() as usize);
+            let mut n = range.from;
+            while n <= range.to {
+                let batch_to = range.to.min(n + (BLOCKS_PER_BATCH.get() - 1));
                 let hashes = rpc.get_block_hashes(BlockRange::new(n, batch_to)).await?;
                 let blocks = rpc.get_block_headers(&hashes).await?;
                 for (offset, block) in blocks.iter().enumerate() {
@@ -340,13 +342,12 @@ fn build_btc_block_fetcher(rpc: BtcRpcClient) -> Fetcher<BtcBlockPage> {
 
             let end_block_hash = items.last().expect("span >= 1").hash;
             Ok(BtcBlockPage {
-                from_block: from,
-                to_block: to,
+                range,
                 items,
                 end_block_hash,
             })
-        })
-    })
+        }
+    }))
 }
 
 // ============================================================

@@ -12,7 +12,7 @@
 //! [`RangeIndex::ensure_window_loaded`].
 //!
 //! Split across submodules:
-//! - [`spec`] — the source-injected [`RangeSpec`]/[`IndexPos`] seam + [`Fetcher`].
+//! - [`spec`] — the source-injected [`RangeSpec`]/[`IndexPos`] seam + [`PageFetcher`].
 //! - [`range_tree`] — the [`Range`] entry type, page insertion (four late-item
 //!   cases), the lazy load of scanned ranges, and the gap placeholder.
 //! - [`gap_fill`] — [`RangeIndex::ensure_cached`], the [`RangeIndex::items`]
@@ -25,7 +25,7 @@
 //! accessors, [`RangeIndex::resolve`], and the async drain to the durable store.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -38,7 +38,7 @@ mod spec;
 mod store;
 
 pub use height_pos::HeightPos;
-pub use spec::{Fetcher, IndexPos, LoadedSpan, RangeSpec};
+pub use spec::{IndexPos, LoadedSpan, PageFetcher, PageStream, RangeSpec, SinglePageFetcher};
 pub use store::{RangeIndexStore, TimePos, TipSeed};
 
 /// Test-only fetcher that panics on any gap fill — re-exported for the
@@ -63,9 +63,11 @@ use range_tree::Range;
 /// [`Self::ensure_window_loaded`].
 pub struct RangeIndex<S: RangeSpec> {
     spec: S,
-    fetcher: Fetcher<S::Page>,
-    /// Aligned scanned-range chunk size. Determines the granularity at
-    /// which gaps get fetched and the alignment of scanned-range rows.
+    fetcher: Arc<dyn PageFetcher<S::Page>>,
+    /// Aligned scanned-range chunk size: the alignment of scanned-range
+    /// rows and how much one walk step claims as a placeholder (one
+    /// fetcher stream). It does not bound any single RPC — how a fetcher
+    /// slices its range into requests is its own concern.
     chunk_size: ChunkSize,
     tree: Mutex<BTreeMap<S::Pos, Range<S>>>,
     /// Block windows already materialized into the tree. Tracked so a second
@@ -81,12 +83,16 @@ pub struct RangeIndex<S: RangeSpec> {
 impl<S: RangeSpec> RangeIndex<S> {
     /// Construct an empty index over `spec`, fetching absent ranges via
     /// `fetcher`. Aligned chunk size defaults to `1000` blocks.
-    pub fn new(spec: S, fetcher: Fetcher<S::Page>) -> Self {
+    pub fn new(spec: S, fetcher: Arc<dyn PageFetcher<S::Page>>) -> Self {
         Self::with_chunk_size(spec, fetcher, ChunkSize::new(1000))
     }
 
     /// Like [`Self::new`] but with an explicit aligned chunk size.
-    pub fn with_chunk_size(spec: S, fetcher: Fetcher<S::Page>, chunk_size: ChunkSize) -> Self {
+    pub fn with_chunk_size(
+        spec: S,
+        fetcher: Arc<dyn PageFetcher<S::Page>>,
+        chunk_size: ChunkSize,
+    ) -> Self {
         Self {
             spec,
             fetcher,

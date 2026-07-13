@@ -41,7 +41,9 @@ use crate::evm::cache::compute_filter_hash;
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmEvent, EvmPosition, LogIdx, Topic};
 use crate::evm::{LogPage, LogSpec};
-use crate::range_index::{Fetcher, RangeIndex, RangeIndexStore, RangeSpec, TimePos, TipSeed};
+use crate::range_index::{
+    PageFetcher, RangeIndex, RangeIndexStore, RangeSpec, SinglePageFetcher, TimePos, TipSeed,
+};
 use crate::share::Share;
 
 // ============================================================
@@ -149,8 +151,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
         tracing::debug!(
             chain_id = %self.chain_id(),
             filter = %filter,
-            from = %range.from,
-            to = %range.to,
+            %range,
             "bounded log hist opened"
         );
 
@@ -238,33 +239,29 @@ fn apply_topics(mut filter: Filter, topics: &[Option<Topic>; 4]) -> Filter {
 
 /// The gap-fill fetcher for one log filter: chunked `eth_getLogs` +
 /// header pre-caching so `LogSpec::resolve`'s synchronous timestamp fill
-/// always hits the cache.
+/// always hits the cache. Single-page for now — the adaptive slicing
+/// executor replaces this body (`docs/FETCH.md` §3).
 fn build_fetcher<P>(
     provider: ChainProvider<P>,
     address: Address,
     topics: [Option<Topic>; 4],
-) -> Fetcher<LogPage>
+) -> Arc<dyn PageFetcher<LogPage>>
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
-    Arc::new(move |from: BlockNumber, to: BlockNumber| {
+    Arc::new(SinglePageFetcher(move |range: BlockRange| {
         let provider = provider.clone();
-        Box::pin(async move {
+        async move {
             let filter = Filter::new()
                 .address(address)
-                .from_block(from.get())
-                .to_block(to.get());
+                .from_block(range.from.get())
+                .to_block(range.to.get());
             let filter = apply_topics(filter, &topics);
-            tracing::debug!(
-                from = %from,
-                to = %to,
-                blocks = (to - from.get()).get() + 1,
-                "eth_getLogs"
-            );
+            tracing::debug!(%range, blocks = %range.count(), "eth_getLogs");
             let logs = provider.get_logs(&filter).await?;
-            tracing::debug!(from = %from, to = %to, num_logs = logs.len(), "eth_getLogs returned");
+            tracing::debug!(%range, num_logs = logs.len(), "eth_getLogs returned");
 
-            let end_header = provider.ensure_block_header(to).await?;
+            let end_header = provider.ensure_block_header(range.to).await?;
             for log in &logs {
                 // Logs that carry their own timestamp need no header — the
                 // query path reads it straight off the persisted log.
@@ -277,13 +274,12 @@ where
             }
 
             Ok(LogPage {
-                from_block: from,
-                to_block: to,
+                range,
                 items: logs,
                 end_block_hash: end_header.hash,
             })
-        })
-    })
+        }
+    }))
 }
 
 // ============================================================
@@ -318,14 +314,10 @@ async fn ws_follow<P>(
             if let (Some(tip), Some(current)) = (last_tip, current)
                 && current > tip
             {
-                if let Err(e) = s
-                    .index()
-                    .ensure_cached(BlockRange::new(tip + 1, current))
-                    .await
-                {
+                let range = BlockRange::new(tip + 1, current);
+                if let Err(e) = s.index().share().ensure_cached(range).await {
                     tracing::warn!(
-                        from = %(tip + 1),
-                        to = %current,
+                        %range,
                         error = %e,
                         backoff_ms = backoff.as_millis(),
                         "reconnect gap-fill failed, retrying"
@@ -397,8 +389,7 @@ where
                 // arrivals relative to head coverage are absorbed by the
                 // tree's late-item rules.
                 s.on_events(&LogPage {
-                    from_block: bn,
-                    to_block: bn,
+                    range: BlockRange::new(bn, bn),
                     items: vec![log],
                     end_block_hash: bh,
                 });
@@ -430,8 +421,7 @@ where
                         // publishing, so this resolves from the cache.
                         let header = provider.ensure_block_header(h.number).await?;
                         s.on_events(&LogPage {
-                            from_block: tip + 1,
-                            to_block: h.number,
+                            range: BlockRange::new(tip + 1, h.number),
                             items: vec![],
                             end_block_hash: header.hash,
                         });

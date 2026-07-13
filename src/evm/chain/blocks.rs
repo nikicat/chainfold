@@ -23,7 +23,9 @@ use crate::chain::{Finality, TimeLocator, follow_head};
 use crate::evm::chain_provider::ChainProvider;
 use crate::evm::types::{BlockHash, EvmBlock, Gas, GasPrice};
 use crate::evm::{BlockPage, BlockSpec};
-use crate::range_index::{Fetcher, RangeIndex, RangeIndexStore, TimePos, TipSeed};
+use crate::range_index::{
+    PageFetcher, RangeIndex, RangeIndexStore, SinglePageFetcher, TimePos, TipSeed,
+};
 use crate::share::Share;
 
 // ============================================================
@@ -62,12 +64,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> EvmChain<P> {
     pub fn blocks_hist(&self, range: BlockRange) -> Hist<EvmBlock, BlockNumber> {
         let store = self.block_store(None);
 
-        tracing::debug!(
-            chain_id = %self.chain_id(),
-            from = %range.from,
-            to = %range.to,
-            "bounded block hist opened"
-        );
+        tracing::debug!(chain_id = %self.chain_id(), %range, "bounded block hist opened");
 
         Hist::new(store, block_cut_before(range.from), range.to)
     }
@@ -133,39 +130,38 @@ const MAX_BLOCK_FETCH: BlockCount = BlockCount::new(10_000);
 /// `eth_getBlockByNumber(n, false)` over the inclusive range. `hydrate =
 /// false` returns transaction hashes only — enough for the count without
 /// pulling bodies.
-fn build_block_fetcher<P>(provider: ChainProvider<P>) -> Fetcher<BlockPage>
+fn build_block_fetcher<P>(provider: ChainProvider<P>) -> Arc<dyn PageFetcher<BlockPage>>
 where
     P: Provider<Ethereum> + Clone + Send + Sync + 'static,
 {
-    Arc::new(move |from: BlockNumber, to: BlockNumber| {
+    Arc::new(SinglePageFetcher(move |range: BlockRange| {
         let provider = provider.clone();
-        Box::pin(async move {
-            let span = to.get().saturating_sub(from.get()) + 1;
-            if span > MAX_BLOCK_FETCH.get() {
+        async move {
+            let span = range.count();
+            if span > MAX_BLOCK_FETCH {
                 return Err(HistoryError::internal(format!(
-                    "blocks gap-fill span {span} exceeds {MAX_BLOCK_FETCH} \
-                     ({from}..={to}) — bound the walk with split() before iterating"
+                    "blocks gap-fill span {span} exceeds {MAX_BLOCK_FETCH} ({range}) \
+                     — bound the walk with split() before iterating"
                 )));
             }
-            tracing::debug!(from = %from, to = %to, blocks = span, "eth_getBlockByNumber batch");
+            tracing::debug!(%range, blocks = %span, "eth_getBlockByNumber batch");
 
-            let mut items: Vec<EvmBlock> = Vec::with_capacity(span as usize);
-            let mut n = from;
-            while n <= to {
-                let batch_to = to.min(n + (BLOCKS_PER_BATCH.get() - 1));
+            let mut items: Vec<EvmBlock> = Vec::with_capacity(span.get() as usize);
+            let mut n = range.from;
+            while n <= range.to {
+                let batch_to = range.to.min(n + (BLOCKS_PER_BATCH.get() - 1));
                 items.extend(fetch_block_batch(&provider, n, batch_to).await?);
                 n = batch_to + 1;
             }
 
             let end_block_hash = items.last().expect("span >= 1").hash;
             Ok(BlockPage {
-                from_block: from,
-                to_block: to,
+                range,
                 items,
                 end_block_hash,
             })
-        })
-    })
+        }
+    }))
 }
 
 /// One JSON-RPC batch of `eth_getBlockByNumber(n, false)` for every height

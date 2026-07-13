@@ -263,8 +263,9 @@ impl<S: RangeSpec> RangeIndex<S> {
 }
 
 /// Install an in-flight fetch placeholder at `end` covering `(start, end]`
-/// and return its [`Notify`]. Caller fills `(start, end]` via the fetcher
-/// and replaces the placeholder in `finalize_gap_fill`.
+/// and return its [`Notify`]. The owning walker fills `(start, end]` via the
+/// fetcher's page stream, shrinking the placeholder from the left as pages
+/// finalize ([`shrink_placeholder`]) and removing it with the final page.
 pub(super) fn install_gap_placeholder<S: RangeSpec>(
     tree: &mut BTreeMap<S::Pos, Range<S>>,
     start: S::Pos,
@@ -281,6 +282,31 @@ pub(super) fn install_gap_placeholder<S: RangeSpec>(
         },
     );
     notify
+}
+
+/// Shrink the in-flight placeholder keyed at `end` from the left: the prefix
+/// up to `new_start` has been finalized as real ranges by a delivered page.
+/// The entry is keyed by its (fixed) `end`, so this is an in-place `start`
+/// mutation — critically keeping the same [`Notify`], so waiters registered
+/// on it stay attached across pages.
+pub(super) fn shrink_placeholder<S: RangeSpec>(
+    tree: &mut BTreeMap<S::Pos, Range<S>>,
+    end: S::Pos,
+    new_start: S::Pos,
+) {
+    let Some(range) = tree.get_mut(&end) else {
+        debug_assert!(false, "shrink_placeholder: no placeholder at {end:?}");
+        return;
+    };
+    debug_assert!(
+        range.fetch.is_some(),
+        "shrink_placeholder on a settled range"
+    );
+    debug_assert!(
+        range.start <= new_start && new_start <= range.end,
+        "shrink_placeholder must move start right, within the range"
+    );
+    range.start = new_start;
 }
 
 fn assert_increasing<S: RangeSpec>(items: &[S::Item]) {

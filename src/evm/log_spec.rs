@@ -47,13 +47,7 @@ impl RangeSpec for LogSpec {
     }
 
     fn page_bounds(page: &LogPage) -> BlockRange {
-        BlockRange::new(page.from_block, page.to_block)
-    }
-
-    fn page_tip(page: &LogPage) -> EvmPosition {
-        // End-of-block cut: a Hist ending here iterates every log up to and
-        // including the last one in `to_block`.
-        EvmPosition::new(page.to_block, LogIdx::MAX)
+        page.range
     }
 
     fn resolve(&self, item: &LogRef) -> Result<Positioned<EvmEvent, EvmPosition>, HistoryError> {
@@ -98,7 +92,7 @@ impl RangeSpec for LogSpec {
             .coverage()
             .record_scanned_range(
                 &ScanPartition::Filter(self.filter_hash),
-                BlockRange::new(page.from_block, page.to_block),
+                page.range,
                 page.end_block_hash.into(),
             )
             .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))
@@ -247,8 +241,7 @@ mod tests {
             never_fetch::<LogSpec>(),
         ));
         idx.insert_page(&LogPage {
-            from_block: bn(100),
-            to_block: bn(200),
+            range: BlockRange::from_u64(100, 200),
             items: logs,
             end_block_hash: HASH_B,
         });
@@ -280,8 +273,7 @@ mod tests {
             never_fetch::<LogSpec>(),
         ));
         idx.insert_page(&LogPage {
-            from_block: bn(100),
-            to_block: bn(200),
+            range: BlockRange::from_u64(100, 200),
             items: vec![log],
             end_block_hash: HASH_A,
         });
@@ -305,8 +297,7 @@ mod tests {
         let mut pending = mk_log(bn(150), LogIdx::ZERO, HASH_A);
         pending.block_hash = None;
         let page = LogPage {
-            from_block: bn(100),
-            to_block: bn(200),
+            range: BlockRange::from_u64(100, 200),
             items: vec![pending, mk_log(bn(160), LogIdx::ZERO, HASH_B)],
             end_block_hash: HASH_B,
         };

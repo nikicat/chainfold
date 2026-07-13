@@ -32,13 +32,12 @@ impl BlockSpec {
     }
 }
 
-/// A page of consecutive blocks covering `[from_block, to_block]` from one
+/// A page of consecutive blocks covering the inclusive `range` from one
 /// gap fill: `items` is dense ascending — exactly one [`EvmBlock`] per
 /// height in the range.
 #[derive(Clone)]
 pub struct BlockPage {
-    pub from_block: BlockNumber,
-    pub to_block: BlockNumber,
+    pub range: BlockRange,
     pub items: Vec<EvmBlock>,
     /// The last item's hash — recorded as the coverage range's end hash so
     /// a reorg at the range end invalidates the coverage claim.
@@ -61,11 +60,7 @@ impl RangeSpec for BlockSpec {
     }
 
     fn page_bounds(page: &BlockPage) -> BlockRange {
-        BlockRange::new(page.from_block, page.to_block)
-    }
-
-    fn page_tip(page: &BlockPage) -> BlockNumber {
-        page.to_block
+        page.range
     }
 
     fn resolve(&self, item: &EvmBlock) -> Result<Positioned<EvmBlock, BlockNumber>, HistoryError> {
@@ -83,7 +78,7 @@ impl RangeSpec for BlockSpec {
             .coverage()
             .record_scanned_range(
                 &ScanPartition::Blocks,
-                BlockRange::new(page.from_block, page.to_block),
+                page.range,
                 page.end_block_hash.into(),
             )
             .map_err(|e| HistoryError::internal(format!("record_scanned_range: {e}")))
@@ -149,7 +144,7 @@ mod tests {
     use crate::arch::{Position, Timestamp};
     use crate::chain::{ChunkSize, TxCount};
     use crate::evm::types::{Gas, GasPrice};
-    use crate::range_index::{Fetcher, RangeIndex, never_fetch};
+    use crate::range_index::{RangeIndex, SinglePageFetcher, never_fetch};
     use crate::share::Share;
     use alloy::primitives::{Address, B256, U256};
 
@@ -182,8 +177,7 @@ mod tests {
     fn mk_page(from: u64, to: u64) -> BlockPage {
         let items: Vec<EvmBlock> = (from..=to).map(mk_block).collect();
         BlockPage {
-            from_block: bn(from),
-            to_block: bn(to),
+            range: BlockRange::from_u64(from, to),
             end_block_hash: items.last().expect("non-empty page").hash,
             items,
         }
@@ -233,7 +227,7 @@ mod tests {
         // Fresh index over the same durable store; never_fetch proves the
         // walk is served entirely from the lazy-loaded window.
         let idx = std::sync::Arc::new(mk_index_over(store));
-        idx.ensure_window_loaded(BlockRange::new(bn(100), bn(104)))
+        idx.ensure_window_loaded(BlockRange::from_u64(100, 104))
             .unwrap();
         assert_eq!(walk(&idx, 99, 104).await, vec![100, 101, 102, 103, 104]);
     }
@@ -247,12 +241,12 @@ mod tests {
 
         let store = mk_cache();
         let calls = Arc::new(AtomicUsize::new(0));
-        let fetcher: Fetcher<BlockPage> = {
+        let fetcher = {
             let calls = calls.share();
-            Arc::new(move |from: BlockNumber, to: BlockNumber| {
+            Arc::new(SinglePageFetcher(move |range: BlockRange| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move { Ok(mk_page(from.get(), to.get())) })
-            })
+                async move { Ok(mk_page(range.from.get(), range.to.get())) }
+            }))
         };
         let idx = Arc::new(RangeIndex::with_chunk_size(
             BlockSpec::new(store.share()),
@@ -275,7 +269,7 @@ mod tests {
         // A second index over the same store answers warm — the gap fill
         // persisted both rows and coverage.
         let idx2 = std::sync::Arc::new(mk_index_over(store));
-        idx2.ensure_window_loaded(BlockRange::new(bn(100), bn(104)))
+        idx2.ensure_window_loaded(BlockRange::from_u64(100, 104))
             .unwrap();
         assert_eq!(walk(&idx2, 99, 104).await, vec![100, 101, 102, 103, 104]);
     }
@@ -306,15 +300,6 @@ mod tests {
         assert_eq!(spec.load_pos(serde_json::json!("not a number")), None);
     }
 
-    #[test]
-    fn page_tip_agrees_with_head_pos() {
-        let page = mk_page(100, 104);
-        assert_eq!(
-            BlockSpec::page_tip(&page),
-            <BlockSpec as RangeSpec>::head_pos(bn(104))
-        );
-    }
-
     #[tokio::test]
     async fn walk_from_bottom_including_genesis() {
         use std::sync::Arc;
@@ -328,12 +313,12 @@ mod tests {
             .unwrap();
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let fetcher: Fetcher<BlockPage> = {
+        let fetcher = {
             let calls = calls.share();
-            Arc::new(move |from: BlockNumber, to: BlockNumber| {
+            Arc::new(SinglePageFetcher(move |range: BlockRange| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move { Ok(mk_page(from.get(), to.get())) })
-            })
+                async move { Ok(mk_page(range.from.get(), range.to.get())) }
+            }))
         };
         let idx = Arc::new(RangeIndex::new(BlockSpec::new(store), fetcher));
 

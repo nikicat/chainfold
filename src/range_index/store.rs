@@ -120,10 +120,10 @@ impl<S: RangeSpec> RangeIndexStore<S> {
 
     /// Live delivery: install a page into the in-memory tree (persisted
     /// asynchronously when a drain is attached), then advance the tip to
-    /// the page's end.
+    /// the end-of-block cut of the page's last block.
     pub fn on_events(&self, page: &S::Page) {
         self.index.insert_page(page);
-        self.on_bump(S::page_tip(page));
+        self.on_bump(S::head_pos(S::page_bounds(page).to));
     }
 
     /// The source's `end` advanced (or is being seeded). Monotonic: keeps

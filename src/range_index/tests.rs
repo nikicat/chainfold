@@ -11,13 +11,16 @@
 //! tests (`first_at_or_after` / `last_at_or_before`) were dropped with
 //! `nav.rs` (dead since Phase 3).
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use futures_util::stream::unfold;
+use tokio::sync::Semaphore;
 use tokio::task::yield_now;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use super::gap_fill::never_fetch;
 use super::testkit::{MockItem, MockPage, MockPos, MockPubPos, MockSpec, MockStore};
@@ -39,8 +42,7 @@ fn item(block: u64) -> MockItem {
 /// A page over `[from, to]` carrying `items`.
 fn page(from: u64, to: u64, items: Vec<MockItem>) -> MockPage {
     MockPage {
-        from_block: bn(from),
-        to_block: bn(to),
+        range: BlockRange::from_u64(from, to),
         items,
     }
 }
@@ -225,18 +227,17 @@ async fn items_walks_filled_ranges_yields_in_order() {
 async fn items_into_uncached_gap_calls_store_and_caches() {
     let store = mk_store();
     let calls = Arc::new(AtomicUsize::new(0));
-    let fetcher: Fetcher<MockPage> = {
+    let fetcher = {
         let calls = calls.share();
-        Arc::new(move |from, to| {
+        Arc::new(SinglePageFetcher(move |range: BlockRange| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async move {
+            async move {
                 Ok(MockPage {
-                    from_block: from,
-                    to_block: to,
+                    range,
                     items: vec![item(150)],
                 })
-            })
-        })
+            }
+        }))
     };
     let idx = Arc::new(RangeIndex::new(MockSpec::new(store.share()), fetcher));
 
@@ -272,20 +273,19 @@ async fn items_into_uncached_gap_calls_store_and_caches() {
 #[tokio::test]
 async fn concurrent_searches_in_same_gap_fire_one_fetch() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let fetcher: Fetcher<MockPage> = {
+    let fetcher = {
         let calls = calls.share();
-        Arc::new(move |from, to| {
+        Arc::new(SinglePageFetcher(move |range: BlockRange| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async move {
+            async move {
                 // Give peers time to enter the wait state.
                 sleep(Duration::from_millis(50)).await;
                 Ok(MockPage {
-                    from_block: from,
-                    to_block: to,
+                    range,
                     items: vec![item(150)],
                 })
-            })
-        })
+            }
+        }))
     };
     let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
@@ -443,6 +443,498 @@ async fn gap_fill_mid_chunk_start_is_not_rounded_down() {
 }
 
 // ============================================================
+// Streaming page contract — per-page finalize
+// ============================================================
+
+/// A scripted streaming fetcher: each `fetch` call pops the next script (a
+/// list of page results emitted as one stream), and every emission first
+/// acquires one gate permit — so tests control exactly when each page
+/// lands. Panics on a fetch call with no script left, making warm re-walks
+/// fetch-free by construction.
+struct ScriptedFetcher {
+    scripts: Mutex<VecDeque<Vec<Result<MockPage, HistoryError>>>>,
+    gate: Arc<Semaphore>,
+    fetched: Mutex<Vec<BlockRange>>,
+}
+
+impl ScriptedFetcher {
+    /// Starts fully gated — nothing emits until [`Self::release_pages`].
+    fn new(scripts: Vec<Vec<Result<MockPage, HistoryError>>>) -> Arc<Self> {
+        Arc::new(Self {
+            scripts: Mutex::new(scripts.into()),
+            gate: Arc::new(Semaphore::new(0)),
+            fetched: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Let `n` more pages (or stream errors) emit.
+    fn release_pages(&self, n: usize) {
+        self.gate.add_permits(n);
+    }
+
+    /// Every `fetch` call's requested range, in call order.
+    fn fetch_calls(&self) -> Vec<BlockRange> {
+        self.fetched.lock().unwrap().clone()
+    }
+}
+
+impl PageFetcher<MockPage> for ScriptedFetcher {
+    fn fetch(&self, range: BlockRange) -> PageStream<MockPage> {
+        self.fetched.lock().unwrap().push(range);
+        let script = self
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected fetch call: no script left");
+        let gate = self.gate.share();
+        Box::pin(unfold(
+            (script.into_iter(), gate),
+            |(mut pages, gate)| async move {
+                let next = pages.next()?;
+                gate.acquire().await.expect("gate closed").forget();
+                Some((next, (pages, gate)))
+            },
+        ))
+    }
+}
+
+/// Each delivered page finalizes on arrival: its items yield and its
+/// coverage persists while later pages of the same gap are still in
+/// flight — time-to-first-item is one page, not the whole gap.
+#[tokio::test]
+async fn pages_finalize_incrementally() {
+    let store = mk_store();
+    let fetcher = ScriptedFetcher::new(vec![vec![
+        Ok(page(100, 170, vec![item(150)])),
+        Ok(page(171, 240, vec![item(200)])),
+        Ok(page(241, 300, vec![item(280)])),
+    ]]);
+    let idx = Arc::new(RangeIndex::new(
+        MockSpec::new(store.share()),
+        fetcher.share(),
+    ));
+
+    let mut stream = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+
+    // Page 1 lands; its item yields while pages 2-3 are still gated.
+    fetcher.release_pages(1);
+    let first = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("first item must yield after page 1, before later pages")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.item.block, bn(150));
+    assert_eq!(
+        store.scanned_ranges(),
+        vec![BlockRange::from_u64(100, 170)],
+        "page 1 persisted before pages 2-3 landed"
+    );
+
+    fetcher.release_pages(2);
+    assert_eq!(collect_blocks(stream).await, vec![bn(200), bn(280)]);
+    assert_eq!(
+        store.scanned_ranges(),
+        vec![
+            BlockRange::from_u64(100, 170),
+            BlockRange::from_u64(171, 240),
+            BlockRange::from_u64(241, 300),
+        ],
+        "one coverage row per page"
+    );
+    assert_eq!(fetcher.fetch_calls(), vec![BlockRange::from_u64(100, 300)]);
+
+    // Warm re-walk: fully cached — a fetch would panic (no script left).
+    let again = collect_blocks(idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    ))
+    .await;
+    assert_eq!(again, vec![bn(150), bn(200), bn(280)]);
+}
+
+/// An `Err` item ends the stream: the delivered prefix stands as coverage,
+/// the suffix stays a gap — and the retry fetches only that suffix.
+#[tokio::test]
+async fn stream_error_keeps_prefix_suffix_stays_gap() {
+    let store = mk_store();
+    let fetcher = ScriptedFetcher::new(vec![
+        vec![
+            Ok(page(100, 200, vec![item(150)])),
+            Err(HistoryError::internal("mid-gap failure")),
+        ],
+        vec![Ok(page(201, 300, vec![item(250)]))],
+    ]);
+    fetcher.release_pages(10); // no gating in this test
+    let idx = Arc::new(RangeIndex::new(
+        MockSpec::new(store.share()),
+        fetcher.share(),
+    ));
+
+    let mut stream = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        first.item.block,
+        bn(150),
+        "prefix item yields before the error"
+    );
+    assert!(
+        stream.next().await.unwrap().is_err(),
+        "the stream error surfaces to the walker"
+    );
+    assert!(stream.next().await.is_none());
+    assert_eq!(
+        store.scanned_ranges(),
+        vec![BlockRange::from_u64(100, 200)],
+        "the delivered prefix is persisted coverage"
+    );
+
+    // The retry walks the cached prefix and fetches ONLY the suffix.
+    let again = collect_blocks(idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    ))
+    .await;
+    assert_eq!(again, vec![bn(150), bn(250)]);
+    assert_eq!(
+        fetcher.fetch_calls(),
+        vec![
+            BlockRange::from_u64(100, 300),
+            BlockRange::from_u64(201, 300),
+        ],
+        "the retry covers only the suffix past the delivered prefix"
+    );
+}
+
+/// A stream that ends cleanly *before* covering its gap is a contract
+/// violation surfaced as a loud error — silently keeping the suffix a gap
+/// would make the very next walk re-fetch it, looping forever against a
+/// deterministic short-streaming fetcher. The delivered prefix stands.
+#[tokio::test]
+async fn stream_ending_short_of_gap_errors_loudly() {
+    let store = mk_store();
+    let fetcher = ScriptedFetcher::new(vec![
+        vec![Ok(page(100, 200, vec![item(150)]))], // ends short of 300
+        vec![Ok(page(201, 300, vec![item(250)]))], // the retry's suffix fetch
+    ]);
+    fetcher.release_pages(10);
+    let idx = Arc::new(RangeIndex::new(
+        MockSpec::new(store.share()),
+        fetcher.share(),
+    ));
+
+    let mut stream = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    assert_eq!(stream.next().await.unwrap().unwrap().item.block, bn(150));
+    let err = stream.next().await.unwrap().unwrap_err();
+    assert!(
+        err.to_string().contains("ended before covering"),
+        "the short stream must surface as a contract-violation error: {err}"
+    );
+    assert!(stream.next().await.is_none());
+    assert_eq!(
+        store.scanned_ranges(),
+        vec![BlockRange::from_u64(100, 200)],
+        "the delivered prefix stands as coverage"
+    );
+
+    // The retry walks the cached prefix and fetches only the suffix.
+    let again = collect_blocks(idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    ))
+    .await;
+    assert_eq!(again, vec![bn(150), bn(250)]);
+    assert_eq!(
+        fetcher.fetch_calls(),
+        vec![
+            BlockRange::from_u64(100, 300),
+            BlockRange::from_u64(201, 300),
+        ]
+    );
+}
+
+/// A persist failure on an *interior* page aborts the remainder exactly
+/// like a fetch error: the shrunk placeholder is released, the suffix
+/// stays a gap, and the retry re-fetches only the suffix. (The failed
+/// page recorded no durable coverage; in-process its items still serve
+/// from the tree.)
+#[tokio::test]
+async fn persist_error_on_interior_page_aborts_the_suffix() {
+    let store = mk_store();
+    let fetcher = ScriptedFetcher::new(vec![
+        vec![
+            Ok(page(100, 200, vec![item(150)])), // persist fails on this one
+            Ok(page(201, 300, vec![item(250)])), // never reached
+        ],
+        vec![Ok(page(201, 300, vec![item(250)]))], // the retry's suffix fetch
+    ]);
+    fetcher.release_pages(10);
+    let idx = Arc::new(RangeIndex::new(
+        MockSpec::new(store.share()),
+        fetcher.share(),
+    ));
+
+    store.fail_next_persist();
+    let mut stream = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    assert!(
+        stream.next().await.unwrap().is_err(),
+        "the persist failure surfaces to the walker"
+    );
+    assert!(stream.next().await.is_none());
+    assert!(
+        store.scanned_ranges().is_empty(),
+        "the failed page recorded no durable coverage"
+    );
+
+    // Retry: the prefix serves from the in-memory tree; only the suffix is
+    // fetched, and its coverage row is the only one recorded.
+    let again = timeout(
+        Duration::from_secs(5),
+        collect_blocks(idx.share().items(
+            MockPos::before_block(bn(100)),
+            MockPos::end_of_block(bn(300)),
+        )),
+    )
+    .await
+    .expect("the aborted fill must not strand its shrunk placeholder");
+    assert_eq!(again, vec![bn(150), bn(250)]);
+    assert_eq!(
+        fetcher.fetch_calls(),
+        vec![
+            BlockRange::from_u64(100, 300),
+            BlockRange::from_u64(201, 300),
+        ]
+    );
+    assert_eq!(store.scanned_ranges(), vec![BlockRange::from_u64(201, 300)]);
+}
+
+/// A peer parked on an in-flight fill advances as soon as a page lands —
+/// it does not wait for the whole gap.
+#[tokio::test]
+async fn waiter_advances_on_partial_delivery() {
+    let fetcher = ScriptedFetcher::new(vec![vec![
+        Ok(page(100, 200, vec![item(150)])),
+        Ok(page(201, 300, vec![item(250)])),
+    ]]);
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher.share()));
+
+    // Owner: installs the placeholder, parks awaiting page 1's permit.
+    let owner = {
+        let idx = idx.share();
+        tokio::spawn(async move {
+            collect_blocks(idx.items(
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(300)),
+            ))
+            .await
+        })
+    };
+    while fetcher.fetch_calls().is_empty() {
+        yield_now().await;
+    }
+
+    // Waiter: coalesces onto the owner's fill; parked while nothing landed.
+    let mut waiter = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    assert!(
+        timeout(Duration::from_millis(100), waiter.next())
+            .await
+            .is_err(),
+        "no page landed yet — the waiter must still be parked"
+    );
+
+    // Page 1 lands; page 2 stays gated — the waiter advances regardless.
+    fetcher.release_pages(1);
+    let first = timeout(Duration::from_secs(5), waiter.next())
+        .await
+        .expect("waiter must advance once page 1 lands, before the gap completes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.item.block, bn(150));
+
+    fetcher.release_pages(1);
+    assert_eq!(collect_blocks(waiter).await, vec![bn(250)]);
+    assert_eq!(owner.await.unwrap(), vec![bn(150), bn(250)]);
+    assert_eq!(
+        fetcher.fetch_calls().len(),
+        1,
+        "one fetch stream served both walkers"
+    );
+}
+
+/// Dropping a walker mid-fill releases the placeholder remainder — a later
+/// walker must be able to fill the suffix instead of parking forever on an
+/// orphaned notify.
+#[tokio::test]
+async fn dropping_mid_fill_walker_frees_placeholder() {
+    let fetcher = ScriptedFetcher::new(vec![
+        vec![
+            Ok(page(100, 200, vec![item(150)])),
+            Ok(page(201, 300, vec![item(250)])), // never released to the owner
+        ],
+        vec![Ok(page(201, 300, vec![item(250)]))], // the retry's suffix fetch
+    ]);
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher.share()));
+
+    let mut owner = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    fetcher.release_pages(1);
+    let first = owner.next().await.unwrap().unwrap();
+    assert_eq!(first.item.block, bn(150));
+    // Page 2 never landed: the fill still holds the placeholder over the
+    // suffix. Dropping the walker must release it.
+    drop(owner);
+
+    fetcher.release_pages(10);
+    let blocks = timeout(
+        Duration::from_secs(5),
+        collect_blocks(idx.share().items(
+            MockPos::before_block(bn(100)),
+            MockPos::end_of_block(bn(300)),
+        )),
+    )
+    .await
+    .expect("dropped walker must not strand its placeholder");
+    assert_eq!(blocks, vec![bn(150), bn(250)]);
+    assert_eq!(
+        fetcher.fetch_calls(),
+        vec![
+            BlockRange::from_u64(100, 300),
+            BlockRange::from_u64(201, 300),
+        ]
+    );
+}
+
+/// Per-page finalize integrates live inserts into the *delivered prefix*
+/// mid-fill: once page 1 lands, its region is real ranges rather than
+/// placeholder, so a late live item there splits in immediately — under
+/// the old whole-gap placeholder the same insert was silently skipped
+/// ("range mid-fetch") until the entire gap finished.
+#[tokio::test]
+async fn late_insert_into_finalized_prefix_lands_mid_fill() {
+    let fetcher = ScriptedFetcher::new(vec![vec![
+        Ok(page(100, 200, vec![item(150)])),
+        Ok(page(201, 300, vec![item(250)])),
+    ]]);
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher.share()));
+
+    let mut stream = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    fetcher.release_pages(1);
+    assert_eq!(stream.next().await.unwrap().unwrap().item.block, bn(150));
+
+    // Page 1's region is finalized while page 2 is still in flight — a
+    // live insert into that prefix must land, not be dropped.
+    idx.insert_page(&page(160, 160, vec![item(160)]));
+    fetcher.release_pages(1);
+    assert_eq!(collect_blocks(stream).await, vec![bn(160), bn(250)]);
+}
+
+/// A persist failure surfaces to the fill owner but still wakes parked
+/// waiters — a waiter must never hang on a placeholder that no longer
+/// exists. (Regression: the pre-streaming code propagated the persist
+/// error *before* `notify_waiters`, stranding every registered waiter.)
+#[tokio::test]
+async fn persist_error_wakes_waiters() {
+    let store = mk_store();
+    let fetcher = ScriptedFetcher::new(vec![vec![Ok(page(100, 300, vec![item(150)]))]]);
+    let idx = Arc::new(RangeIndex::new(
+        MockSpec::new(store.share()),
+        fetcher.share(),
+    ));
+
+    // Owner installs the placeholder and parks awaiting the page permit.
+    let mut owner = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    assert!(
+        timeout(Duration::from_millis(100), owner.next())
+            .await
+            .is_err()
+    );
+
+    // Waiter parks on the in-flight fill.
+    let mut waiter = idx.share().items(
+        MockPos::before_block(bn(100)),
+        MockPos::end_of_block(bn(300)),
+    );
+    assert!(
+        timeout(Duration::from_millis(100), waiter.next())
+            .await
+            .is_err()
+    );
+
+    // The page lands but persisting it fails: the owner surfaces the error;
+    // the waiter is woken and completes over the in-memory ranges.
+    store.fail_next_persist();
+    fetcher.release_pages(1);
+    assert!(
+        owner.next().await.unwrap().is_err(),
+        "the persist failure surfaces to the fill owner"
+    );
+    let woken = timeout(Duration::from_secs(5), waiter.next())
+        .await
+        .expect("a persist failure must still wake parked waiters")
+        .unwrap()
+        .unwrap();
+    assert_eq!(woken.item.block, bn(150));
+}
+
+/// Cancelling an `ensure_cached` future mid-fill releases the placeholder,
+/// exactly like dropping an `items()` walker.
+#[tokio::test]
+async fn cancelling_ensure_cached_frees_placeholder() {
+    let fetcher = ScriptedFetcher::new(vec![
+        vec![Ok(page(100, 300, vec![item(150)]))], // owner's — never released
+        vec![Ok(page(100, 300, vec![item(150)]))], // retry after cancellation
+    ]);
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher.share()));
+
+    let owner = {
+        let idx = idx.share();
+        tokio::spawn(async move { idx.ensure_cached(BlockRange::from_u64(100, 300)).await })
+    };
+    while fetcher.fetch_calls().is_empty() {
+        yield_now().await;
+    }
+    owner.abort(); // cancel mid-fill, parked before page 1
+    let _ = owner.await;
+
+    fetcher.release_pages(10);
+    timeout(
+        Duration::from_secs(5),
+        idx.share().ensure_cached(BlockRange::from_u64(100, 300)),
+    )
+    .await
+    .expect("cancelled ensure_cached must not strand its placeholder")
+    .unwrap();
+    assert_eq!(
+        fetcher.fetch_calls().len(),
+        2,
+        "the retry refetches the gap"
+    );
+}
+
+// ============================================================
 // R6: shared-index concurrency coverage
 // ============================================================
 //
@@ -463,27 +955,65 @@ fn recording_fetcher(
     fetched: Arc<Mutex<Vec<BlockRange>>>,
     blocks: Vec<BlockNumber>,
     delay: Duration,
-) -> Fetcher<MockPage> {
-    Arc::new(move |from: BlockNumber, to: BlockNumber| {
+) -> Arc<dyn PageFetcher<MockPage>> {
+    Arc::new(SinglePageFetcher(move |range: BlockRange| {
         calls.fetch_add(1, Ordering::SeqCst);
-        fetched.lock().unwrap().push(BlockRange::new(from, to));
+        fetched.lock().unwrap().push(range);
         let blocks = blocks.clone();
-        Box::pin(async move {
+        async move {
             if !delay.is_zero() {
                 sleep(delay).await;
             }
             let items = blocks
                 .iter()
-                .filter(|b| **b >= from && **b <= to)
+                .filter(|b| **b >= range.from && **b <= range.to)
                 .map(|b| MockItem::new(*b, 0))
                 .collect();
-            Ok(MockPage {
-                from_block: from,
-                to_block: to,
-                items,
-            })
-        })
-    })
+            Ok(MockPage { range, items })
+        }
+    }))
+}
+
+/// The streaming sibling of [`recording_fetcher`]: splits each requested
+/// gap into `pages` contiguous sub-ranges and paces one page per `delay`,
+/// so peers race the fill *between* pages — the interleavings the
+/// single-page fixtures never produce.
+struct PacedPagedFetcher {
+    calls: Arc<AtomicUsize>,
+    fetched: Arc<Mutex<Vec<BlockRange>>>,
+    blocks: Vec<BlockNumber>,
+    pages: u64,
+    delay: Duration,
+}
+
+impl PageFetcher<MockPage> for PacedPagedFetcher {
+    fn fetch(&self, range: BlockRange) -> PageStream<MockPage> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.fetched.lock().unwrap().push(range);
+        let per = range.count().get().div_ceil(self.pages);
+        let mut subs = Vec::new();
+        let mut from = range.from;
+        while from <= range.to {
+            let to = range.to.min(from + (per - 1));
+            subs.push(BlockRange::new(from, to));
+            from = to + 1;
+        }
+        let blocks = self.blocks.clone();
+        let delay = self.delay;
+        Box::pin(unfold(
+            (subs.into_iter(), blocks),
+            move |(mut subs, blocks)| async move {
+                let sub = subs.next()?;
+                sleep(delay).await;
+                let items = blocks
+                    .iter()
+                    .filter(|b| **b >= sub.from && **b <= sub.to)
+                    .map(|b| MockItem::new(*b, 0))
+                    .collect();
+                Some((Ok(MockPage { range: sub, items }), (subs, blocks)))
+            },
+        ))
+    }
 }
 
 /// Drain an `items()` stream to the block numbers it yields.
@@ -654,6 +1184,92 @@ async fn overlapping_gaps_never_double_fetch() {
     assert_ranges_tile(&fetched.lock().unwrap(), bn(100), bn(400));
 }
 
+/// Streaming analog of `concurrent_searches_same_gap_one_fetch_multi_thread`:
+/// truly parallel walkers race one *paged* fill — pages land while peers are
+/// parked, the placeholder shrinks between them — yet all coalesce onto a
+/// single fetch stream and every walker sees every item exactly once, in
+/// order (no dup, no drop, no TOCTOU refetch of the shrunk remainder).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paged_fill_singleflight_multi_thread() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fetched = Arc::new(Mutex::new(Vec::new()));
+    let fetcher = Arc::new(PacedPagedFetcher {
+        calls: calls.share(),
+        fetched: fetched.share(),
+        blocks: vec![bn(120), bn(150), bn(180)],
+        pages: 3,
+        delay: Duration::from_millis(20),
+    });
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let idx = idx.share();
+        handles.push(tokio::spawn(async move {
+            collect_blocks(idx.items(
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(200)),
+            ))
+            .await
+        }));
+    }
+    for h in handles {
+        assert_eq!(h.await.unwrap(), vec![bn(120), bn(150), bn(180)]);
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "one paged fetch stream served all parallel walkers"
+    );
+    assert_eq!(
+        *fetched.lock().unwrap(),
+        vec![BlockRange::from_u64(100, 200)]
+    );
+}
+
+/// Overlapping windows over *paged* fills: however the race resolves, the
+/// gap-level fetches tile the union exactly — the shrink-from-left
+/// placeholder bookkeeping never lets the overlap double-fetch — and each
+/// walker sees precisely its own window's items.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_paged_fills_never_double_fetch() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fetched = Arc::new(Mutex::new(Vec::new()));
+    let fetcher = Arc::new(PacedPagedFetcher {
+        calls: calls.share(),
+        fetched: fetched.share(),
+        blocks: vec![bn(150), bn(250), bn(350)],
+        pages: 3,
+        delay: Duration::from_millis(15),
+    });
+    let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
+
+    // Windows overlap on blocks (200, 300].
+    let a = {
+        let idx = idx.share();
+        tokio::spawn(async move {
+            collect_blocks(idx.items(
+                MockPos::before_block(bn(100)),
+                MockPos::end_of_block(bn(300)),
+            ))
+            .await
+        })
+    };
+    let b = {
+        let idx = idx.share();
+        tokio::spawn(async move {
+            collect_blocks(idx.items(
+                MockPos::before_block(bn(200)),
+                MockPos::end_of_block(bn(400)),
+            ))
+            .await
+        })
+    };
+    assert_eq!(a.await.unwrap(), vec![bn(150), bn(250)]);
+    assert_eq!(b.await.unwrap(), vec![bn(250), bn(350)]);
+    assert_ranges_tile(&fetched.lock().unwrap(), bn(100), bn(400));
+}
+
 /// Reader vs. writer, deterministic. The walker is parked mid-walk inside the
 /// first (front) gap fetch — holding a placeholder over only that gap, not the
 /// rest of the window. While it is parked, a writer `insert_page`s a block
@@ -667,33 +1283,29 @@ async fn insert_page_ahead_of_walk_cursor_is_yielded_once() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let calls = Arc::new(AtomicUsize::new(0));
-    let fetcher: Fetcher<MockPage> = {
+    let fetcher = {
         let entered = entered.share();
         let release = release.share();
         let calls = calls.share();
-        Arc::new(move |from: BlockNumber, to: BlockNumber| {
+        Arc::new(SinglePageFetcher(move |range: BlockRange| {
             // Only the first fetch (the front gap) parks; later tail-gap
             // fetches proceed immediately and return nothing.
             let n = calls.fetch_add(1, Ordering::SeqCst);
             let entered = entered.share();
             let release = release.share();
-            Box::pin(async move {
+            async move {
                 if n == 0 {
                     entered.notify_one();
                     release.notified().await;
                 }
-                let items = if from <= bn(150) && to >= bn(150) {
+                let items = if range.from <= bn(150) && range.to >= bn(150) {
                     vec![item(150)]
                 } else {
                     vec![]
                 };
-                Ok(MockPage {
-                    from_block: from,
-                    to_block: to,
-                    items,
-                })
-            })
-        })
+                Ok(MockPage { range, items })
+            }
+        }))
     };
     let idx = Arc::new(RangeIndex::new(MockSpec::new(mk_store()), fetcher));
 
@@ -761,8 +1373,7 @@ async fn walk_races_late_inserts_no_dup_no_drop() {
         tokio::spawn(async move {
             for b in late_blocks {
                 idx.insert_page(&MockPage {
-                    from_block: b,
-                    to_block: b,
+                    range: BlockRange::new(b, b),
                     items: vec![MockItem::new(b, 0)],
                 });
                 yield_now().await;

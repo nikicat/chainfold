@@ -46,11 +46,13 @@ follows; it comes immediately after.
 
 ### Deliverables (build order)
 
-1. **Streaming page contract** — `src/range_index/spec.rs` + `gap_fill.rs`:
-   the `Fetcher` closure alias becomes a named `PageFetcher` trait returning
-   a stream of in-order contiguous pages; gap-fill finalizes/persists/
-   notifies per page; both families adapt as single-page streams. Pure
-   refactor, no behavior change ([`FETCH.md` §2](./FETCH.md)).
+1. ~~**Streaming page contract**~~ — ✅ shipped: `PageFetcher`/`PageStream`
+   + `SinglePageFetcher` shim in `spec.rs`; per-page finalize/persist/notify
+   via `ActiveFill` in `gap_fill.rs` (as-built notes in
+   [`FETCH.md` §2](./FETCH.md)); both families adapt as single-page streams.
+   Also fixed three latent gap-fill bugs the streaming shape made acute
+   (lost wakeup, persist-error notify skip, cancellation orphaning a
+   placeholder — each pinned by a regression test).
 2. **Slicing executor** — new `src/evm/chain/fetch.rs` + a shared
    per-endpoint budget in `chain_provider.rs`: slice plan by AIMD working
    size (halve once per generation, additive regrow), bounded-parallel
@@ -278,7 +280,12 @@ finality-driven cleanup. Flagged on the method in `src/cache/coverage.rs`.
 
 The R6 concurrency suite (`src/range_index/tests.rs`) covers parallelism,
 disjoint/overlapping gaps, and reader-vs-writer behaviourally, but doesn't
-*prove* the singleflight handshake race-free under all interleavings.
+*prove* the singleflight handshake race-free under all interleavings. The
+streaming-page rework added the enable-then-recheck wait protocol
+(`wait_for_progress` — registration before the coverage re-check, closing
+the lost-wakeup window) and per-page `notify_waiters`; the window it closes
+cannot be forced deterministically from a test, so that protocol belongs in
+the same loom model.
 `loom` doesn't wrap the async `tokio::sync::Notify` path directly — extract
 the coordination protocol (install-placeholder → fetch → `notify_waiters`,
 vs. peer register-wait) into a sync analog (`Mutex` + condvar/atomic flag) and
