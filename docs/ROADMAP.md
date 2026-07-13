@@ -6,10 +6,9 @@
 > [`STYLE.md`](./STYLE.md); dev setup in [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 > Shipped work is not ledgered here — `git log` and `ARCHITECTURE.md` cover it.
 >
-> **Live agenda: adaptive fetch** ([`FETCH.md`](./FETCH.md)), then
-> **finality** (pruning + best/safe wiring), plus the deferrals and backlog
-> below. Run `cargo test --all-features` for the live test count — this file
-> deliberately pins no number that goes stale.
+> **Live agenda: finality** (pruning + best/safe wiring), plus the
+> deferrals and backlog below. Run `cargo test --all-features` for the
+> live test count — this file deliberately pins no number that goes stale.
 
 ---
 
@@ -29,90 +28,7 @@
 
 ---
 
-## Adaptive fetch (next up)
-
-**Goal:** backfills complete against any provider's `eth_getLogs` limits
-(range width, log count, response size) with no per-provider tuning, at a
-near-optimal RPC call count; provider config shrinks to an API key.
-Detailed design (contracts, invariants, AIMD mechanics, adaptor trait,
-locked decisions): [`FETCH.md`](./FETCH.md).
-
-**Why it jumps the queue:** a range-capped provider today fails a backfill
-*permanently* — the gap fetch errors, the placeholder is dropped, and the
-retry refetches the same too-large range. The only lever is a global
-`--chunk-size` restart, and log-count caps are content-dependent so no one
-size works. The finality phase's memory growth only bites on indefinite
-follows; it comes immediately after.
-
-### Deliverables (build order)
-
-1. ~~**Streaming page contract**~~ — ✅ shipped: `PageFetcher`/`PageStream`
-   + `SinglePageFetcher` shim in `spec.rs`; per-page finalize/persist/notify
-   via `ActiveFill` in `gap_fill.rs` (as-built notes in
-   [`FETCH.md` §2](./FETCH.md)); both families adapt as single-page streams.
-   Also fixed three latent gap-fill bugs the streaming shape made acute
-   (lost wakeup, persist-error notify skip, cancellation orphaning a
-   placeholder — each pinned by a regression test).
-2. ~~**Slicing executor**~~ — ✅ shipped: `LogFetcher`/`SliceDriver` in
-   `src/evm/chain/fetch.rs` over the shared `EndpointBudget`
-   (`src/evm/budget.rs`, riding `ChainProvider`): AIMD working size
-   (halve once per generation / adopt the provider hint, additive
-   regrow), deficit-forget concurrency with pause + quiet-period
-   recovery, bounded-parallel in-order release, slice-local transient
-   bisection, in-slice header fill; transport retry narrowed to wire
-   blips (`NetworkBlipRetryPolicy`) so the classifier owns provider
-   signals (as-built notes in [`FETCH.md` §3](./FETCH.md)).
-3. ~~**Provider adaptors**~~ — ✅ shipped: `src/evm/provider/` with the
-   `ProviderAdaptor` trait, the no-`Display` `ApiKey`, the `ProviderKind`
-   registry, and Generic + Alchemy + Infura (as-built notes in
-   [`FETCH.md` §4](./FETCH.md)). Fixtures are drafted-and-flagged until
-   the `#[ignore]` smoke records real payloads (Infura needs an
-   `INFURA_KEY`); dRPC, GetBlock, Tenderly, … follow as recordings land.
-4. ~~**CLI autoconfig**~~ — ✅ shipped: provider keys from `ALCHEMY_KEY` /
-   `INFURA_KEY` (via the config template) or `[provider.*]` sections —
-   deliberately no `--api-key` flag (secrets stay out of argv);
-   precedence `--rpc-url` (recognized provider URLs adopt their adaptor
-   and ws sibling) > configured keys (first provider hosting the chain
-   wins) > chainlist public (loaded lazily — a keyed run never touches
-   chainlist). `--follow` opens a dedicated **subscriptions-only** ws
-   connection (all fetching stays on http; `--no-ws` opts out; connect
-   failure falls back to HTTP polling); every URL echo is redacted;
-   `chains list --provider <name>` filters by the vendored tables
-   (as-built notes in [`FETCH.md` §4](./FETCH.md)).
-
-### Test plan
-
-Unit over `MockSpec` (`src/range_index/`): `pages_finalize_incrementally`,
-`stream_error_keeps_prefix_suffix_stays_gap`,
-`waiter_advances_on_partial_delivery`. Executor over a stub transport:
-`halves_once_per_generation`, `rate_limit_shrinks_concurrency_not_size`,
-`releases_pages_in_order`, `budget_bounds_inflight_across_filters`.
-Adaptors: fixture-driven classifier tests per provider (recorded real
-error payloads), URL detect/endpoint round-trips, no key in
-`Debug`/tracing output.
-
-Integration (`tests/adaptive_fetch.rs`, new): an in-process mock JSON-RPC
-enforcing a range cap and a log-count cap — backfill completes; the
-RPC-count guard asserts a retry after a mid-gap failure fetches only the
-suffix; the first `items()` yield lands before the last slice completes.
-CLI: `evm events` against the capped mock; an `#[ignore]` smoke against a
-real keyed provider resolving endpoints from a configured key.
-
-### Acceptance
-
-- A backfill over a range-capped + log-count-capped endpoint completes
-  with no configuration, at a call count within ~2× the provider minimum.
-- Mid-gap failure persists the delivered prefix; the retry covers only the
-  suffix (span-guard enforced).
-- Cold `items()` over a large gap yields its first item after one slice,
-  not after the whole gap.
-- API keys never render in logs or errors.
-- A configured provider key alone (env var or `[provider.*]` section, no
-  URL) reaches both http and ws endpoints on a supported chain.
-
----
-
-## Finality — pruning + best/safe wiring (after adaptive fetch)
+## Finality — pruning + best/safe wiring (next up)
 
 **Goal:** bound long-running memory, and wire real `Best`/`Safe` producers
 into the head clock (both tiers currently mirror `Latest`).
@@ -272,13 +188,24 @@ holds them in place — only the linear-demo documentation value. Staged plan:
 
 ### Out-of-order page carving — adaptive-fetch follow-up
 
-Adaptive fetch ships in-order contiguous page release as the *intermediate*
-contract (user call, 2026-07-13: fine for now, not the long-term shape).
-The long-term direction relaxes `PageFetcher` invariant 1 to out-of-order
-pages, with the gap-fill carving the in-flight placeholder around each
-landed page — retains completed slices when an earlier slice fails, and
-unblocks waiters deep inside a gap as soon as their sub-range lands.
-Rationale and upgrade path: [`FETCH.md` §5 decision 1](./FETCH.md).
+The adaptive fetch layer ships in-order contiguous page release as the
+*intermediate* contract (user call, 2026-07-13: fine for now, not the
+long-term shape). The long-term direction relaxes `PageFetcher`
+invariant 1 to out-of-order pages, with the gap-fill carving the in-flight
+placeholder around each landed page — retains completed slices when an
+earlier slice fails, and unblocks waiters deep inside a gap as soon as
+their sub-range lands. Rationale and upgrade path:
+[`ARCHITECTURE.md` decision #14](./ARCHITECTURE.md#19-locked-in-design-decisions).
+
+### Provider error-shape recordings — adaptive-fetch leftover
+
+`alchemy_429.json`, `infura_32005_rate_limit.json`, and the documented
+`-32602` shape in `alchemy_range_error.json`
+(`src/evm/provider/fixtures/`) are drafted from docs, not recorded.
+Record real payloads when the errors can be provoked — the `#[ignore]`
+smokes in `tests/adaptive_fetch.rs` are the standing recording hooks —
+then re-pin the classify arms. New providers (dRPC, GetBlock, Tenderly, …)
+follow the same recording-first rule.
 
 ### Family-scoped reorg tombstones — blocks finality cleanup wiring
 

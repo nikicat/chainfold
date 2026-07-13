@@ -1,12 +1,12 @@
 //! [`EndpointBudget`] — the per-endpoint adaptive fetch state every filter
-//! store on a chain shares (`docs/FETCH.md` §3). It lives on
+//! store on a chain shares (`docs/ARCHITECTURE.md` §9A). It lives on
 //! [`ChainProvider`](crate::evm::chain_provider::ChainProvider) beside the
 //! header singleflight, for the same reason that does: every gap-fill hits
 //! the same endpoint, and without shared state N stores × M slices
 //! thundering-herd it.
 //!
 //! The budget is a thin facade over two independent machines — AIMD's two
-//! knobs, never conflated (FETCH.md §5, decision 3):
+//! knobs, never conflated (`docs/ARCHITECTURE.md` §19, decision #16):
 //!
 //! * [`SliceSize`] — blocks per `eth_getLogs` slice. Shrinks on
 //!   `RangeTooLarge` (adopt the provider's suggested width, else halve) —
@@ -130,7 +130,8 @@ impl EndpointBudget {
 /// A working-size generation stamp. The executor reads one when it carves
 /// a slice; on a `RangeTooLarge` failure the stamp decides whether this
 /// failure is news (first of its generation → shrink) or an echo of a
-/// congestion event already handled (FETCH.md §5, decision 4).
+/// congestion event already handled (`docs/ARCHITECTURE.md` §19,
+/// decision #17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Generation(u64);
 

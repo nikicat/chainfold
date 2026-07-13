@@ -1,5 +1,5 @@
 //! Provider adaptors — per-provider intelligence at the endpoint boundary
-//! (`docs/FETCH.md` §4).
+//! (`docs/ARCHITECTURE.md` §9A).
 //!
 //! Hosted RPC providers differ in their `eth_getLogs` limits, their error
 //! payloads, and their URL shapes. Each supported provider implements
@@ -68,7 +68,7 @@ pub trait ProviderAdaptor: fmt::Debug + Send + Sync {
 
 /// What a failed slice means for the adaptive executor — the two knobs are
 /// never conflated: range errors shrink the *size*, rate limits shrink the
-/// *concurrency* (`docs/FETCH.md` §5, decision 3).
+/// *concurrency* (`docs/ARCHITECTURE.md` §19, decision #16).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorClass {
     /// The requested range exceeded a provider cap (width- or

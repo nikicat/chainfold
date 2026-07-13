@@ -1,11 +1,11 @@
 //! [`LogFetcher`] — the adaptive slicing executor behind every log
-//! store's gap fill (`docs/FETCH.md` §3).
+//! store's gap fill (`docs/ARCHITECTURE.md` §9A).
 //!
 //! One `fetch(range)` call plans the range into slices at the endpoint's
 //! current working size, runs them bounded-parallel under the shared
 //! [`EndpointBudget`], and releases the resulting [`LogPage`]s **in
 //! ascending order** through a bounded reorder buffer — the streaming
-//! contract the range index consumes (`docs/FETCH.md` §2).
+//! contract the range index consumes (`docs/ARCHITECTURE.md` §9A).
 //!
 //! **No spawned tasks:** the stream is a `stream::unfold` over a
 //! [`SliceDriver`] whose slices are futures in a `FuturesUnordered` —
@@ -26,7 +26,7 @@
 //!   still failing is fatal.
 //! * `Fatal` / store errors — end the stream. The **lowest-from** failure
 //!   wins so released coverage is maximal; completed later slices drop
-//!   with the driver (FETCH.md §5, decision 1).
+//!   with the driver (`docs/ARCHITECTURE.md` §19, decision #14).
 //!
 //! Header fill runs *inside* the slice, before release: the
 //! headers-present invariant requires headers cached before a page is
@@ -64,7 +64,7 @@ pub(super) struct LogFetcher<P> {
     /// Address + topics; each slice adds its block bounds.
     base_filter: Filter,
     /// The working-size ceiling — one placeholder's span
-    /// (`docs/FETCH.md` §5, decision 7).
+    /// (`docs/ARCHITECTURE.md` §19, decision #20).
     ceiling: ChunkSize,
 }
 

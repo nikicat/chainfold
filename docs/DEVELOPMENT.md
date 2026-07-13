@@ -21,6 +21,7 @@ just                                     # list all recipes (test, coverage, …
 | `tests/anvil_smoke.rs`, `tests/blocks_history.rs`, `tests/live_follow.rs` | `anvil` on `PATH` (foundry) |
 | `tests/cache_layering.rs`, `tests/owned_erc20.rs`, the fork case of `anvil_smoke` | `anvil` + `MAINNET_RPC_URL` (archive node — see below) |
 | `tests/bitcoin_blocks_history.rs` | `bitcoind` via `$BITCOIND_EXE` or `PATH` (regtest through `corepc-node`; no network) |
+| the `#[ignore]` smokes in `tests/adaptive_fetch.rs`; the live pairing probes in `src/evm/provider/` | `ALCHEMY_KEY` (+ `INFURA_KEY` for the Infura probe) in the env or `.env`. The rest of `tests/adaptive_fetch.rs` is hermetic (in-process mock) and runs in the normal suite. |
 
 **`MAINNET_RPC_URL`:** fork tests pin `FORK_BLOCK = 18_000_000`
 (`tests/common/fixtures.rs`), which needs an **archive** endpoint — free
@@ -30,7 +31,13 @@ the repo root:
 
 ```
 MAINNET_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/<key>
+ALCHEMY_KEY=<key>
+INFURA_KEY=<key>
 ```
+
+The bare provider keys feed the CLI's endpoint autoconfig, the
+adaptive-fetch smokes, and the network-table probes/generator
+(`just refresh-provider-networks`).
 
 `tests/common/anvil.rs::load_dotenv()` loads it via `dotenvy` on the first
 `fork_mainnet()` call — no shell exports needed. The harness falls back to a

@@ -1,4 +1,4 @@
-//! Adaptive-fetch integration scenarios (`docs/FETCH.md` acceptance): the
+//! Adaptive-fetch integration scenarios (`docs/ARCHITECTURE.md` §9A): the
 //! production client stack — `HttpTransport` under the narrowed retry
 //! layer under `RpcTimingLayer` — driven against the capped mock JSON-RPC
 //! server in `common::rpc_server`, plus a hermetic CLI subprocess run and

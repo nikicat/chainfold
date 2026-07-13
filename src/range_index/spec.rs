@@ -70,7 +70,7 @@ pub struct LoadedSpan<I> {
 /// pure-Rust stub and so the provider-capturing fetch stays separate from
 /// the persistence/interpretation in [`RangeSpec`].
 ///
-/// Contract (`docs/FETCH.md` §2 owns the full text):
+/// Contract (`docs/ARCHITECTURE.md` §9A owns the full text):
 ///
 /// 1. Pages arrive **in ascending order, contiguous from `range.from`** —
 ///    each page's [`page_bounds`](RangeSpec::page_bounds) starts one block

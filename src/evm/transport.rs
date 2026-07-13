@@ -38,7 +38,7 @@ const COMPUTE_UNITS_PER_SECOND: u64 = 100;
 /// JSON-RPC error responses, HTTP error statuses (429 included), and
 /// deserialization errors are the adaptive executor's signal — its
 /// per-provider classifier decides between resize, backoff, retry and
-/// fail (`docs/FETCH.md` §3), and a transport-level retry would fight it
+/// fail (`docs/ARCHITECTURE.md` §9A), and a transport-level retry would fight it
 /// (blind retries on a rate limit, refetches of a range the classifier
 /// wants resized).
 #[derive(Debug, Clone, Copy, Default)]

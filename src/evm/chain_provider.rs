@@ -27,7 +27,7 @@
 //!   the [`ProviderAdaptor`] handle live here for the same reason the
 //!   header singleflight does: every filter's gap-fill hits the same
 //!   endpoint, and the AIMD state must be shared or N stores
-//!   thundering-herd it (`docs/FETCH.md` §3).
+//!   thundering-herd it (`docs/ARCHITECTURE.md` §9A).
 //!
 //! The wrapper is itself a [`Provider`] — it delegates everything through
 //! `root()` — so code generic over `Provider` accepts it unchanged.

@@ -10,10 +10,12 @@
 >
 > **Status:** The **library** and **CLI** surfaces are live over the shared
 > chain engine, with two concrete source families (EVM logs + blocks;
-> Bitcoin blocks); the **daemon** (`chainfoldd`) is planned. The
-> **adaptive-fetch** phase ([`FETCH.md`](./FETCH.md)) is the next eligible
-> chunk, then **finality** (memory pruning + `best`/`safe` head producers) —
-> see [`ROADMAP.md`](./ROADMAP.md).
+> Bitcoin blocks) and the **adaptive fetch layer**
+> ([§9A](#9a-the-adaptive-fetch-layer) — streaming pages, AIMD slicing
+> executor, provider adaptors, key autoconfig) shipped end-to-end; the
+> **daemon** (`chainfoldd`) is planned. Next up is **finality** (memory
+> pruning + `best`/`safe` head producers) — see
+> [`ROADMAP.md`](./ROADMAP.md).
 
 ---
 
@@ -29,6 +31,8 @@
 7. [Merge — ordered and interleaved](#7-merge--ordered-and-interleaved)
 8. [Matcher — correlation](#8-matcher--correlation)
 9. [The EVM source layer](#9-the-evm-source-layer)
+9A. [The adaptive fetch layer](#9a-the-adaptive-fetch-layer)
+9B. [The Bitcoin source layer](#9b-the-bitcoin-source-layer)
 10. [Storage model](#10-storage-model)
 11. [Data flow — cold, live, resume](#11-data-flow--cold-live-resume)
 12. [Caching mechanics](#12-caching-mechanics)
@@ -167,7 +171,7 @@ flowchart TB
         OwnedErc20["OwnedErc20<br/>2 narrow filters + ordered merge"]
         Erc20["erc20<br/>Transfer decode · metadata · balance fold"]
         LogCache["LogCache / Erc20Cache / EventSignatureCache<br/>EVM views over CacheDb"]
-        ChainProvider["ChainProvider&lt;P&gt;<br/>alloy Provider + ChainId + LogCache<br/>header singleflight"]
+        ChainProvider["ChainProvider&lt;P&gt;<br/>alloy Provider + ChainId + LogCache<br/>header singleflight · EndpointBudget + adaptor"]
     end
 
     subgraph BTC["Bitcoin source — cfg(feature = bitcoin)"]
@@ -238,14 +242,18 @@ lib.rs                     pub mod {arch, cache, chain, combinators, matcher, me
 ├─ signatures.rs           event-name → signature/topic0 resolution
 ├─ evm/                    ← cfg(feature = "evm")
 │  ├─ types.rs             EvmEvent · EvmPosition · ChainId · Topic · BlockHash/TxHash · LogIdx · Gas · …
-│  ├─ chain.rs + chain/    EvmChain — config · head_clock (EvmHeadClock ws/poll sessions) · logs · blocks
+│  ├─ chain.rs + chain/    EvmChain — config · head_clock (EvmHeadClock ws/poll sessions) · logs · blocks ·
+│  │                       fetch (LogFetcher/SliceDriver — the adaptive slicing executor)
+│  ├─ budget.rs            EndpointBudget — shared per-endpoint AIMD state: SliceSize (working width) + RequestSlots (concurrency + pause clock)
+│  ├─ provider.rs + provider/  ProviderAdaptor seam — ErrorClass · FetchSeeds · ApiKey (no Display) · ProviderKind ·
+│  │                       generic/alchemy/infura adaptors · vendored network tables (data/) · recorded error fixtures
 │  ├─ log_spec.rs          LogSpec (RangeSpec for logs) — with block_pos.rs (BlockPos · LogRef · LogPage)
 │  ├─ block_spec.rs        BlockSpec (RangeSpec for blocks, over the shared HeightPos)
 │  ├─ cache.rs + cache/    EVM views over CacheDb — LogCache · Erc20Cache · EventSignatureCache + EVM sql binds
 │  ├─ erc20.rs             Transfer decode · metadata · balance apply
 │  ├─ owned_erc20.rs       two-filter in/out ordered merge
-│  ├─ chain_provider.rs    ChainProvider<P> — chain-scoped RPC seam
-│  └─ transport.rs         wire layer — HttpTransport (owned; no URL in telemetry/errors) · RpcTimingLayer · rpc_retry_layer
+│  ├─ chain_provider.rs    ChainProvider<P> — chain-scoped RPC seam · header singleflight · budget + adaptor
+│  └─ transport.rs         wire layer — HttpTransport (owned; no URL in telemetry/errors) · RpcTimingLayer · rpc_retry_layer (wire blips only)
 ├─ bitcoin/                ← cfg(feature = "bitcoin")
 │  ├─ types.rs             BtcBlock · BtcBlockHash (display-order hex) · CompactTarget
 │  ├─ transport.rs         BtcAuth · ReqwestTransport (jsonrpc async Transport) · TracingTransport
@@ -546,7 +554,7 @@ trait RangeSpec: Clone + Send + Sync + 'static {
 ```
 
 Fetching is a separately injected **`PageFetcher`** — a streaming trait
-(`fetch(range) -> PageStream<Page>`, contract in [`FETCH.md` §2](./FETCH.md))
+(`fetch(range) -> PageStream<Page>`, contract in [§9A](#9a-the-adaptive-fetch-layer))
 wrapping the source's RPC (`eth_getLogs` for logs) — so tests pass a
 pure-Rust stub and the provider-capturing fetch stays out of the persistence
 spec. Pages finalize incrementally: each delivered page inserts its items,
@@ -879,17 +887,20 @@ The concrete client for EVM log streams (`feature = "evm"`).
 
 | Component | Role |
 |---|---|
-| **`EvmChain<P>`** | The per-chain entity. Owns the `ChainProvider`, **one** demand-started head clock (`newHeads` or poll per `EvmChainConfig::transport`; ws heads persist headers before publishing), and vends per-source histories from per-source submodules: reactive stores (`logs(&LogFilter, tier)` / `blocks(tier)` — sync, side-effect-free) and bounded hists (`logs_hist(&filter, range)` / `blocks_hist(range)` — head-free, offline when cached). Construction does nothing; the first snapshot await (or `estimate_block`) starts tracking, which then runs until the chain and its stores drop. |
+| **`EvmChain<P>`** | The per-chain entity. Owns the `ChainProvider`, **one** demand-started head clock (`newHeads` or poll per `EvmChainConfig::transport`; ws heads persist headers before publishing), and vends per-source histories from per-source submodules: reactive stores (`logs(&LogFilter, tier)` / `blocks(tier)` — sync, side-effect-free) and bounded hists (`logs_hist(&filter, range)` / `blocks_hist(range)` — head-free, offline when cached). `SubscribeTransport::Ws { subscriber }` is a *dedicated* pubsub connection carrying **only** `eth_subscribe` traffic — every fetch (backfills, header fills, reconnect gap-fill) stays on the main http provider (hosted providers load-balance http and can bill ws archival higher). Construction does nothing; the first snapshot await (or `estimate_block`) starts tracking, which then runs until the chain and its stores drop. |
 | **`RangeIndexStore<S: RangeSpec>`** *(shared — `src/range_index/`)* | The reactive layer, written once: `HistStoreBackend` + `HistBackend` over a `RangeIndex<S>` plus a single nullable `end` tip (`watch::Sender<Option<PubPos>>`; monotonic `on_bump`, `on_events` = insert page + bump). Wiring tasks attach as `AbortOnDropHandle`s holding `Weak` back-refs. |
 | **`RangeIndex<S>`** *(shared — `src/range_index/`)* | Generic in-memory `BTreeMap<S::Pos, Range>` per source stream. Empty-range tombstones, singleflight via `Arc<Notify>` per range, lazy first-touch window load, async drain to SQLite. **The hot path.** |
 | **`LogSpec` / `BlockSpec`** | The EVM `RangeSpec`s. Logs: `LogRef` tree items, sync `resolve` to `EvmEvent` (headers-present invariant), persist/load against `LogCache`, `EvmPosition` load. Blocks: dense, whole-`EvmBlock` items over the shared `HeightPos` key, coverage under `ScanPartition::Blocks`. |
+| **`LogFetcher` / `SliceDriver`** (`chain/fetch.rs`) | The adaptive slicing executor — the logs `PageFetcher`. Carves each gap by the endpoint's learned working width, runs slices bounded-parallel under the shared budget (no spawned tasks: a `stream::unfold` over `FuturesUnordered` — dropping the stream cancels everything), releases pages **in ascending order** through a bounded reorder buffer, fills headers *inside* the slice pre-release, and turns the adaptor's `ErrorClass` into resize / backoff / slice-local bisection / lowest-from fatal ([§9A](#9a-the-adaptive-fetch-layer)). |
+| **`EndpointBudget`** (`budget.rs`) | Per-endpoint AIMD state on the `ChainProvider`, shared by every store on the chain: `SliceSize` (working width — halve once per generation or adopt the provider hint, additive regrow toward the `ChunkSize` ceiling) and `RequestSlots` (deficit-forget concurrency shrink, pause on rate limit, paced quiet-period recovery). The two knobs never conflate (range errors resize, rate limits slow down). |
+| **`provider`** (`provider.rs` + `provider/`) | Provider intelligence behind the `ProviderAdaptor` trait: `classify` (per-provider error taxonomy, pinned by recorded fixtures), `seeds` (known limits so the AIMD starts converged), `detect`/`endpoint` (URL shapes ↔ chain + key, http and ws). `ApiKey` has no `Display` (leaks are compile errors; `expose()` is the only exit); `ProviderKind` is the closed keyed-provider vocabulary (Alchemy, Infura) with vendored, generator-refreshed network tables; the generic adaptor turns unknown providers into bisection discovery, never failure. |
 | **`LogCache` / `Erc20Cache` / `EventSignatureCache`** | The EVM views over the shared `CacheDb` (§10): payload tables + the `.coverage()` accessor to the shared scanned-range/reorg bookkeeping. **Never on the live path.** |
-| **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` interleaved with head-driven empty coverage in one session. Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
+| **chain wiring** (`chain/wiring.rs` + `chain/logs.rs`) | Per-store tasks driving `on_events`/`on_bump`: the shared `follow_head` (eager gap-fill on each head advance; the first observed head only bumps — no baseline, no coverage claim) and, on ws, a narrow per-filter `eth_subscribe(logs)` on the dedicated subscriber connection, interleaved with head-driven empty coverage in one session (the gap-fill legs stay on the http provider). Reconnect-with-backoff (100 ms → 30 s); reconnect gap-fill must succeed before push delivery resumes. |
 | **`OwnedErc20`** | Two narrow `chain.logs(...)` stores (`topic1 = owner` outgoing, `topic2 = owner` incoming), combined with the **ordered merge** — both filters share the chain's `(block, log_index)` space, so no comparator, and anchors are plain `EvmPosition`s. Direction reported via `source_key` (`IN_KEY` / `OUT_KEY`); a self-transfer matches both filters but surfaces once (coalesced, tagged `IN_KEY`; balance-neutral in `apply_transfer`). Sync constructor, no provider generic. |
 | **`erc20`** | `decode_transfer`, `fetch_erc20_metadata`, `apply_transfer` (running-balance fold), `fetch_balance_at` / `fetch_balance_before` (cached `balanceOf` reads; the latter seeds the fold with the opening balance just before a window — zero at genesis). |
 | **`tokenlist`** | Symbol → address resolver over a curated [Token Lists](https://tokenlists.org) snapshot (default: Uniswap Labs'), cached in `TokenListCache` with a 24 h TTL. Case-insensitive lookup; unique exact-case match breaks collisions, otherwise a loud `Ambiguous`/`NotFound` error. Non-EVM entries (Solana mints) are dropped at ingest. Backs the CLI's `--token USDC` and `chainfold tokens`. |
-| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId` **and the `Arc<LogCache>`**. Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
-| **`ChunkSize::align` / `ChunkSize::chunk_end`** | The single owner of chunk-alignment arithmetic (`chain/height.rs`). `align` widens load windows outward; `chunk_end` caps each gap fetch at its chunk boundary (`walk_step`), so concurrent consumers hit the same cache entries and no RPC request spans a chunk. |
+| **`ChainProvider<P>`** | An alloy `Provider` bundled with its `ChainId`, **the `Arc<LogCache>`**, and the endpoint-scoped adaptive state (`EndpointBudget` + `&'static dyn ProviderAdaptor`; `with_adaptor` installs a provider's intelligence and re-seeds the budget). Internalizes error mapping (inherent `get_block_number`/`get_logs`; RPC timing lives in the transport stack's `RpcTimingLayer`) with raw-error siblings *below* the `HistoryError` funnel (`get_logs_raw`, `ensure_block_header_raw`) for the executor's classifier, and owns the **singleflight** `ensure_block_header` (per-block gate + double-checked cache read). |
+| **`ChunkSize::align` / `ChunkSize::chunk_end`** | The single owner of chunk-alignment arithmetic (`chain/height.rs`). `align` widens load windows outward; `chunk_end` caps how much one walk step claims as a placeholder, so concurrent consumers hit the same cache entries. It no longer bounds any RPC — request sizing belongs to the adaptive executor, with `ChunkSize` as the working-size *ceiling*. |
 
 **Position bridging:** `EvmPosition(0, 0)` ↔ `BlockPos::Bottom`; otherwise
 `BlockPos::At { block, log_index }` maps 1:1.
@@ -898,6 +909,113 @@ The concrete client for EVM log streams (`feature = "evm"`).
 history fetches *its own* subset at the RPC level (`topic1=owner` and
 `topic2=owner`), so the node returns only the owner's transfers — not the
 whole Transfer stream filtered client-side (decision #11).
+
+---
+
+## 9A. The adaptive fetch layer
+
+Backfills complete against any provider's `eth_getLogs` limits with no
+per-provider tuning, at a near-optimal call count. (Shipped 2026-07-14;
+the phase's design doc, `docs/FETCH.md`, folded in here and was retired —
+`git log -- docs/FETCH.md` has the full design history.)
+
+**Problem.** `eth_getLogs` limits differ per provider and are
+**multi-dimensional**: range-width caps, result-count caps (Infura and
+Alchemy accept *any* range as long as ≤10k logs come back), response byte
+and compute-time caps. The result-count dimension makes success
+**content-dependent** — a width that works over sparse history fails at a
+busy deployment block — so no single discovered constant is correct: a
+fixed chunk size either fails permanently on capped providers or wastes
+calls on generous ones. Three layers fix this, each at its own seam.
+
+### Streaming page contract (range-index core)
+
+`PageFetcher<Page>` (`src/range_index/spec.rs`) fills a gap with a
+**stream of pages** (`fetch(range) -> PageStream<Page>`). Invariants:
+
+1. Pages arrive in ascending order, contiguous from `range.from`; no page
+   extends past `range.to` (the *intermediate* contract — decision #14).
+2. A stream ending after a page reaching `range.to` is a success; ending
+   cleanly *before* covering the gap is a **loud error** (silence would
+   make `ensure_cached` refetch forever). The delivered prefix stands.
+3. An `Err` item ends the stream: the prefix is a valid coverage claim;
+   the suffix stays a gap.
+
+The walker that installs the placeholder owns and drives the stream
+(`ActiveFill` in `gap_fill.rs`) — the core spawns nothing, and all
+fan-out lives inside the `PageFetcher` (decision #15). `items()` drives
+one page per walk step, so first items yield while later slices are still
+in flight — time-to-first-item ≈ one slice latency. Finalization is
+per-page: insert items, persist, shrink the placeholder from the left
+(same `Notify` across shrinks), wake waiters — on *every* placeholder
+mutation, error paths included, and waiters register interest *before*
+re-checking coverage (the lost-wakeup fix). Dropping a mid-fill walker
+releases the placeholder remainder (drop guard, identity-checked against
+the placeholder's `Notify`). Single-page sources (EVM blocks, Bitcoin)
+adapt via the `SinglePageFetcher` shim.
+
+### Slicing executor (EVM source layer)
+
+`LogFetcher`/`SliceDriver` (§9) carve each gap by the endpoint's current
+working width and run the slices bounded-parallel under the shared
+`EndpointBudget`, releasing pages in ascending order through a bounded
+reorder buffer. The adaptor's `ErrorClass` drives the two AIMD knobs —
+never conflated (decision #16):
+
+- `RangeTooLarge { suggested }` → adopt the provider hint (downward-only)
+  or halve the working size — once per generation (#17) — and re-slice
+  the remainder at the new width.
+- `RateLimited { retry_after }` → pause and shrink *concurrency*
+  (deficit-forget, floor 1), never the size — shrinking the range against
+  a throttling endpoint raises total request count. The slice requeues
+  indefinitely; the pause paces the attempts.
+- `Transient` → bounded same-range retries, then **slice-local** bisection
+  (#24) — discovery for the generic adaptor, fault isolation for the
+  rest; a single block still failing is fatal.
+- `Fatal` → the stream ends carrying the **lowest-from** failure, after
+  everything below it has released; queued and parked work above it is
+  abandoned, and the suffix stays a gap.
+
+Growth is additive: a clean-slice streak regrows the width toward the
+`ChunkSize` ceiling (#20), and concurrency recovers paced after a quiet
+period. Header fills run *inside* the slice, pre-release, under the same
+budget, their errors classified like slice errors (#23). The transport
+retry layer touches only wire blips (`NetworkBlipRetryPolicy`); every
+classifiable signal reaches the executor intact (#22) through
+`ChainProvider`'s raw-error methods. Batch JSON-RPC stays deferred behind
+this execution seam (#19). Every resize/backoff/regrow decision is a
+`tracing` event (§15), so the RPC-count test guards keep working.
+
+### Provider adaptors (endpoint boundary)
+
+The intelligence lives in `ProviderAdaptor` impls (§9), not a universal
+classifier (decision #18): `classify` matches exact codes/payloads pinned
+by **recorded fixtures** (`src/evm/provider/fixtures/`) — Infura's
+dual-use `-32005` disambiguates by payload (`data.backoff_seconds` vs a
+suggested window), and the recording pass caught Alchemy's free tier
+rejecting with `-32600` where the docs say `-32602`, so the arm keys on
+the shared "this block range should work" phrase. `seeds` starts the AIMD
+converged on known limits; `detect`/`endpoint` map URL shapes ↔ chain +
+key for both http and ws. The generic adaptor classifies HTTP 429 as
+`RateLimited` and 401/403 as `Fatal`, everything else `Transient` — an
+unknown provider degrades to bisection discovery, never to failure.
+Adaptors are EVM-side until Bitcoin needs them (#21). Network tables are
+generated-and-vendored like a lockfile (`just refresh-provider-networks`,
+`#[ignore]` drift probes). Key discipline and the CLI's autoconfig funnel
+are §16's story; `ApiKey`'s no-`Display` design is in the §9 table.
+
+**Verified end-to-end** by `tests/adaptive_fetch.rs` (§18): the
+production wire stack against a capped mock speaking each provider's
+recorded error dialect, plus real-Alchemy `#[ignore]` smokes that double
+as the standing fixture-recording hooks. Still drafted-from-docs
+(recorded when provokable — ROADMAP backlog): `alchemy_429.json`,
+`infura_32005_rate_limit.json`, the documented `-32602` shape.
+
+**Accepted costs:** one `end_block_hash` header fetch per slice boundary
+(singleflighted + cached); more `scanned_ranges` rows between compactions
+(`compact_ranges` merges them); waiters wake once per page instead of
+once per gap (they re-walk — the existing cheap semantics); reorder-buffer
+memory bounded by concurrency × page size.
 
 ---
 
@@ -1127,13 +1245,14 @@ sequenceDiagram
     Idx->>DB: get_scanned_ranges + get_logs_in_range
     DB-->>Idx: persisted bounds + logs
     Idx->>Idx: compute_gaps
-    Idx->>RPC: eth_getLogs(aligned chunk)
-    Note over Idx,RPC: singleflight — concurrent peers await this fetch
-    RPC-->>Idx: LogPage
-    Idx->>Idx: insert range into BTree (synchronous)
-    Idx-->>Drain: send(LogPage)
-    Drain->>DB: insert_logs + record_scanned_range
-    Idx-->>Hist: stream items
+    Idx->>RPC: eth_getLogs × N adaptive slices (LogFetcher, shared budget)
+    Note over Idx,RPC: singleflight — concurrent peers await this fill;<br/>slices run in parallel, pages release in ascending order
+    loop per released page
+        RPC-->>Idx: LogPage
+        Idx->>Idx: insert page + shrink placeholder (synchronous)
+        Idx->>DB: insert_logs + record_scanned_range
+        Idx-->>Hist: stream items — first page ≈ first item
+    end
     Hist-->>App: Positioned(EvmEvent, EvmPosition)
 
     Note over App,RPC: LIVE path — ws transport (clock demand-started by the first consumer)
@@ -1186,10 +1305,12 @@ flowchart TB
 2. **Singleflight.** The first reader into a cold gap installs a placeholder
    and fires the RPC; concurrent readers await the placeholder's `Notify`.
    (Test: 5 walkers → 1 `eth_getLogs`.)
-3. **Alignment.** The gap-fill walk caps each fetch at a `chunk_size`-aligned
-   boundary (`ChunkSize::chunk_end`, default 1000 blocks) so consumers asking
-   slightly different ranges collide on the same cache entries — and no
-   single request exceeds the chunk size (provider range caps). The gap
+3. **Alignment.** The gap-fill walk caps each *placeholder claim* at a
+   `chunk_size`-aligned boundary (`ChunkSize::chunk_end`, default 1000
+   blocks) so consumers asking slightly different ranges collide on the
+   same cache entries. Wire-request sizing is separate: the adaptive
+   executor slices each claim by the endpoint's learned working width
+   ([§9A](#9a-the-adaptive-fetch-layer)), with `ChunkSize` as its ceiling. The gap
    *start* is never rounded down: blocks before the cursor are already
    covered, and refetching them would break at-most-once.
 4. **SQLite off the live path.** A WS-delivered log goes
@@ -1199,7 +1320,7 @@ flowchart TB
 The retry layer (`rpc_retry_layer`) wraps wire-level network blips with
 bounded backoff — and nothing else: classifiable errors (JSON-RPC
 responses, HTTP statuses) pass through to the adaptive executor's
-per-provider classifier (`docs/FETCH.md` §3). The observability contract
+per-provider classifier ([§9A](#9a-the-adaptive-fetch-layer)). The observability contract
 counts every call so the "warm walk = 0 `eth_getLogs`" property is
 test-enforced, not aspirational.
 
@@ -1402,12 +1523,12 @@ flowchart TB
     root --> config["config"]
     root --> chains["chains"]
     root --> tokenscmd["tokens"]
-    root --> evm["evm (EvmArgs: --chain/--chain-id, --rpc-url,<br/>window flags, --reverse/--follow)"]
+    root --> evm["evm (EvmArgs: --chain/--chain-id, --rpc-url,<br/>window flags, --reverse/--follow/--no-ws)"]
     root --> bitcoin["bitcoin (BitcoinArgs: --rpc-url,<br/>--rpc-cookie-file / --rpc-user+--rpc-pass,<br/>window flags, --reverse/--follow)"]
     root --> cachecmd["cache"]
     config --> cshow["show — print resolved config"]
     config --> ccheck["check — validate + test RPC"]
-    chains --> clist["list — resolvable chain names (chainlist.org),<br/>testnets hidden unless --testnets / --alchemy-supported"]
+    chains --> clist["list — resolvable chain names (chainlist.org),<br/>testnets hidden unless --testnets;<br/>--provider filters by the vendored tables"]
     tokenscmd --> tlist["list [--chain/--chain-id] — cached token list"]
     tokenscmd --> trefresh["refresh — re-fetch the snapshot"]
     evm --> eblocks["blocks list [--full]"]
@@ -1448,9 +1569,19 @@ must print rows as they arrive and therefore use fixed spec widths.
 **Chain resolution precedence (evm):** `--chain-id` > `--chain` > env
 `CHAINFOLD_CHAIN` > config `[evm] default_chain` > built-in `ethereum`. Names
 resolve against cached chainlist.org data via a `ChainResolver`
-(lowest-chain-id-wins on shortName/chainSlug collisions, deterministic). RPC
-selection: explicit `--rpc-url` > Alchemy (with API key) > chainlist public
-RPC.
+(lowest-chain-id-wins on shortName/chainSlug collisions, deterministic);
+chainlist loads lazily — a keyed or `--chain-id` run never touches it.
+
+**RPC endpoint resolution (evm):** the `resolve_rpc` funnel orders the
+sources explicit `--rpc-url` (a recognized provider URL adopts its adaptor
+and derives the ws sibling) > configured provider keys (`ALCHEMY_KEY` /
+`INFURA_KEY` env vars via the config template, or `[provider.*]` sections;
+`ProviderKind::ALL` order, first provider hosting the chain wins —
+deliberately **no `--api-key` flag**, secrets stay out of argv) > chainlist
+public RPC. With `--follow`, the resolved ws sibling opens a dedicated
+**subscriptions-only** connection (`--no-ws` opts out; a connect failure
+falls back to HTTP polling). Every user-facing URL echo goes through
+`redact_url`, keyless public URLs included.
 
 **Bitcoin endpoint resolution:** `--rpc-url` > config `[bitcoin] rpc_url`
 (env-interpolated from `BITCOIND_RPC_URL`) > `http://127.0.0.1:8332`. Auth
@@ -1508,6 +1639,7 @@ remaining deliberately-generic boundary is `Position::marshal`'s
 | `tests/interleave.rs` | cross-family interleave: app enum + `map_positions`, restart resume (the wallet recipe) | always |
 | `tests/matcher.rs` | matcher incl. SQLite persistence across restart | always |
 | `tests/mock_provider_smoke.rs` | alloy `Asserter` wrapper | `evm` |
+| `tests/adaptive_fetch.rs` | the adaptive executor against a capped mock provider (`tests/common/rpc_server.rs` — axum, real recorded error shapes, fault + latency injection): cap adoption within 2× minimum calls, content-cap re-slicing, suffix-only retry, first-yield streaming, hermetic CLI subprocess with a planted-key redaction sweep; two real-Alchemy smokes `#[ignore]` | `cli` |
 | `tests/anvil_smoke.rs` | local anvil harness (fork case `#[ignore]`) | `evm` |
 | `tests/blocks_history.rs` | local-anvil blocks source: cold/warm walk, poll follow | `#[ignore]` |
 | `tests/bitcoin_blocks_history.rs` | regtest-bitcoind blocks source: cold walk → node killed → offline warm walk; poll follow | `bitcoin`, `#[ignore]` |
@@ -1552,6 +1684,8 @@ model of the placeholder protocol remains open in
 
 The numbered decisions this document cites (`decision #N`). Each was agreed
 explicitly — do not reverse one silently; reopen it with the user first.
+(#14–#24 are the adaptive fetch layer's, absorbed from the retired
+`FETCH.md`.)
 
 1. **Events are first-class**, not children of blocks. The block DAG is a
    source concern, not a storage concern.
@@ -1596,5 +1730,44 @@ explicitly — do not reverse one silently; reopen it with the user first.
     plain-`P` anchors) vs interleave (disjoint spaces, `MergedPos` vector
     clock); cross-family unification via app enum + `map_positions` — no
     `dyn` erasure.
+14. **In-order contiguous page release — as the *intermediate* contract.**
+    Slices *run* out of order; they *release* in ascending order through a
+    bounded reorder buffer, keeping the placeholder bookkeeping monotone.
+    Accepted limitations, to revisit long-term: a completed later slice is
+    discarded when an earlier slice terminally fails, and a waiter deep
+    inside a gap waits for delivery to reach it. The upgrade path —
+    out-of-order placeholder *carving* — relaxes page-contract invariant 1
+    ([§9A](#9a-the-adaptive-fetch-layer)) and touches only the gap-fill
+    internals ([`ROADMAP.md`](./ROADMAP.md) backlog).
+15. **Parallelism lives below the `RangeIndex`.** The walk stays
+    sequential, one placeholder per gap; all fan-out is inside the
+    `PageFetcher`. Cross-chunk parallelism is achieved by raising
+    `chunk_size`, not by teaching the walk to drive multiple gaps.
+16. **Two adaptive knobs, never conflated:** range errors shrink the
+    *size*, rate limits shrink the *concurrency*.
+17. **Multiplicative decrease once per generation** — concurrent failures
+    from the same working size count as one congestion event.
+18. **Classification is an adaptor method consumed by the executor**, not
+    another transport layer. `RpcTimingLayer` is unaffected.
+19. **Parallel-single requests by default; batch JSON-RPC deferred**
+    behind the execution-strategy seam: providers meter batch items
+    individually and cap batch length, and a transport-level batch failure
+    couples many slices to one timeout — worse for the AIMD signal.
+20. **`ChunkSize` stays the alignment + placeholder granularity** and the
+    working-size ceiling; it no longer bounds RPCs.
+21. **Adaptors are EVM-side until Bitcoin needs them**; the generic
+    adaptor is always available.
+22. **Retry ownership: one owner per signal.** The transport retry layer
+    handles only genuine network blips (wire-level errors); every signal
+    with provider intent — JSON-RPC error responses, HTTP statuses,
+    deserialization failures — belongs to the executor's classifier. A
+    transport-level retry on a classifiable error fights the AIMD.
+23. **Header fill is part of the slice** — pre-release, under the same
+    budget, errors classified like slice errors. A page whose headers
+    aren't cached is not deliverable (the headers-present invariant), so
+    header failures must not be swallowed.
+24. **`Transient` bisection is slice-local**, never the shared working
+    size — it is discovery for the generic adaptor and fault isolation for
+    everyone else; only `RangeTooLarge` speaks about the size.
 
 The forward plan lives in [`ROADMAP.md`](./ROADMAP.md).
