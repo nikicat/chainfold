@@ -11,7 +11,7 @@ use crate::cli::{
     BitcoinArgs, BtcBlocksArgs, BtcBlocksCommand, BtcBlocksListArgs, Direction, FollowMode,
     WindowArgs,
 };
-use crate::fmt::{HexDetail, explorer_url, format_timestamp};
+use crate::fmt::{HexDetail, block_cell, explorer_url, format_timestamp};
 use crate::table::{Cell, Column, Out, TableBuf, TableSpec};
 use crate::util::{WindowSel, block_cut, inclusive_range, print_date_estimate, window_sel};
 
@@ -180,8 +180,8 @@ async fn estimate_date_range(
 /// an open end (`--follow`) renders as `blocks 100.. · bitcoin`.
 fn title(from: BlockNumber, to: Option<BlockNumber>) -> String {
     match to {
-        Some(to) => format!("blocks {} · bitcoin", BlockRange::new(from, to)),
-        None => format!("blocks {from}.. · bitcoin"),
+        Some(to) => format!("blocks {:#} · bitcoin", BlockRange::new(from, to)),
+        None => format!("blocks {from:#}.. · bitcoin"),
     }
 }
 
@@ -215,7 +215,7 @@ fn hash_cell(hash: &BtcBlockHash, detail: HexDetail) -> Cell {
 
 fn row(b: &BtcBlock, columns: ColumnSet) -> Vec<Cell> {
     let mut row = vec![
-        Cell::new(b.height.to_string()),
+        block_cell(b.height),
         Cell::new(format_timestamp(b.time)),
         Cell::new(b.tx_count.to_string()),
         Cell::new(format!("{:.4e}", b.bits.difficulty())),

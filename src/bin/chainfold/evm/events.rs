@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::cli::{Direction, EventsArgs, EvmArgs, FollowMode};
 use crate::config::Config;
-use crate::fmt::{HexDetail, explorer_base_url, format_timestamp, tx_cell};
+use crate::fmt::{HexDetail, block_cell, explorer_base_url, format_timestamp, tx_cell};
 use crate::signature_cache::SqliteSignatureCache;
 use crate::table::{Cell, Column, Out, RowWriter, TableSpec};
 use crate::util::{log_cut, parse_hex_address, resolve_log_range};
@@ -76,7 +76,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
     println!();
 
     let mut writer = out.rows(spec());
-    writer.title(format!("events {range} · chain {chain_id}"));
+    writer.title(format!("events {range:#} · chain {chain_id}"));
     writer.print_header();
 
     if follow.is_follow() {
@@ -205,7 +205,7 @@ fn print_event(
     };
     writer.print_row(&[
         Cell::new(index.to_string()),
-        Cell::new(e.block_number.to_string()),
+        block_cell(e.block_number),
         Cell::new(format_timestamp(e.timestamp)),
         tx_cell(&e.tx_hash, &opts.base_url, opts.detail),
         Cell::new(details),

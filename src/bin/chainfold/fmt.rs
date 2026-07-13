@@ -92,6 +92,13 @@ pub fn tx_cell(hash: &TxHash, base_url: &Url, detail: HexDetail) -> Cell {
     Cell::new(text).link(explorer_join(base_url, &format!("tx/{hash:#x}")))
 }
 
+/// Block-number cell: bare digits whose alternate thousands groups render
+/// dim in `Pretty` ([`CellStyle::GroupedDigits`]); piped output stays the
+/// untouched digits. Titles and prose keep the `{:#}` U+202F-grouped form.
+pub fn block_cell(number: BlockNumber) -> Cell {
+    Cell::new(number.to_string()).style(CellStyle::GroupedDigits)
+}
+
 /// Block hash cell linking to the explorer's block page.
 pub fn block_hash_cell(
     number: BlockNumber,
@@ -231,7 +238,7 @@ pub fn transfer_row(
     };
     let mut row = vec![
         Cell::new(index.to_string()),
-        Cell::new(e.block_number.to_string()),
+        block_cell(e.block_number),
         Cell::new(format_timestamp(e.timestamp)),
         tx_cell(&e.tx_hash, ctx.base_url, HexDetail::Abbreviated),
         direction,

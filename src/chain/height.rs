@@ -26,6 +26,10 @@ use crate::arch::Position;
 /// / [`BlockNumber::checked_sub`]); the *distance* between two blocks is a
 /// `u64`, computed via [`BlockNumber::get`]. Convert to `u64` at the RPC
 /// and `SQLite` edges with [`BlockNumber::get`].
+///
+/// `Display` prints bare digits; the `{:#}` alternate form groups thousands
+/// with narrow no-break spaces (`22 123 456`) for human-facing output. Keep
+/// plain `{}` for URLs, tracing fields, and anything that parses.
 #[derive(
     Debug,
     Clone,
@@ -103,11 +107,36 @@ impl Sub<u64> for BlockNumber {
     }
 }
 
+/// U+202F NARROW NO-BREAK SPACE — the SI digit-group separator: visibly
+/// thinner than a space and never a line-break point.
+const NARROW_NBSP: char = '\u{202F}';
+
+/// `22 123 456` — digits grouped in threes, for the `{:#}` alternate form.
+fn group_digits(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() * 2);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(NARROW_NBSP);
+        }
+        out.push(c);
+    }
+    out
+}
+
 impl std::fmt::Display for BlockNumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Forward to the inner Display so formatter flags (width, alignment)
-        // survive — a plain `write!` would silently drop a `{:>12}` width.
-        std::fmt::Display::fmt(&self.0, f)
+        if f.alternate() {
+            // `{:#}` — the human form: thousands grouped with narrow
+            // no-break spaces. `pad` keeps fill/width/alignment working
+            // (string rules, so left-aligned by default).
+            f.pad(&group_digits(self.0))
+        } else {
+            // Forward to the inner Display so formatter flags (width,
+            // alignment) survive — a plain `write!` would silently drop a
+            // `{:>12}` width.
+            std::fmt::Display::fmt(&self.0, f)
+        }
     }
 }
 
@@ -167,9 +196,15 @@ impl BlockRange {
 }
 
 impl std::fmt::Display for BlockRange {
-    /// Inclusive `from..=to`, matching Rust range syntax.
+    /// Inclusive `from..=to`, matching Rust range syntax. The `{:#}`
+    /// alternate form groups each endpoint's thousands — see
+    /// [`BlockNumber`]'s `Display`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}..={}", self.from, self.to)
+        if f.alternate() {
+            write!(f, "{:#}..={:#}", self.from, self.to)
+        } else {
+            write!(f, "{}..={}", self.from, self.to)
+        }
     }
 }
 
@@ -329,6 +364,22 @@ mod tests {
         assert_eq!(
             chunk.align(BlockRange::from_u64(0, 0)),
             BlockRange::from_u64(0, 999)
+        );
+    }
+
+    #[test]
+    fn display_alternate_groups_thousands() {
+        let n = BlockNumber::new;
+        assert_eq!(format!("{}", n(22_123_456)), "22123456");
+        assert_eq!(format!("{:#}", n(0)), "0");
+        assert_eq!(format!("{:#}", n(999)), "999");
+        assert_eq!(format!("{:#}", n(1_000)), "1\u{202f}000");
+        assert_eq!(format!("{:#}", n(22_123_456)), "22\u{202f}123\u{202f}456");
+        // Width/alignment flags still apply to the grouped text.
+        assert_eq!(format!("{:>#9}", n(1_000)), "    1\u{202f}000");
+        assert_eq!(
+            format!("{:#}", BlockRange::from_u64(1_000, 2_999)),
+            "1\u{202f}000..=2\u{202f}999"
         );
     }
 

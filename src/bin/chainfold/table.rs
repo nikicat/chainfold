@@ -236,6 +236,10 @@ pub enum CellStyle {
     Default,
     Good,
     Bad,
+    /// A bare-digits integer: alternate 3-digit groups (counted from the
+    /// right) render dim, giving thousands grouping with no separator
+    /// characters — `Plain` stays the untouched digits.
+    GroupedDigits,
 }
 
 pub struct Cell {
@@ -538,12 +542,37 @@ fn styled(text: &str, style: CellStyle, mode: RenderMode, extra: &str) -> String
         CellStyle::Default => "",
         CellStyle::Good => GREEN,
         CellStyle::Bad => RED,
+        // Per-group spans, not one whole-cell wrap; `extra` never applies
+        // (only the header path passes it, always with `Default`).
+        CellStyle::GroupedDigits => return dim_alt_groups(text),
     };
     if code.is_empty() && extra.is_empty() {
         text.to_string()
     } else {
         sgr(text, &format!("{extra}{code}"))
     }
+}
+
+/// Dim every other 3-digit group, counted from the right, so the digits
+/// read as grouped without separator characters: `22123456` renders as
+/// `22` dim(`123`) `456`. The rightmost group is always normal, anchoring
+/// the pattern as numbers grow.
+fn dim_alt_groups(digits: &str) -> String {
+    let chars: Vec<char> = digits.chars().collect();
+    let mut out = String::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let rem = chars.len() - start;
+        let len = if rem.is_multiple_of(3) { 3 } else { rem % 3 };
+        let group: String = chars[start..start + len].iter().collect();
+        if ((rem - 1) / 3) % 2 == 1 {
+            out.push_str(&sgr(&group, DIM));
+        } else {
+            out.push_str(&group);
+        }
+        start += len;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -692,6 +721,36 @@ mod tests {
             out.rows(TableSpec::new(cols()).header_case(HeaderCase::AsIs))
                 .header(),
             "  id  gas used"
+        );
+    }
+
+    #[test]
+    fn grouped_digits_dim_alternate_groups() {
+        let cell = |s: &str| Cell::new(s).style(CellStyle::GroupedDigits);
+        // Plain is the untouched digits — machine-clean for pipes.
+        assert_eq!(
+            materialize(&cell("22123456"), RenderMode::Plain),
+            "22123456"
+        );
+        // Pretty dims every other group from the right; the rightmost
+        // group stays normal.
+        assert_eq!(
+            materialize(&cell("22123456"), RenderMode::Pretty),
+            format!("22{DIM}123{RESET}456")
+        );
+        assert_eq!(materialize(&cell("999"), RenderMode::Pretty), "999");
+        assert_eq!(
+            materialize(&cell("1000"), RenderMode::Pretty),
+            format!("{DIM}1{RESET}000")
+        );
+        assert_eq!(
+            materialize(&cell("18446744073709551615"), RenderMode::Pretty),
+            format!("18{DIM}446{RESET}744{DIM}073{RESET}709{DIM}551{RESET}615")
+        );
+        // The mode-parity invariant: Pretty strips back to Plain exactly.
+        assert_eq!(
+            strip_ansi(&materialize(&cell("22123456"), RenderMode::Pretty)),
+            "22123456"
         );
     }
 

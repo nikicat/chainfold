@@ -127,7 +127,7 @@ pub fn print_date_estimate(args: &WindowArgs, range: BlockRange) {
     let from_str = args.from.as_deref().expect("Dates arm has --from");
     let to_str = args.to.as_deref().unwrap_or("now");
     println!("  Date range: {from_str} → {to_str}");
-    println!("  Estimated blocks: {range}");
+    println!("  Estimated blocks: {range:#}");
 }
 
 /// Resolve the inclusive block window for the log commands (`events`,

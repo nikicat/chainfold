@@ -122,7 +122,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             )
             .await?;
             println!(
-                "  Opening balance before block {}: {} {meta_symbol}",
+                "  Opening balance before block {:#}: {} {meta_symbol}",
                 range.from,
                 fmt::format_amount_trim(balance, meta_decimals),
             );
@@ -131,7 +131,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
         if follow.is_follow() {
             let mut writer = out.rows(fmt::transfer_spec(&ctx, show_balance));
             writer.title(format!(
-                "{meta_symbol} transfers {range} · chain {chain_id}"
+                "{meta_symbol} transfers {range:#} · chain {chain_id}"
             ));
             writer.print_header();
             // Awaiting the merged stream demand-starts the head clock,
@@ -156,7 +156,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
             let mut stream = window.iter();
             let mut table = TableBuf::new(fmt::transfer_spec(&ctx, show_balance));
             table.title(format!(
-                "{meta_symbol} transfers {range} · chain {chain_id}"
+                "{meta_symbol} transfers {range:#} · chain {chain_id}"
             ));
             let mut count = 0;
             let mut limited = false;
@@ -200,7 +200,7 @@ pub async fn run<P: Provider<Ethereum> + Clone + Send + Sync + 'static>(
                 .await
                 {
                     Ok(onchain) if onchain != balance => println!(
-                        "warning: folded balance {} ≠ on-chain balance {} at block {} — \
+                        "warning: folded balance {} ≠ on-chain balance {} at block {:#} — \
                          {meta_symbol} moves balances outside Transfer events \
                          (mint/burn/rebase/fee-on-transfer?)",
                         fmt::format_amount_trim(balance, meta_decimals),
