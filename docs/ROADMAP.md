@@ -6,8 +6,9 @@
 > [`STYLE.md`](./STYLE.md); dev setup in [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 > Shipped work is not ledgered here — `git log` and `ARCHITECTURE.md` cover it.
 >
-> **Live agenda: Phase 7** (pruning + best/safe wiring) plus the deferrals and
-> backlog below. Run `cargo test --all-features` for the live test count —
+> **Live agenda: Phase 8** (adaptive provider fetch — scheduled ahead of
+> Phase 7), then **Phase 7** (pruning + best/safe wiring), plus the deferrals
+> and backlog below. Run `cargo test --all-features` for the live test count —
 > this file deliberately pins no number that goes stale.
 
 ---
@@ -25,7 +26,75 @@
 
 ---
 
-## Phase 7 — Pruning + best/safe wiring (next eligible)
+## Phase 8 — Adaptive provider fetch (next up — scheduled ahead of Phase 7)
+
+**Goal:** backfills complete against any provider's `eth_getLogs` limits
+(range width, log count, response size) with no per-provider tuning, at a
+near-optimal RPC call count; provider config shrinks to an API key.
+Detailed design (contracts, invariants, AIMD mechanics, adaptor trait,
+locked decisions): [`FETCH.md`](./FETCH.md).
+
+**Why it jumps the queue:** a range-capped provider today fails a backfill
+*permanently* — the gap fetch errors, the placeholder is dropped, and the
+retry refetches the same too-large range. The only lever is a global
+`--chunk-size` restart, and log-count caps are content-dependent so no one
+size works. Phase 7's memory growth only bites on indefinite follows; it
+keeps its number and follows immediately after.
+
+### Deliverables (build order)
+
+1. **Streaming page contract** — `src/range_index/spec.rs` + `gap_fill.rs`:
+   the `Fetcher` closure alias becomes a named `PageFetcher` trait returning
+   a stream of in-order contiguous pages; gap-fill finalizes/persists/
+   notifies per page; both families adapt as single-page streams. Pure
+   refactor, no behavior change ([`FETCH.md` §2](./FETCH.md)).
+2. **Slicing executor** — new `src/evm/chain/fetch.rs` + a shared
+   per-endpoint budget in `chain_provider.rs`: slice plan by AIMD working
+   size (halve once per generation, additive regrow), bounded-parallel
+   in-order release, rate-limit vs range-error separation, generic bisect
+   classifier; the fetcher's serial header fill goes bounded-parallel under
+   the same budget ([`FETCH.md` §3](./FETCH.md)).
+3. **Provider adaptors** — new `src/evm/provider/`: `ProviderAdaptor`
+   trait (classify / seeds / detect / endpoint), generic impl first, then
+   Alchemy, Infura, dRPC, GetBlock, Tenderly, … each with recorded-error
+   fixtures; redacting `ApiKey` newtype ([`FETCH.md` §4](./FETCH.md)).
+4. **CLI autoconfig** — `--api-key <provider>:<KEY>` (+ env vars),
+   chain-name resolution, http **and ws** endpoints from one key;
+   `--rpc-url` + generic adaptor stays first-class.
+
+### Test plan
+
+Unit over `MockSpec` (`src/range_index/`): `pages_finalize_incrementally`,
+`stream_error_keeps_prefix_suffix_stays_gap`,
+`waiter_advances_on_partial_delivery`. Executor over a stub transport:
+`halves_once_per_generation`, `rate_limit_shrinks_concurrency_not_size`,
+`releases_pages_in_order`, `budget_bounds_inflight_across_filters`.
+Adaptors: fixture-driven classifier tests per provider (recorded real
+error payloads), URL detect/endpoint round-trips, no key in
+`Debug`/tracing output.
+
+Integration (`tests/adaptive_fetch.rs`, new): an in-process mock JSON-RPC
+enforcing a range cap and a log-count cap — backfill completes; the
+RPC-count guard asserts a retry after a mid-gap failure fetches only the
+suffix; the first `items()` yield lands before the last slice completes.
+CLI: `evm events` against the capped mock; an `#[ignore]` smoke against a
+real keyed provider resolving endpoints from `--api-key`.
+
+### Acceptance
+
+- A backfill over a range-capped + log-count-capped endpoint completes
+  with no configuration, at a call count within ~2× the provider minimum.
+- Mid-gap failure persists the delivered prefix; the retry covers only the
+  suffix (span-guard enforced).
+- Cold `items()` over a large gap yields its first item after one slice,
+  not after the whole gap.
+- API keys never render in logs or errors.
+- `--api-key <provider>:<KEY>` alone (no URL) reaches both http and ws
+  endpoints on a supported chain.
+
+---
+
+## Phase 7 — Pruning + best/safe wiring (after Phase 8)
 
 **Goal:** bound long-running memory, and wire real `Best`/`Safe` producers
 into the head clock (both tiers currently mirror `Latest`).
@@ -183,6 +252,16 @@ holds them in place — only the linear-demo documentation value. Staged plan:
   module docs on the new subcommands (or doc examples on `AnchoredMatcher`).
 - Once empty: drop the `tabled` `[dev-dependencies]` entry.
 
+### Out-of-order page carving — Phase 8 follow-up
+
+Phase 8 ships in-order contiguous page release as the *intermediate*
+contract (user call, 2026-07-13: fine for now, not the long-term shape).
+The long-term direction relaxes `PageFetcher` invariant 1 to out-of-order
+pages, with the gap-fill carving the in-flight placeholder around each
+landed page — retains completed slices when an earlier slice fails, and
+unblocks waiters deep inside a gap as soon as their sub-range lands.
+Rationale and upgrade path: [`FETCH.md` §5 decision 1](./FETCH.md).
+
 ### Family-scoped reorg tombstones — blocks Phase 7 cleanup wiring
 
 `reorged_blocks` is shared by every family in the one cache file, and heights
@@ -280,6 +359,8 @@ table command.
   events delivered.
 - `bridge_explorer`/`bridge_matcher` run against real cross-chain setups with
   no bespoke per-bridge code beyond a `MatchFn`.
+- Backfills complete against any provider's range/log caps with an API key
+  as the only config (Phase 8).
 - Memory bounded under indefinite follow (Phase 7).
 - Usable as a dependency via: `Hist`, `HistStore`, `Position`, `Signal`,
   `Matcher` (+ `Reducer` once built), `merge_hist_stores`,

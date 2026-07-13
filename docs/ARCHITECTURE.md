@@ -10,8 +10,9 @@
 >
 > **Status:** The **library** and **CLI** surfaces are live over the shared
 > chain engine, with two concrete source families (EVM logs + blocks;
-> Bitcoin blocks); the **daemon** (`chainfoldd`) is planned. Phase 7 (memory
-> pruning + `best`/`safe` head producers) is the next eligible chunk.
+> Bitcoin blocks); the **daemon** (`chainfoldd`) is planned. Phase 8
+> (adaptive provider fetch — [`FETCH.md`](./FETCH.md)) is the next eligible
+> chunk, then Phase 7 (memory pruning + `best`/`safe` head producers).
 
 ---
 
