@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"project ID request rate exceeded","data":{"see":"https://docs.metamask.io/services/how-to/avoid-rate-limiting/","current_rps":13.333,"allowed_rps":10.0,"backoff_seconds":30.0}}}

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"query returned more than 10000 results. Try with this block range [0xCB3D, 0x7B737].","data":{"from":"0xCB3D","limit":10000,"to":"0x7B737"}}}

@@ -22,6 +22,13 @@ test:
 test-all:
     cargo test --all-features --locked -- --include-ignored
 
+# Regenerate the vendored provider network tables (src/evm/provider/data/)
+# from the upstream sources; review + commit the diff. Pairing subdomains
+# needs provider keys in .env (ALCHEMY_KEY or an Alchemy MAINNET_RPC_URL;
+# INFURA_KEY) — without them, unpaired rows are preserved as-is.
+refresh-provider-networks:
+    cargo test --features evm --lib regenerate_networks_table -- --ignored --nocapture
+
 # Coverage summary in the terminal.
 coverage:
     cargo llvm-cov --all-features --ignore-filename-regex '{{ ignore_regex }}'

@@ -185,7 +185,7 @@ transport-level batch failure couples many slices to one timeout — worse
 for the AIMD signal. If a target provider demonstrably rewards batches,
 the strategy drops in without touching the plan or the contract.
 
-## 4. Provider adaptors
+## 4. Provider adaptors — ✅ shipped (Generic + Alchemy + Infura)
 
 Per-provider adaptors (Alchemy, Infura, dRPC, GetBlock, Tenderly, …) plus
 a generic fallback, behind one trait. The intelligence lives here, not in
@@ -240,6 +240,46 @@ flag away.
 **Placement:** EVM-side (`src/evm/provider/`) for now. GetBlock and dRPC
 serve Bitcoin too, so the concept may move up a layer — but per
 concrete-first, not before a Bitcoin client needs it.
+
+**As-built notes (resolutions the design left open):**
+
+- **The generic adaptor classifies HTTP 429 as `RateLimited`** (and
+  401/403 as `Fatal`), refining "returns `Transient`" above: a 429 is
+  RFC-level protocol, not provider intelligence, and bisecting on a rate
+  limit is exactly what decision 3 forbids. Everything else stays
+  `Transient` → bisection discovery.
+- **`ApiKey` has no `Display` impl at all** — a `%key` field or stray
+  `format!` is a compile error, stronger than redaction. `Debug` prints
+  `ApiKey(…)`; the only exit is the loudly named `expose()`. No serde
+  either (a `Serialize` impl would be a standing leak). `redact_url`
+  splices a *detected* key out of a URL; unknown shapes degrade to the
+  transport's scheme+host+port rule.
+- **Keyed providers are the closed `ProviderKind` vocabulary** (the
+  `--api-key` prefix); the generic adaptor is deliberately not a variant —
+  no key, no URL shape. Adaptors are stateless unit structs behind
+  `&'static dyn`, no `Arc` ceremony. Infura's dual-use `-32005` is
+  disambiguated by payload: `data.backoff_seconds` → rate limit,
+  `data.from`/`to` (or the bracketed message hint) → result window.
+- **Fixture provenance:** `infura_32005_result_window.json` and
+  `alchemy_range_error_free_tier.json` are **verbatim recordings**
+  (2026-07-13, keyed oversized `eth_getLogs`); the recording pass caught a
+  real classifier gap — Alchemy's free tier rejects with `-32600` and a
+  different message than the documented `-32602`, so the classify arm
+  keys on the shared "this block range should work" phrase. Still
+  drafted-from-docs (recorded when provokable): `alchemy_429.json`,
+  `infura_32005_rate_limit.json`, and the documented `-32602` shape in
+  `alchemy_range_error.json`.
+- **Network tables are generated and vendored** (user call 2026-07-13):
+  no upstream publishes a complete chain-id↔subdomain pairing, so
+  `just refresh-provider-networks` regenerates
+  `src/evm/provider/data/*.rs` from the machine-readable sources (the
+  aa-sdk `chainRegistry.ts` id↔slug registry; the alchemy-sdk `Network`
+  enum; Infura's raw-markdown `endpoints.md`), completing id-less rows by
+  keyed `eth_chainId` probes, and the diff is committed like a lockfile.
+  Runtime resolution stays offline and the adaptors stay pure; per-source
+  and live-probe drift tests (`#[ignore]`) are the staleness tripwire.
+  Rows a run can't re-derive (no key / network disabled on the key) are
+  preserved, never silently dropped.
 
 ## 5. Decisions locked in
 

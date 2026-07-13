@@ -59,10 +59,12 @@ follows; it comes immediately after.
    in-order release, rate-limit vs range-error separation, generic bisect
    classifier; the fetcher's serial header fill goes bounded-parallel under
    the same budget ([`FETCH.md` §3](./FETCH.md)).
-3. **Provider adaptors** — new `src/evm/provider/`: `ProviderAdaptor`
-   trait (classify / seeds / detect / endpoint), generic impl first, then
-   Alchemy, Infura, dRPC, GetBlock, Tenderly, … each with recorded-error
-   fixtures; redacting `ApiKey` newtype ([`FETCH.md` §4](./FETCH.md)).
+3. ~~**Provider adaptors**~~ — ✅ shipped: `src/evm/provider/` with the
+   `ProviderAdaptor` trait, the no-`Display` `ApiKey`, the `ProviderKind`
+   registry, and Generic + Alchemy + Infura (as-built notes in
+   [`FETCH.md` §4](./FETCH.md)). Fixtures are drafted-and-flagged until
+   the `#[ignore]` smoke records real payloads (Infura needs an
+   `INFURA_KEY`); dRPC, GetBlock, Tenderly, … follow as recordings land.
 4. **CLI autoconfig** — `--api-key <provider>:<KEY>` (+ env vars),
    chain-name resolution, http **and ws** endpoints from one key;
    `--rpc-url` + generic adaptor stays first-class.

@@ -144,8 +144,10 @@ impl HttpTransport {
 /// The part of an RPC URL that is identity, not secret: scheme + host +
 /// (non-default) port. Path, query, and userinfo are dropped wholesale —
 /// hosted providers put API keys there, and guessing *which* segment is
-/// secret per provider is a losing game.
-fn redacted_endpoint(url: &reqwest::Url) -> String {
+/// secret per provider is a losing game. (The provider registry's
+/// [`redact_url`](crate::evm::provider::redact_url) splices out a
+/// *detected* key precisely; this is its unknown-provider fallback.)
+pub(crate) fn redacted_endpoint(url: &reqwest::Url) -> String {
     use std::fmt::Write;
 
     let mut endpoint = format!("{}://{}", url.scheme(), url.host_str().unwrap_or("-"));
